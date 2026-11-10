@@ -1,0 +1,29 @@
+# =============================================================================
+# Docker Compose — JETCYBERNET SmartOLT Web App (Terpisah dari Container DB)
+# - Port Aplikasi Web: 3004
+# - Koneksi PostgreSQL Eksternal/Host: localhost:5435 (user: likhin, pass: 11013009)
+# =============================================================================
+
+services:
+  smartolt-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jetcybernet-smartolt-app
+    restart: unless-stopped
+    # network_mode: "host" membuat container langsung menggunakan network localhost
+    # sehingga aplikasi jalan di port 3004 dan bisa langsung konek ke PostgreSQL localhost:5435
+    network_mode: "host"
+    environment:
+      - NODE_ENV=production
+      - PORT=3004
+      - PG_HOST=localhost
+      - PG_PORT=5435
+      - PG_USER=likhin
+      - PG_PASSWORD=11013009
+      - PG_DATABASE=smartolt_db
+      - SQLITE_PATH=/app/data/smartolt_live.sqlite
+    volumes:
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

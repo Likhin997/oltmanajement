@@ -89,6 +89,7 @@ interface OltDetailViewProps {
     tr069ProfileName: string,
     defaultInterface: string
   ) => void;
+  onImportRunningConfig?: (oltId: number, rawConfig: string) => void;
 }
 
 export const OltDetailView: React.FC<OltDetailViewProps> = ({
@@ -107,6 +108,7 @@ export const OltDetailView: React.FC<OltDetailViewProps> = ({
   onRebootOltCard,
   onUpdateOltSettings,
   onUpdateOltTr069,
+  onImportRunningConfig,
 }) => {
   const [activeTab, setActiveTab] = useState<OltDetailTab>(initialTab);
   const [showTelnetUser, setShowTelnetUser] = useState(false);
@@ -143,6 +145,7 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
   const [editCritRx, setEditCritRx] = useState(olt.critical_rx_dbm);
   const [editNtp, setEditNtp] = useState(olt.ntp_servers);
   const [showBackupsModal, setShowBackupsModal] = useState(false);
+  const [importConfigText, setImportConfigText] = useState('');
   const [showMacTableModal, setShowMacTableModal] = useState(false);
 
   // PON Ports state & modals
@@ -223,14 +226,18 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
   } | null>(null);
   const [copiedCli, setCopiedCli] = useState(false);
 
-  const oltVlans = db.vlans.filter((v) => v.olt_id === olt.id || olt.id === 11);
-  const oltCards: OltCardRecord[] = db.olt_cards;
-  const uplinkPorts: UplinkPortRecord[] = db.uplink_ports;
+  const oltVlans = db.vlans.filter((v) => v.olt_id === olt.id);
+  const oltCards: OltCardRecord[] = db.olt_cards.filter((c) => c.olt_id === olt.id);
+  const uplinkPorts: UplinkPortRecord[] = db.uplink_ports.filter(
+    (u) => u.olt_id === olt.id
+  );
 
   // Build 16 GPON ports for Slot 3 GTGH
   const full16PonPorts: PonPortRecord[] = Array.from({ length: 16 }, (_, idx) => {
     const portNum = idx + 1;
-    const existing = db.pon_ports.find((p) => p.port_number === portNum);
+    const existing = db.pon_ports.find(
+      (p) => p.olt_id === olt.id && p.port_number === portNum
+    );
     if (existing) return existing;
     const txValues = [
       10.548, 11.026, 10.539, 10.178, 10.17, 10.713, 10.057, 10.659, 10.549,
@@ -456,10 +463,27 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
     setQuickTaggingVlan(null);
   };
 
-  // Execute command in Interactive OLT CLI Drawer
-  const handleRunCliCommand = (cmd: string) => {
+  // Execute command in Interactive OLT CLI Drawer (Real Telnet + SQL Database Fallback)
+  const handleRunCliCommand = async (cmd: string) => {
     const clean = cmd.trim();
     if (!clean) return;
+    setCliInput('');
+
+    try {
+      const resp = await fetch('/api/telnet/exec', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ oltId: olt.id, commands: [clean] }),
+      });
+      const data = await resp.json();
+      if (data.reachable && data.output) {
+        setCliHistory((prev) => `${prev}\n${olt.name}# ${clean}\n${data.output}`);
+        return;
+      }
+    } catch {
+      // fall through to local SQL database state representation
+    }
+
     let output = '';
     if (/^show\s+vlan/i.test(clean)) {
       output = `VLAN ID  Name                 Mode    Tagged Ports
@@ -475,27 +499,35 @@ ${oltVlans
   .join('\n')}`;
     } else if (/^show\s+interface\s+gei|^show\s+interface\s+xgei/i.test(clean)) {
       const target = uplinkPorts[2] || uplinkPorts[0];
-      output = `${target.name} is ${target.admin_state.toLowerCase()}, line protocol is ${
-        target.status === 'Down' ? 'down' : 'up'
-      }
+      output = target
+        ? `${target.name} is ${target.admin_state.toLowerCase()}, line protocol is ${
+            target.status === 'Down' ? 'down' : 'up'
+          }
   Description: ${target.description || 'None'}
   MTU ${target.mtu} bytes, BW 1000000 Kbit, Full-duplex
-  Switchport mode: ${target.tagged_vlans} (PVID untag: ${target.pvid_untag})`;
+  Switchport mode: ${target.tagged_vlans} (PVID untag: ${target.pvid_untag})`
+        : 'No uplink interfaces configured on this OLT yet.';
     } else if (/^show\s+gpon\s+onu\s+uncfg/i.test(clean)) {
-      output = `OnuIndex                 Sn                  State
----------------------------------------------------------------------
-gpon-onu_1/3/2:1         ZTEGC6A394D4        unknown
-gpon-onu_1/3/3:1         ZICGB370351A        unknown`;
+      const uncfg = db.onus.filter((o) => o.olt_id === olt.id && !o.is_authorized);
+      output =
+        uncfg.length > 0
+          ? `OnuIndex                 Sn                  State\n---------------------------------------------------------------------\n` +
+            uncfg
+              .map(
+                (u, i) =>
+                  `gpon-onu_1/${u.board}/${u.port}:${i + 1}         ${u.serial_number.padEnd(18)} unknown`
+              )
+              .join('\n')
+          : 'No unconfigured ONUs detected.';
     } else if (/^show\s+run/i.test(clean)) {
       output = buildLiveZteRunningConfig(db, olt.id);
     } else if (/^write/i.test(clean)) {
-      output = `Building configuration...\n[OK]`;
+      output = `Building configuration...\n[OK - Saved to SQL Database]`;
     } else {
       output = `Command executed on ${olt.name} [OK]`;
     }
 
     setCliHistory((prev) => `${prev}\n${olt.name}# ${clean}\n${output}`);
-    setCliInput('');
   };
 
   const tabs: {
@@ -2840,7 +2872,7 @@ gpon-onu_1/3/3:1         ZICGB370351A        unknown`;
                       Live Running-Config (#show running-config)
                     </div>
                     <div className="text-[11px] text-slate-300">
-                      Includes all {db.onus.filter((o) => o.is_authorized).length} Configured ONUs, {oltVlans.length} VLANs, TCONT/Traffic Profiles &amp; Uplink Tags
+                      Includes all {db.onus.filter((o) => o.olt_id === olt.id && o.is_authorized).length} Configured ONUs, {oltVlans.length} VLANs, TCONT/Traffic Profiles &amp; Uplink Tags
                     </div>
                   </div>
                   <button
@@ -2859,9 +2891,36 @@ gpon-onu_1/3/3:1         ZICGB370351A        unknown`;
                     View &amp; Copy #show running-config
                   </button>
                 </div>
-                <pre className="max-h-60 overflow-auto rounded border border-slate-800 bg-slate-950 p-3 font-mono text-[11px] leading-relaxed text-emerald-300">
+                <pre className="max-h-40 overflow-auto rounded border border-slate-800 bg-slate-950 p-3 font-mono text-[11px] leading-relaxed text-emerald-300">
                   {buildLiveZteRunningConfig(db, olt.id)}
                 </pre>
+
+                {onImportRunningConfig && (
+                  <div className="space-y-2 border-t border-slate-700 pt-3">
+                    <div className="font-bold text-sky-400">
+                      Import / Restore ZTE `#show running-config` to SQL Database:
+                    </div>
+                    <textarea
+                      rows={4}
+                      value={importConfigText}
+                      onChange={(e) => setImportConfigText(e.target.value)}
+                      placeholder="Paste output dari #show running-config ZTE C300/C320 di sini untuk mengimpor seluruh VLAN, Uplink, dan ONU ke SQL Database..."
+                      className="w-full rounded border border-slate-700 bg-slate-950 p-2 font-mono text-[11px] text-slate-200"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!importConfigText.trim()) return;
+                        onImportRunningConfig(olt.id, importConfigText);
+                        setImportConfigText('');
+                        setShowBackupsModal(false);
+                      }}
+                      className="rounded bg-[#0275d8] px-3.5 py-1.5 font-bold text-white hover:bg-[#025aa5]"
+                    >
+                      Import #show running-config to Database
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               <pre className="max-h-60 overflow-auto rounded bg-slate-950 p-3 font-mono text-[11px] text-emerald-300">

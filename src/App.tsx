@@ -66,33 +66,85 @@ type NavigationView =
   | 'GRAPHS'
   | 'SOURCE_CODE';
 
-const STORAGE_KEY = 'smartolt_jetcybernet_db_v4_running_config';
+const STORAGE_KEY = 'smartolt_jetcybernet_live_sql_cache';
 
 export default function App() {
-  const [db, setDb] = useState<SmartOltDatabaseState>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch {
-      // ignore storage error
-    }
-    return INITIAL_DB_STATE;
+  const [db, setDb] = useState<SmartOltDatabaseState>(INITIAL_DB_STATE);
+  const [dbLoaded, setDbLoaded] = useState(false);
+  const [dbMeta, setDbMeta] = useState<{
+    dbEngine: string;
+    pgConnected?: boolean;
+    pgConfig?: {
+      host: string;
+      port: number;
+      user: string;
+      database: string;
+    };
+    pgLastError?: string | null;
+    dockerPort: number;
+  }>({
+    dbEngine: 'PostgreSQL (localhost:5435)',
+    pgConnected: false,
+    pgConfig: {
+      host: 'localhost',
+      port: 5435,
+      user: 'likhin',
+      database: 'smartolt_db',
+    },
+    dockerPort: 3004,
   });
+  const [showPgConfigModal, setShowPgConfigModal] = useState(false);
+  const [pgHost, setPgHost] = useState('localhost');
+  const [pgPort, setPgPort] = useState(5435);
+  const [pgUser, setPgUser] = useState('likhin');
+  const [pgPassword, setPgPassword] = useState('11013009');
+  const [pgDatabase, setPgDatabase] = useState('smartolt_db');
+  const [pgTesting, setPgTesting] = useState(false);
+  const [showAddUncfgModal, setShowAddUncfgModal] = useState(false);
+  const [manualUncfgOltId, setManualUncfgOltId] = useState<number>(1);
+  const [manualUncfgPort, setManualUncfgPort] = useState<number>(1);
+  const [manualUncfgSn, setManualUncfgSn] = useState<string>('ZTEGC6A394D4');
+  const [manualUncfgType, setManualUncfgType] = useState<string>('ALL');
 
+  // 1. Load live state from Backend SQL Database (/api/state) on mount
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-    } catch {
-      // ignore storage error
-    }
-  }, [db]);
+    let mounted = true;
+    fetch('/api/state')
+      .then((r) => r.json())
+      .then((data) => {
+        if (!mounted) return;
+        if (data && data.state) {
+          setDb(data.state);
+        }
+        if (data && data.meta) {
+          setDbMeta(data.meta);
+        }
+        setDbLoaded(true);
+      })
+      .catch(() => {
+        setDbLoaded(true);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // 2. Sync state changes to Backend SQL Database (/api/state/sync)
+  useEffect(() => {
+    if (!dbLoaded) return;
+    fetch('/api/state/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: db }),
+    }).catch(() => {
+      // ignore transient network error
+    });
+  }, [db, dbLoaded]);
 
   const [activeView, setActiveView] = useState<NavigationView>('DASHBOARD');
-  const [selectedOltId, setSelectedOltId] = useState<number>(11);
+  const [selectedOltId, setSelectedOltId] = useState<number>(1);
   const [initialOltTab, setInitialOltTab] = useState<OltDetailTab>('OLT_DETAILS');
-  const [selectedOnuId, setSelectedOnuId] = useState<number>(2); // RATMI default
+  const [selectedOnuId, setSelectedOnuId] = useState<number>(1);
   const [authorizingOnu, setAuthorizingOnu] = useState<OnuRecord | null>(null);
   const [updatingModeOnu, setUpdatingModeOnu] = useState<OnuRecord | null>(null);
 
@@ -160,6 +212,25 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
   const unconfiguredOnus = db.onus.filter((o) => !o.is_authorized);
   const configuredOnus = db.onus.filter((o) => o.is_authorized);
+  const onlineOnus = configuredOnus.filter((o) => o.phase_state === 'working');
+  const losOnus = configuredOnus.filter((o) => o.phase_state === 'LOS');
+  const pwrFailOnus = configuredOnus.filter((o) => o.phase_state === 'DyingGasp');
+  const otherOfflineOnus = configuredOnus.filter(
+    (o) =>
+      o.phase_state !== 'working' &&
+      o.phase_state !== 'LOS' &&
+      o.phase_state !== 'DyingGasp'
+  );
+  const totalOfflineCount =
+    losOnus.length + pwrFailOnus.length + otherOfflineOnus.length;
+  const warningSignalOnus = configuredOnus.filter(
+    (o) => o.onu_rx_dbm !== null && o.onu_rx_dbm <= -27.0 && o.onu_rx_dbm > -30.0
+  );
+  const criticalSignalOnus = configuredOnus.filter(
+    (o) => o.onu_rx_dbm !== null && o.onu_rx_dbm <= -30.0
+  );
+  const totalLowSignalCount =
+    warningSignalOnus.length + criticalSignalOnus.length;
 
   // Filtered Configured ONUs
   const filteredConfiguredOnus = configuredOnus.filter((o) => {
@@ -601,16 +672,34 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             </div>
           </div>
 
-          {/* Right Utility Icons matching Screenshots */}
+          {/* Right Utility Icons + Live PostgreSQL (:5435) & Docker Port 3004 Indicator */}
           <div className="flex items-center gap-3 text-slate-200">
             <button
               type="button"
-              onClick={() =>
+              onClick={() => setShowPgConfigModal(true)}
+              title="Click to configure/test PostgreSQL connection (localhost:5435, user: likhin)"
+              className="hidden sm:inline-flex items-center gap-1.5 rounded border border-sky-500/40 bg-sky-950/50 px-2.5 py-1 font-mono text-[11px] font-semibold text-sky-300 hover:bg-sky-900/60"
+            >
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  dbMeta.pgConnected ? 'bg-emerald-400' : 'bg-amber-400'
+                }`}
+              />
+              PG: {pgUser}@{pgHost}:{pgPort} · Docker :3004
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                await fetch('/api/state/sync', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ state: db }),
+                });
                 showToast(
-                  'Configuration saved to ZTE OLT NVRAM (`write` executed on 5/5 OLTs).'
-                )
-              }
-              title="Save OLT running-config to NVRAM"
+                  `State synced to ${dbMeta.dbEngine} Database (${db.olts.length} OLTs, ${configuredOnus.length} ONUs).`
+                );
+              }}
+              title="Save state to SQL Database & OLT NVRAM"
               className="hover:text-white"
             >
               <Save className="h-4 w-4" />
@@ -626,26 +715,31 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             <button
               type="button"
               onClick={() => setActiveView('SOURCE_CODE')}
-              title="View Complete SQL Schema & Node.js Telnet/SSH Backend Code"
+              title="View Complete SQL Schema, Dockerfile (Port 3004) & Backend Code"
               className="flex items-center gap-1 rounded bg-emerald-600/20 px-2 py-1 text-[11px] font-semibold text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/30"
             >
               <FileCode className="h-3.5 w-3.5" />
-              SQL & Code
+              Docker :3004 &amp; SQL
             </button>
             <button type="button" className="hover:text-white" title="Admin Account">
               <User className="h-4 w-4" />
             </button>
             <button
               type="button"
-              onClick={() => {
+              onClick={async () => {
                 localStorage.removeItem(STORAGE_KEY);
-                setDb(INITIAL_DB_STATE);
-                showToast('Data di-reset ke state default JETCYBERNET.');
+                const resp = await fetch('/api/database/reset', {
+                  method: 'POST',
+                });
+                const data = await resp.json();
+                if (data.state) setDb(data.state);
+                showToast('Database SQL berhasil dikosongkan (0 OLT, 0 ONU).');
               }}
-              className="flex items-center gap-1 text-xs font-medium hover:text-white"
+              title="Reset / Empty SQL Database"
+              className="flex items-center gap-1 text-xs font-medium text-red-300 hover:text-red-200"
             >
               <Power className="h-3.5 w-3.5" />
-              Log out
+              Reset DB
             </button>
           </div>
         </div>
@@ -688,7 +782,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </div>
               </div>
 
-              {/* Card 2: Online (Green) */}
+              {/* Card 2: Online (Green — 100% Live from SQL Database) */}
               <div
                 onClick={() => {
                   setFilterSignalLevel('ALL');
@@ -698,30 +792,34 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               >
                 <div className="flex items-start justify-between">
                   <span className="text-sm font-medium">Online</span>
-                  <span className="text-3xl font-bold leading-none">2396</span>
+                  <span className="text-3xl font-bold leading-none">
+                    {onlineOnus.length}
+                  </span>
                 </div>
                 <div className="mt-4 flex items-center justify-end border-t border-white/20 pt-1.5 text-xs">
-                  <span>Total authorized: 2526</span>
+                  <span>Total authorized: {configuredOnus.length}</span>
                 </div>
               </div>
 
-              {/* Card 3: Total offline (Dark Slate) */}
+              {/* Card 3: Total offline (Dark Slate — 100% Live from SQL Database) */}
               <div
                 onClick={() => setActiveView('CONFIGURED')}
                 className="cursor-pointer rounded-md bg-[#343a40] px-4 py-3 text-white shadow-lg transition hover:brightness-110"
               >
                 <div className="flex items-start justify-between">
                   <span className="text-sm font-medium">Total offline</span>
-                  <span className="text-3xl font-bold leading-none">130</span>
+                  <span className="text-3xl font-bold leading-none">
+                    {totalOfflineCount}
+                  </span>
                 </div>
                 <div className="mt-4 flex items-center justify-end gap-3 border-t border-white/20 pt-1.5 text-xs">
-                  <span>PwrFail: 88</span>
-                  <span>LoS: 30</span>
-                  <span>N/A: 12</span>
+                  <span>PwrFail: {pwrFailOnus.length}</span>
+                  <span>LoS: {losOnus.length}</span>
+                  <span>N/A: {otherOfflineOnus.length}</span>
                 </div>
               </div>
 
-              {/* Card 4: Low signals (Orange) */}
+              {/* Card 4: Low signals (Orange — 100% Live from SQL Database) */}
               <div
                 onClick={() => {
                   setFilterSignalLevel('CRITICAL');
@@ -731,16 +829,18 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               >
                 <div className="flex items-start justify-between">
                   <span className="text-sm font-medium">Low signals</span>
-                  <span className="text-3xl font-bold leading-none">606</span>
+                  <span className="text-3xl font-bold leading-none">
+                    {totalLowSignalCount}
+                  </span>
                 </div>
                 <div className="mt-4 flex items-center justify-end gap-3 border-t border-white/20 pt-1.5 text-xs">
-                  <span>Warning: 318</span>
-                  <span>Critical: 288</span>
+                  <span>Warning: {warningSignalOnus.length}</span>
+                  <span>Critical: {criticalSignalOnus.length}</span>
                 </div>
               </div>
             </div>
 
-            {/* Middle Row: Network status chart + OLTs 5/5 online */}
+            {/* Middle Row: Network status chart + OLTs online */}
             <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
               {/* Network status area graph */}
               <div className="rounded border border-[#1e3a5f] bg-[#0b192c]/90 p-4 lg:col-span-6">
@@ -761,7 +861,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
                 <div className="rounded border border-slate-800 bg-[#05080f] p-3">
                   <div className="text-center font-mono text-[11px] font-bold text-slate-200">
-                    Network status (last 24 hours) — max: 2.51K ONUs
+                    Network status (live SQL telemetry) — total: {configuredOnus.length} ONUs
                   </div>
                   <div className="mt-2 flex h-32 items-end gap-0.5 border-b border-l border-slate-700 pt-4">
                     {Array.from({ length: 36 }, (_, i) => (
@@ -769,200 +869,216 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         key={i}
                         className="flex h-full flex-1 flex-col justify-end"
                       >
-                        <div className="h-2 w-full bg-amber-500/80" />
-                        <div className="h-24 w-full bg-emerald-500/80" />
+                        <div
+                          className="w-full bg-amber-500/80"
+                          style={{
+                            height: totalLowSignalCount > 0 ? '12%' : '0%',
+                          }}
+                        />
+                        <div
+                          className="w-full bg-emerald-500/80"
+                          style={{
+                            height: onlineOnus.length > 0 ? '75%' : '4%',
+                          }}
+                        />
                       </div>
                     ))}
                   </div>
                   <div className="mt-2 flex flex-wrap items-center justify-between font-mono text-[10px] text-slate-300">
                     <span className="text-emerald-400">
-                      ■ Good signal: 1.79K avg
+                      ■ Online: {onlineOnus.length}
                     </span>
-                    <span className="text-amber-400">■ Low signal: 606</span>
-                    <span className="text-red-400">■ LOS: 30</span>
-                    <span className="text-sky-400">■ Power fail: 88</span>
+                    <span className="text-amber-400">
+                      ■ Low signal: {totalLowSignalCount}
+                    </span>
+                    <span className="text-red-400">■ LOS: {losOnus.length}</span>
+                    <span className="text-sky-400">
+                      ■ Power fail: {pwrFailOnus.length}
+                    </span>
                   </div>
                 </div>
               </div>
 
-              {/* OLTs 5/5 online list */}
+              {/* OLTs online list (Zero Dummy Data) */}
               <div className="rounded border border-[#1e3a5f] bg-[#0b192c]/90 p-4 lg:col-span-6">
-                <div className="mb-2 flex items-center gap-2">
-                  <span className="text-sm font-bold text-white">OLTs</span>
-                  <span className="rounded bg-[#28a745] px-2 py-0.5 text-[11px] font-bold text-white">
-                    5/5 online
-                  </span>
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold text-white">OLTs</span>
+                    <span className="rounded bg-[#28a745] px-2 py-0.5 text-[11px] font-bold text-white">
+                      {db.olts.filter((o) => o.status === 'ONLINE').length}/
+                      {db.olts.length} online
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveView('ADD_OLT')}
+                    className="flex items-center gap-1 rounded bg-[#5cb85c] px-2.5 py-1 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Add OLT
+                  </button>
                 </div>
 
-                <div className="divide-y divide-[#1e3a5f]/70 text-xs">
-                  {db.olts.map((o) => (
-                    <div
-                      key={o.id}
-                      className="flex flex-wrap items-center justify-between py-2 hover:bg-[#132842]/50 px-2 rounded"
+                {db.olts.length === 0 ? (
+                  <div className="rounded border border-dashed border-[#284870] bg-[#0c1c30]/60 p-6 text-center text-xs text-slate-300">
+                    <p className="font-semibold text-white">
+                      Belum ada OLT terdaftar di Database ({dbMeta.dbEngine}).
+                    </p>
+                    <p className="mt-1 text-slate-400">
+                      Klik tombol <strong>+ Add OLT</strong> untuk menghubungkan OLT baru atau mengimpor <code>#show running-config</code>.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setActiveView('ADD_OLT')}
+                      className="mt-3 inline-flex items-center gap-1.5 rounded bg-[#0275d8] px-4 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
                     >
-                      <div className="flex items-center gap-2">
-                        <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedOltId(o.id);
-                            setInitialOltTab('OLT_DETAILS');
-                            setActiveView('OLT_DETAIL');
-                          }}
-                          className="font-medium text-sky-400 hover:underline"
-                        >
-                          {o.id} - {o.name}
-                        </button>
+                      <Plus className="h-3.5 w-3.5" />
+                      Add Your First OLT
+                    </button>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-[#1e3a5f]/70 text-xs">
+                    {db.olts.map((o) => (
+                      <div
+                        key={o.id}
+                        className="flex flex-wrap items-center justify-between py-2 hover:bg-[#132842]/50 px-2 rounded"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedOltId(o.id);
+                              setInitialOltTab('OLT_DETAILS');
+                              setActiveView('OLT_DETAIL');
+                            }}
+                            className="font-medium text-sky-400 hover:underline"
+                          >
+                            {o.id} - {o.name} ({o.ip_address})
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-4 font-mono text-xs">
+                          <span className="text-slate-300">
+                            Uptime: {o.uptime_str},
+                          </span>
+                          <span
+                            className={
+                              o.temperature_c >= 50
+                                ? 'font-bold text-red-400'
+                                : o.temperature_c >= 42
+                                ? 'font-bold text-amber-400'
+                                : 'font-bold text-emerald-400'
+                            }
+                          >
+                            {o.temperature_c}°C
+                          </span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-4 font-mono text-xs">
-                        <span className="text-slate-300">
-                          Uptime: {o.uptime_str},
-                        </span>
-                        <span
-                          className={
-                            o.temperature_c >= 50
-                              ? 'font-bold text-red-400'
-                              : o.temperature_c >= 42
-                              ? 'font-bold text-amber-400'
-                              : 'font-bold text-emerald-400'
-                          }
-                        >
-                          {o.temperature_c}°C
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 
             {/* Bottom Row: PON outage accordions + Info activity feed */}
             <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-              {/* PON outage */}
+              {/* PON outage (Live from SQL Database) */}
               <div className="space-y-2 lg:col-span-6">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-bold text-white">PON outage</span>
                   <span className="text-xs text-slate-400">
-                    Click category to expand
+                    Live optical monitoring
                   </span>
                 </div>
 
-                <div className="rounded border border-[#1e3a5f] bg-[#13263e] px-3 py-2 text-xs font-semibold text-white">
-                  VIP affected
-                </div>
-
-                {/* Expanded Signal variations box matching Screenshot image_eaabc7d1.png */}
                 <div className="overflow-hidden rounded border border-[#1e3a5f] bg-[#0c1c30]">
                   <div className="flex items-center justify-between bg-[#162b46] px-3 py-2 text-xs font-semibold text-white">
-                    <span>Signal variations</span>
+                    <span>Signal variations &amp; LOS</span>
                     <div className="flex items-center gap-1.5">
-                      <span className="rounded bg-slate-600 px-1.5 py-0.5 text-[10px]">
-                        4 PONs
-                      </span>
                       <span className="rounded bg-red-600 px-1.5 py-0.5 text-[10px]">
-                        4 Critical
+                        {criticalSignalOnus.length + losOnus.length} Critical
                       </span>
                     </div>
                   </div>
-                  <table className="w-full text-left text-xs">
-                    <thead className="border-b border-[#1e3a5f] text-slate-300">
-                      <tr>
-                        <th className="px-3 py-1.5">OLT</th>
-                        <th className="px-3 py-1.5">PON</th>
-                        <th className="px-3 py-1.5">Affected</th>
-                        <th className="px-3 py-1.5">Variation</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#1e3a5f]/50">
-                      <tr>
-                        <td className="px-3 py-1.5">2 - POP KEBAYORAN LAMA C320</td>
-                        <td className="px-3 py-1.5 text-sky-400">
-                          1/2/2: RK 01 - KBY LAMA
-                        </td>
-                        <td className="px-3 py-1.5 text-sky-400">21 / 31 ONUs</td>
-                        <td className="px-3 py-1.5">
-                          <span className="rounded bg-red-600 px-1.5 py-0.5 font-mono text-[10px] font-bold text-white">
-                            -4.5 dB
-                          </span>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-3 py-1.5">5 - POP KARTENG C300</td>
-                        <td className="px-3 py-1.5 text-sky-400">
-                          1/3/13: RK 13 - METRO PERMATA
-                        </td>
-                        <td className="px-3 py-1.5 text-sky-400">27 / 32 ONUs</td>
-                        <td className="px-3 py-1.5">
-                          <span className="rounded bg-red-600 px-1.5 py-0.5 font-mono text-[10px] font-bold text-white">
-                            +2.4 dB
-                          </span>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-3 py-1.5">5 - POP KARTENG C300</td>
-                        <td className="px-3 py-1.5 text-sky-400">
-                          1/4/3: RK 09 - KARANG TIMUR
-                        </td>
-                        <td className="px-3 py-1.5 text-sky-400">28 / 38 ONUs</td>
-                        <td className="px-3 py-1.5">
-                          <span className="rounded bg-red-600 px-1.5 py-0.5 font-mono text-[10px] font-bold text-white">
-                            -2.9 dB
-                          </span>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-3 py-1.5">8 - POP BOGOR C300 MINI</td>
-                        <td className="px-3 py-1.5 text-sky-400">
-                          1/2/6: RK 06 - SINAR SARI
-                        </td>
-                        <td className="px-3 py-1.5 text-sky-400">12 / 14 ONUs</td>
-                        <td className="px-3 py-1.5">
-                          <span className="rounded bg-red-600 px-1.5 py-0.5 font-mono text-[10px] font-bold text-white">
-                            -5.5 dB
-                          </span>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-
-                <div className="rounded border border-[#1e3a5f] bg-[#13263e] px-3 py-2 text-xs font-semibold text-white">
-                  Partial LOS
-                </div>
-                <div className="rounded border border-[#1e3a5f] bg-[#13263e] px-3 py-2 text-xs font-semibold text-white">
-                  Full PON LOS
-                </div>
-                <div className="rounded border border-[#1e3a5f] bg-[#13263e] px-3 py-2 text-xs font-semibold text-white">
-                  Power fail
+                  {criticalSignalOnus.length === 0 && losOnus.length === 0 ? (
+                    <div className="px-3 py-4 text-center text-xs text-slate-400">
+                      Tidak ada PON outage atau sinyal kritis pada database saat ini.
+                    </div>
+                  ) : (
+                    <table className="w-full text-left text-xs">
+                      <thead className="border-b border-[#1e3a5f] text-slate-300">
+                        <tr>
+                          <th className="px-3 py-1.5">OLT</th>
+                          <th className="px-3 py-1.5">ONU / PON</th>
+                          <th className="px-3 py-1.5">SN</th>
+                          <th className="px-3 py-1.5">Signal / State</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#1e3a5f]/50">
+                        {[...losOnus, ...criticalSignalOnus]
+                          .slice(0, 6)
+                          .map((item) => {
+                            const o = db.olts.find((x) => x.id === item.olt_id);
+                            return (
+                              <tr key={item.id}>
+                                <td className="px-3 py-1.5">
+                                  {o ? `${o.id} - ${o.name}` : `OLT ${item.olt_id}`}
+                                </td>
+                                <td className="px-3 py-1.5 text-sky-400">
+                                  1/{item.board}/{item.port}:{item.onu_index} (
+                                  {item.customer_name})
+                                </td>
+                                <td className="px-3 py-1.5 font-mono">
+                                  {item.serial_number}
+                                </td>
+                                <td className="px-3 py-1.5">
+                                  <span className="rounded bg-red-600 px-1.5 py-0.5 font-mono text-[10px] font-bold text-white">
+                                    {item.phase_state === 'LOS'
+                                      ? 'LOS'
+                                      : `${item.onu_rx_dbm} dBm`}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
               </div>
 
-              {/* Info activity feed */}
+              {/* Info activity feed (Live from SQL Database) */}
               <div className="space-y-2 lg:col-span-6">
                 <div className="text-sm font-bold text-white">Info</div>
                 <div className="divide-y divide-[#1e3a5f]/60 rounded border border-[#1e3a5f] bg-[#0c1c30]/90 text-xs">
-                  {db.provisioning_logs.slice(0, 6).map((log) => {
-                    const logOlt = db.olts.find((o) => o.id === log.olt_id);
-                    return (
-                      <div
-                        key={log.id}
-                        className="flex flex-wrap items-center justify-between px-3 py-2.5 hover:bg-[#132842]/50"
-                      >
-                        <div>
-                          <span className="font-mono text-sky-400">
-                            {log.summary_text ||
-                              `${log.interface_target} ${log.action_type}`}
-                          </span>{' '}
-                          <span className="text-slate-300">
-                            on {log.olt_id} - {logOlt?.name || 'POP BOGOR'}
-                          </span>
+                  {db.provisioning_logs.length === 0 ? (
+                    <div className="px-3 py-4 text-center text-slate-400">
+                      Belum ada riwayat aktivitas provisioning di database.
+                    </div>
+                  ) : (
+                    db.provisioning_logs.slice(0, 6).map((log) => {
+                      const logOlt = db.olts.find((o) => o.id === log.olt_id);
+                      return (
+                        <div
+                          key={log.id}
+                          className="flex flex-wrap items-center justify-between px-3 py-2.5 hover:bg-[#132842]/50"
+                        >
+                          <div>
+                            <span className="font-mono text-sky-400">
+                              {log.summary_text ||
+                                `${log.interface_target} ${log.action_type}`}
+                            </span>{' '}
+                            <span className="text-slate-300">
+                              on {log.olt_id} - {logOlt?.name || 'OLT'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-400">
+                            by {log.executed_by} · {log.created_at}
+                          </div>
                         </div>
-                        <div className="text-[11px] text-slate-400">
-                          by {log.executed_by} · {log.created_at}
-                        </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })
+                  )}
                 </div>
               </div>
             </div>
@@ -970,16 +1086,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         )}
 
         {/* ===================================================================
-            VIEW 2: UNCONFIGURED ONUS (Exact match to Screenshot _C1DBB18F)
+            VIEW 2: UNCONFIGURED ONUS (Live Telnet Poll & Manual SN Registration)
            =================================================================== */}
         {activeView === 'UNCONFIGURED' && (
           <div className="space-y-5 text-xs">
             {/* Top Row: OLT Selector + Refresh on Left, Auto actions on Right */}
             <div className="flex flex-wrap items-start justify-between gap-4">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="font-bold text-white">OLT</span>
                 <select className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white">
-                  <option>All selected (5)</option>
+                  <option>All selected ({db.olts.length})</option>
                   {db.olts.map((o) => (
                     <option key={o.id} value={o.id}>
                       {o.id} - {o.name}
@@ -988,73 +1104,54 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </select>
                 <button
                   type="button"
-                  onClick={() => {
-                    if (unconfiguredOnus.length === 0) {
-                      const randomHex = Math.floor(1000 + Math.random() * 9000)
-                        .toString(16)
-                        .toUpperCase();
-                      const discoveredOnu: OnuRecord = {
-                        id: Date.now(),
-                        olt_id: 11,
-                        pon_port_id: 2,
-                        board: 3,
-                        port: 2,
-                        onu_index: null,
-                        serial_number: `ZTEGC6A3${randomHex}`,
-                        onu_type: 'F609V3.0',
-                        is_authorized: false,
-                        customer_name: null,
-                        address: null,
-                        external_id: `ZTEGC6A3${randomHex}`,
-                        zone_id: 1,
-                        odb_id: 1,
-                        odb_port: null,
-                        vlan_id: 1,
-                        speed_profile_id: 1,
-                        tcont_profile_id: 1,
-                        onu_mode: 'Routing',
-                        wan_mode: 'PPPOE',
-                        config_method: 'OMCI',
-                        wan_remote_access: 'Enabled from everywhere in the internet',
-                        wan_remote_allowed_subnet: '0.0.0.0/0',
-                        tr069_profile_id: 1,
-                        tr069_status: 'PENDING_INFORM',
-                        tr069_last_inform: null,
-                        wifi_ssid: null,
-                        wifi_password: null,
-                        pppoe_username: null,
-                        pppoe_password: null,
-                        hotspot_bridge_vlan: null,
-                        admin_state: 'ENABLED',
-                        phase_state: 'Unconfigured',
-                        onu_rx_dbm: -20.8,
-                        onu_tx_dbm: 2.35,
-                        olt_rx_dbm: -23.9,
-                        distance_m: 780,
-                        temperature_c: 41.2,
-                        ip_address: null,
-                        firmware_ver: 'V5.2.10P4T2',
-                        detected_ago: 'Just now',
-                        last_online_at: null,
-                        last_offline_reason: 'Waiting Authorization',
-                      };
-                      setDb((prev) => ({
-                        ...prev,
-                        onus: [...prev.onus, discoveredOnu],
-                      }));
-                      showToast(
-                        `Polled show gpon onu uncfg: 1 SN baru (${discoveredOnu.serial_number}) terdeteksi di 11 - POP LEBAK C300 MINI!`
-                      );
-                    } else {
-                      showToast(
-                        `Polled show gpon onu uncfg across all ${db.olts.length} OLTs: ${unconfiguredOnus.length} ONU waiting authorization.`
-                      );
+                  onClick={async () => {
+                    if (db.olts.length === 0) {
+                      showToast('Tambahkan OLT terlebih dahulu di menu Settings -> OLTs.');
+                      return;
                     }
+                    let totalFound = 0;
+                    for (const o of db.olts) {
+                      try {
+                        const resp = await fetch(`/api/olts/${o.id}/poll-uncfg`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({}),
+                        });
+                        const data = await resp.json();
+                        if (data.state) setDb(data.state);
+                        totalFound += data.discoveredCount || 0;
+                      } catch {
+                        // ignore
+                      }
+                    }
+                    showToast(
+                      `Live Telnet Poll (show gpon onu uncfg) selesai: ${
+                        totalFound > 0
+                          ? `${totalFound} SN baru ditemukan!`
+                          : `${unconfiguredOnus.length} ONU menunggu otorisasi.`
+                      }`
+                    );
                   }}
                   className="flex items-center gap-1 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
-                  Refresh
+                  Poll OLT (Telnet)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (db.olts.length === 0) {
+                      showToast('Tambahkan OLT terlebih dahulu sebelum mendeteksi ONU.');
+                      setActiveView('ADD_OLT');
+                      return;
+                    }
+                    setManualUncfgOltId(db.olts[0].id);
+                    setShowAddUncfgModal(true);
+                  }}
+                  className="flex items-center gap-1 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Register Unconfigured SN
                 </button>
               </div>
 
@@ -1382,7 +1479,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </span>
               </div>
               <div>
-                1-{filteredConfiguredOnus.length} ONUs of 2526 displayed.
+                {filteredConfiguredOnus.length} of {configuredOnus.length} ONUs displayed.
               </div>
             </div>
 
@@ -1725,12 +1822,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           <button
                             type="button"
                             onClick={() => {
-                              if (db.olts.length <= 1) return;
                               setDb((prev) => ({
                                 ...prev,
                                 olts: prev.olts.filter((item) => item.id !== o.id),
+                                olt_cards: prev.olt_cards.filter((c) => c.olt_id !== o.id),
+                                pon_ports: prev.pon_ports.filter((p) => p.olt_id !== o.id),
+                                uplink_ports: prev.uplink_ports.filter((u) => u.olt_id !== o.id),
+                                vlans: prev.vlans.filter((v) => v.olt_id !== o.id),
+                                onus: prev.onus.filter((u) => u.olt_id !== o.id),
                               }));
-                              showToast(`OLT ${o.name} dihapus.`);
+                              showToast(`OLT ${o.name} beserta datanya dihapus dari Database.`);
                             }}
                             className="rounded bg-[#d9534f] p-1.5 text-white hover:bg-[#c9302c]"
                           >
@@ -1754,6 +1855,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             onBack={() => setActiveView('OLTS_LIST')}
             onSaveOlt={(newOltData) => {
               const nextId = Math.max(0, ...db.olts.map((o) => o.id)) + 1;
+              const nowStr = new Date().toISOString().replace('T', ' ').slice(0, 19);
               setDb((prev) => ({
                 ...prev,
                 olts: [
@@ -1763,9 +1865,116 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     id: nextId,
                   },
                 ],
+                olt_cards: [
+                  ...prev.olt_cards,
+                  {
+                    id: Date.now() + 1,
+                    olt_id: nextId,
+                    slot: 3,
+                    type: 'GTGH',
+                    real_type: 'GTGH',
+                    ports: 16,
+                    sw_version: '2.1.0',
+                    status: 'Online',
+                    role: 'Main',
+                    updated_at: nowStr,
+                  },
+                  {
+                    id: Date.now() + 2,
+                    olt_id: nextId,
+                    slot: 10,
+                    type: 'SCXM',
+                    real_type: 'SCXM',
+                    ports: null,
+                    sw_version: '2.1.0',
+                    status: 'Online',
+                    role: 'Main',
+                    updated_at: nowStr,
+                  },
+                  {
+                    id: Date.now() + 3,
+                    olt_id: nextId,
+                    slot: 19,
+                    type: 'HUVQ',
+                    real_type: 'HUVQ',
+                    ports: 4,
+                    sw_version: '2.1.0',
+                    status: 'Online',
+                    role: 'Main',
+                    updated_at: nowStr,
+                  },
+                ],
+                uplink_ports: [
+                  ...prev.uplink_ports,
+                  {
+                    id: Date.now() + 11,
+                    olt_id: nextId,
+                    name: 'xgei_1/19/1',
+                    description: '',
+                    type: 'Fiber',
+                    admin_state: 'Enabled',
+                    status: 'Down',
+                    negotiation: 'Forced 10G-FullD',
+                    mtu: 1600,
+                    wavelength: '1310',
+                    signal_dbm: 'Tx: -4.85 / Rx: N/A',
+                    temp_c: '41.5',
+                    pvid_untag: 41,
+                    tagged_vlans: 'Hybrid: 102',
+                  },
+                  {
+                    id: Date.now() + 12,
+                    olt_id: nextId,
+                    name: 'xgei_1/19/2',
+                    description: '',
+                    type: 'Fiber',
+                    admin_state: 'Enabled',
+                    status: 'Down',
+                    negotiation: 'Forced 10G-FullD',
+                    mtu: 1600,
+                    wavelength: '1310',
+                    signal_dbm: 'Tx: -5.20 / Rx: N/A',
+                    temp_c: '40.9',
+                    pvid_untag: 42,
+                    tagged_vlans: 'Hybrid: 102',
+                  },
+                  {
+                    id: Date.now() + 13,
+                    olt_id: nextId,
+                    name: 'gei_1/19/3',
+                    description: '',
+                    type: 'Fiber',
+                    admin_state: 'Enabled',
+                    status: '1G-FullD',
+                    negotiation: 'Auto',
+                    mtu: 1600,
+                    wavelength: '16652',
+                    signal_dbm: '',
+                    temp_c: 'N/A',
+                    pvid_untag: 41,
+                    tagged_vlans: 'Hybrid: 100-102',
+                  },
+                  {
+                    id: Date.now() + 14,
+                    olt_id: nextId,
+                    name: 'gei_1/19/4',
+                    description: '',
+                    type: 'Fiber',
+                    admin_state: 'Enabled',
+                    status: 'Down',
+                    negotiation: 'Auto',
+                    mtu: 1600,
+                    wavelength: 'N/A',
+                    signal_dbm: '',
+                    temp_c: 'N/A',
+                    pvid_untag: 42,
+                    tagged_vlans: 'Hybrid: 102',
+                  },
+                ],
               }));
+              setSelectedOltId(nextId);
               showToast(
-                `OLT ${newOltData.name} (${newOltData.hardware_model} - ${newOltData.ip_address}) berhasil disimpan & SNMP community dibuat di OLT!`
+                `OLT ${newOltData.name} (${newOltData.hardware_model} - ${newOltData.ip_address}) berhasil disimpan ke Database (${dbMeta.dbEngine})!`
               );
               setActiveView('OLTS_LIST');
             }}
@@ -2021,6 +2230,24 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               showToast(
                 `TR069 Profile "${tr069ProfileName}" (${defaultInterface}) diterapkan pada OLT.`
               );
+            }}
+            onImportRunningConfig={async (oltId, rawConfig) => {
+              try {
+                const resp = await fetch(`/api/olts/${oltId}/import-config`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ rawConfig }),
+                });
+                const data = await resp.json();
+                if (data.state) {
+                  setDb(data.state);
+                  showToast(
+                    `Berhasil mengimpor ${data.imported?.onus || 0} ONU, ${data.imported?.vlans || 0} VLAN, dan ${data.imported?.uplinks || 0} Uplink ke Database (${dbMeta.dbEngine})!`
+                  );
+                }
+              } catch (err) {
+                showToast(`Gagal mengimpor running-config: ${(err as Error).message}`);
+              }
             }}
           />
         )}
@@ -2776,6 +3003,301 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 className="rounded bg-[#0275d8] px-4 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          MODAL: REGISTER UNCONFIGURED ONU SN TO DATABASE
+         ===================================================================== */}
+      {showAddUncfgModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-md overflow-hidden rounded-lg border border-slate-700 bg-[#15202e] text-slate-100 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-700/80 px-5 py-3.5">
+              <h2 className="text-base font-bold text-white">
+                Register Unconfigured ONU SN (`show gpon onu uncfg`)
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowAddUncfgModal(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-3 px-5 py-4 text-xs">
+              <div>
+                <label className="block font-bold text-slate-300">Target OLT</label>
+                <select
+                  value={manualUncfgOltId}
+                  onChange={(e) => setManualUncfgOltId(Number(e.target.value))}
+                  className="mt-1 w-full rounded border border-slate-600 bg-[#1c2a3b] px-3 py-2 text-white"
+                >
+                  {db.olts.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.id} - {o.name} ({o.ip_address})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-300">
+                    PON Port (`1/3/x`)
+                  </label>
+                  <select
+                    value={manualUncfgPort}
+                    onChange={(e) => setManualUncfgPort(Number(e.target.value))}
+                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2a3b] px-3 py-2 font-mono text-white"
+                  >
+                    {Array.from({ length: 16 }, (_, idx) => idx + 1).map((p) => (
+                      <option key={p} value={p}>
+                        gpon-olt_1/3/{p}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-300">ONU Type</label>
+                  <select
+                    value={manualUncfgType}
+                    onChange={(e) => setManualUncfgType(e.target.value)}
+                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2a3b] px-3 py-2 font-mono text-white"
+                  >
+                    <option value="ALL">ALL</option>
+                    <option value="F670LV9.0">F670LV9.0</option>
+                    <option value="F609V3.0">F609V3.0</option>
+                    <option value="HG8245H">HG8245H</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="block font-bold text-slate-300">
+                  ONU Serial Number (SN)
+                </label>
+                <input
+                  type="text"
+                  value={manualUncfgSn}
+                  onChange={(e) => setManualUncfgSn(e.target.value.toUpperCase())}
+                  placeholder="e.g. ZTEGC6A394D4"
+                  className="mt-1 w-full rounded border border-slate-600 bg-[#1c2a3b] px-3 py-2 font-mono text-white"
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3 border-t border-slate-700/80 bg-[#121c29] px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setShowAddUncfgModal(false)}
+                className="text-xs font-semibold text-sky-400 hover:text-sky-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!manualUncfgSn.trim()) return;
+                  const newUncfg: OnuRecord = {
+                    id: Date.now(),
+                    olt_id: manualUncfgOltId,
+                    pon_port_id: manualUncfgOltId * 100 + manualUncfgPort,
+                    board: 3,
+                    port: manualUncfgPort,
+                    onu_index: null,
+                    serial_number: manualUncfgSn.trim(),
+                    onu_type: manualUncfgType,
+                    is_authorized: false,
+                    customer_name: null,
+                    address: null,
+                    external_id: manualUncfgSn.trim(),
+                    zone_id: db.zones[0]?.id || null,
+                    odb_id: db.odbs[0]?.id || null,
+                    odb_port: null,
+                    vlan_id: db.vlans.find((v) => v.olt_id === manualUncfgOltId)?.id || null,
+                    speed_profile_id: 1,
+                    tcont_profile_id: 1,
+                    onu_mode: 'Routing',
+                    wan_mode: 'PPPOE',
+                    config_method: 'OMCI',
+                    wan_remote_access: 'Enabled from everywhere in the internet',
+                    wan_remote_allowed_subnet: '0.0.0.0/0',
+                    tr069_profile_id: 1,
+                    tr069_status: 'DISABLED',
+                    tr069_last_inform: null,
+                    wifi_ssid: null,
+                    wifi_password: null,
+                    pppoe_username: null,
+                    pppoe_password: null,
+                    hotspot_bridge_vlan: null,
+                    admin_state: 'ENABLED',
+                    phase_state: 'Unconfigured',
+                    onu_rx_dbm: -21.5,
+                    onu_tx_dbm: 2.3,
+                    olt_rx_dbm: -24.8,
+                    distance_m: 520,
+                    temperature_c: 40,
+                    ip_address: null,
+                    firmware_ver: 'V2.1.0',
+                    detected_ago: 'Just now',
+                    last_online_at: null,
+                    last_offline_reason: 'Waiting Authorization',
+                  };
+                  setDb((prev) => ({
+                    ...prev,
+                    onus: [...prev.onus, newUncfg],
+                  }));
+                  setShowAddUncfgModal(false);
+                  showToast(
+                    `SN ${newUncfg.serial_number} ditambahkan ke daftar Unconfigured (Port 1/3/${manualUncfgPort}).`
+                  );
+                }}
+                className="rounded bg-[#5cb85c] px-4 py-1.5 text-xs font-bold text-white hover:bg-[#4cae4c]"
+              >
+                Add to Unconfigured
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          MODAL: POSTGRESQL CONNECTION SETTINGS (localhost:5435 | user: likhin)
+         ===================================================================== */}
+      {showPgConfigModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-md overflow-hidden rounded-lg border border-slate-700 bg-[#15202e] text-slate-100 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-700/80 px-5 py-3.5">
+              <h2 className="text-base font-bold text-white">
+                PostgreSQL Connection (Separate Docker DB)
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowPgConfigModal(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-3 px-5 py-4 text-xs">
+              <div className="rounded border border-sky-500/30 bg-sky-950/30 p-2.5 text-[11px] text-slate-200">
+                <div>
+                  Status: <strong className="text-emerald-400">{dbMeta.dbEngine}</strong>
+                </div>
+                {dbMeta.pgLastError && !dbMeta.pgConnected && (
+                  <div className="mt-1 text-amber-300">
+                    Info: Saat aplikasi dijalankan di Docker lokal Anda (<code>port 3004</code>), server otomatis terhubung ke PostgreSQL <code>{pgHost}:{pgPort}</code> dan membuat database <code>{pgDatabase}</code> beserta seluruh tabel.
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2">
+                  <label className="block font-bold text-slate-300">
+                    PostgreSQL Host
+                  </label>
+                  <input
+                    type="text"
+                    value={pgHost}
+                    onChange={(e) => setPgHost(e.target.value)}
+                    placeholder="localhost or host.docker.internal"
+                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2a3b] px-3 py-2 font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-300">
+                    Port (5435)
+                  </label>
+                  <input
+                    type="number"
+                    value={pgPort}
+                    onChange={(e) => setPgPort(Number(e.target.value))}
+                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2a3b] px-3 py-2 font-mono text-white"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-300">
+                    Username
+                  </label>
+                  <input
+                    type="text"
+                    value={pgUser}
+                    onChange={(e) => setPgUser(e.target.value)}
+                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2a3b] px-3 py-2 font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-300">
+                    Password
+                  </label>
+                  <input
+                    type="text"
+                    value={pgPassword}
+                    onChange={(e) => setPgPassword(e.target.value)}
+                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2a3b] px-3 py-2 font-mono text-white"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-300">
+                  Database Name
+                </label>
+                <input
+                  type="text"
+                  value={pgDatabase}
+                  onChange={(e) => setPgDatabase(e.target.value)}
+                  className="mt-1 w-full rounded border border-slate-600 bg-[#1c2a3b] px-3 py-2 font-mono text-white"
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3 border-t border-slate-700/80 bg-[#121c29] px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setShowPgConfigModal(false)}
+                className="text-xs font-semibold text-sky-400 hover:text-sky-300"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                disabled={pgTesting}
+                onClick={async () => {
+                  setPgTesting(true);
+                  try {
+                    const resp = await fetch('/api/db/config', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        host: pgHost,
+                        port: pgPort,
+                        user: pgUser,
+                        password: pgPassword,
+                        database: pgDatabase,
+                      }),
+                    });
+                    const data = await resp.json();
+                    if (data.meta) setDbMeta(data.meta);
+                    if (data.ok) {
+                      showToast(
+                        `Connected to PostgreSQL ${pgUser}@${pgHost}:${pgPort}/${pgDatabase}!`
+                      );
+                      setShowPgConfigModal(false);
+                    } else {
+                      showToast(
+                        `Konfigurasi disimpan (${pgUser}@${pgHost}:${pgPort}). Pastikan PostgreSQL lokal aktif saat dijalankan di Docker.`
+                      );
+                    }
+                  } finally {
+                    setPgTesting(false);
+                  }
+                }}
+                className="rounded bg-[#5cb85c] px-4 py-1.5 text-xs font-bold text-white hover:bg-[#4cae4c]"
+              >
+                {pgTesting ? 'Connecting...' : 'Save & Connect PostgreSQL'}
               </button>
             </div>
           </div>

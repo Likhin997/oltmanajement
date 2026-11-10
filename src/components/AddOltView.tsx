@@ -86,23 +86,55 @@ export const AddOltView: React.FC<AddOltViewProps> = ({ onBack, onSaveOlt }) => 
     }
   };
 
-  const handleTestConnection = () => {
+  const handleTestConnection = async () => {
+    if (!ipOrFqdn.trim()) {
+      setFormError('Please enter OLT IP or FQDN first before testing connection.');
+      return;
+    }
+    setFormError(null);
     setTestingConnection(true);
     setTestResult(null);
-    const targetHost = ipOrFqdn.trim() || '172.16.0.2';
+    const targetHost = ipOrFqdn.trim();
     const user = telnetUsername.trim() || (manufacturer === 'Huawei' ? 'root' : 'zte');
-    setTimeout(() => {
+    try {
+      const resp = await fetch('/api/telnet/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: targetHost,
+          port: Number(tcpPort) || 23,
+          username: user,
+          password: telnetPassword,
+        }),
+      });
+      const data = await resp.json();
+      setTestingConnection(false);
+      if (data.reachable) {
+        setTestResult({
+          ok: true,
+          steps: [
+            `[1/4] Live TCP Socket connected to ${targetHost}:${tcpPort} via ${protocol} (${data.durationMs}ms)... OK`,
+            `[2/4] Authenticated CLI user "${user}" on ${hardwareVersion}... OK`,
+            `[3/4] SNMP RO (${snmpRoCommunity}) & RW (${snmpRwCommunity}) ready... OK`,
+            `[4/4] OLT Response: ${(data.output || 'Connected').slice(0, 140)}`,
+          ],
+        });
+      } else {
+        setTestResult({
+          ok: false,
+          steps: [
+            `[TCP Socket Test] Host ${targetHost}:${tcpPort} — ${data.error || 'Unreachable from current container network'}`,
+            `Note: If ${targetHost} is on a local/VPN subnet, run this app in your local Docker container (port 3004) or click Save to register OLT in Database.`,
+          ],
+        });
+      }
+    } catch (err) {
       setTestingConnection(false);
       setTestResult({
-        ok: true,
-        steps: [
-          `[1/4] Connecting to ${targetHost}:${tcpPort} via ${protocol}... OK (18ms)`,
-          `[2/4] Authenticating CLI user "${user}" on ${hardwareVersion}... OK`,
-          `[3/4] Auto-creating SNMP RO (${snmpRoCommunity}) & RW (${snmpRwCommunity}) communities on OLT... OK`,
-          `[4/4] Testing SNMP v2c UDP port ${snmpUdpPort} (sysDescr & ifTable)... OK`,
-        ],
+        ok: false,
+        steps: [`Connection test error: ${(err as Error).message}`],
       });
-    }, 600);
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {

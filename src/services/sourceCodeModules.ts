@@ -1,7 +1,8 @@
 /**
  * File: src/services/sourceCodeModules.ts
- * Menyimpan kode sumber utuh (Modul 1 s/d Modul 4) agar engineer dapat menginspeksi
- * atau mengunduh langsung dari dalam aplikasi SmartOLT GPON Manager.
+ * Menyimpan kode konfigurasi Docker (Port 3004) terpisah yang terkoneksi ke
+ * PostgreSQL eksternal di localhost:5435 (user: likhin), skema SQL PostgreSQL bersih,
+ * dan modul koneksi Telnet/SSH untuk deployment produksi.
  */
 
 export interface CodeModuleFile {
@@ -15,232 +16,253 @@ export interface CodeModuleFile {
 export const PRODUCTION_CODE_MODULES: CodeModuleFile[] = [
   {
     moduleNumber: 1,
-    fileName: 'config/database.js',
-    language: 'javascript',
-    description: 'Koneksi Pool MySQL / MariaDB (mysql2/promise) dengan Auto-Reconnect & Transaction Helper',
-    code: `// File: config/database.js
-// Modul 1: Konfigurasi Koneksi Database MySQL / MariaDB (Node.js Express Production)
+    fileName: 'docker-compose.yml',
+    language: 'bash',
+    description:
+      'Docker Compose App Terpisah (Port 3004) -> Konek ke PostgreSQL yang sudah ada di localhost:5435 (user: likhin)',
+    code: `# File: docker-compose.yml
+# Container SmartOLT dibuat TERPISAH dari container PostgreSQL Anda.
+# Menggunakan network_mode: "host" agar aplikasi jalan di Port 3004 dan
+# langsung terkoneksi ke PostgreSQL Anda di localhost:5435 (user: likhin).
+#
+# Jalankan dengan perintah:
+#   docker compose up -d --build
+# Akses web di:
+#   http://localhost:3004
 
-import mysql from 'mysql2/promise';
-import dotenv from 'dotenv';
+services:
+  smartolt-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jetcybernet-smartolt-app
+    restart: unless-stopped
+    network_mode: "host"
+    environment:
+      - NODE_ENV=production
+      - PORT=3004
+      - PG_HOST=localhost
+      - PG_PORT=5435
+      - PG_USER=likhin
+      - PG_PASSWORD=11013009
+      - PG_DATABASE=smartolt_db
+      - SQLITE_PATH=/app/data/smartolt_live.sqlite
+    volumes:
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
-dotenv.config();
-
-export const dbPool = mysql.createPool({
-  host: process.env.DB_HOST || '127.0.0.1',
-  port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'smartolt_db',
-  waitForConnections: true,
-  connectionLimit: 25,
-  queueLimit: 0,
-  timezone: '+07:00',
-  decimalNumbers: true,
-});
-
-/**
- * Helper eksekusi query aman dengan Prepared Statement
- */
-export async function querySql(sql, params = []) {
-  const [rows] = await dbPool.execute(sql, params);
-  return rows;
-}
-
-/**
- * Helper transaksi database atomik (Commit / Rollback otomatis)
- */
-export async function withTransaction(callback) {
-  const connection = await dbPool.getConnection();
-  try {
-    await connection.beginTransaction();
-    const result = await callback(connection);
-    await connection.commit();
-    return result;
-  } catch (error) {
-    await connection.rollback();
-    throw error;
-  } finally {
-    connection.release();
-  }
-}
+# -----------------------------------------------------------------------------
+# CATATAN: Jika Anda menggunakan Docker Desktop (Windows / Mac) di mana
+# network_mode: "host" membatasi port mapping, gunakan konfigurasi alternatif ini:
+#
+# services:
+#   smartolt-web:
+#     build: .
+#     container_name: jetcybernet-smartolt-app
+#     restart: unless-stopped
+#     ports:
+#       - "3004:3004"
+#     environment:
+#       - NODE_ENV=production
+#       - PORT=3004
+#       - PG_HOST=host.docker.internal
+#       - PG_PORT=5435
+#       - PG_USER=likhin
+#       - PG_PASSWORD=11013009
+#       - PG_DATABASE=smartolt_db
+#     extra_hosts:
+#       - "host.docker.internal:host-gateway"
+# -----------------------------------------------------------------------------
 `,
   },
   {
     moduleNumber: 2,
-    fileName: 'services/OltTelnetSshEngine.js',
-    language: 'javascript',
-    description: 'Engine Koneksi Telnet/SSH & SNMP ke ZTE C320/C300 (Handle Prompt Username:, Password:, #, (config)#, --More--)',
-    code: `// File: services/OltTelnetSshEngine.js
-// Modul 2A: Engine Koneksi Telnet/SSH & SNMP untuk OLT ZTE C320 / C300
+    fileName: 'Dockerfile',
+    language: 'bash',
+    description:
+      'Dockerfile Node 22 Alpine (Build Vite Frontend + Run Express, PostgreSQL Pool & Telnet Backend di Port 3004)',
+    code: `# File: Dockerfile
+FROM node:22-alpine
 
-import net from 'net';
+# Install build tools for native drivers
+RUN apk add --no-cache python3 make g++
 
-export class OltTelnetSshEngine {
-  /**
-   * @param {Object} oltConfig
-   * @param {string} oltConfig.ip_address
-   * @param {number} oltConfig.telnet_port
-   * @param {string} oltConfig.olt_username
-   * @param {string} oltConfig.olt_password
-   * @param {string} [oltConfig.enable_password]
-   * @param {number} [oltConfig.timeoutMs=12000]
-   */
-  constructor(oltConfig) {
-    this.host = oltConfig.ip_address;
-    this.port = Number(oltConfig.telnet_port || 23);
-    this.username = oltConfig.olt_username;
-    this.password = oltConfig.olt_password;
-    this.enablePassword = oltConfig.enable_password || 'zxr10';
-    this.timeoutMs = oltConfig.timeoutMs || 12000;
-    this.socket = null;
-    this.buffer = '';
-  }
+WORKDIR /app
 
-  /**
-   * Membuka sesi TCP Telnet ke OLT ZTE C320/C300 dan melakukan autentikasi otomatis
-   * Menangani prompt: Username:, Password:, >, #, (config)#, dan --More--
-   */
-  async connect() {
-    return new Promise((resolve, reject) => {
-      this.socket = new net.Socket();
-      this.socket.setTimeout(this.timeoutMs);
+COPY package*.json ./
+RUN npm install
 
-      let authStage = 'WAIT_USERNAME';
+COPY . .
 
-      const onData = (chunk) => {
-        const text = chunk.toString('utf8');
-        this.buffer += text;
+# Build frontend production assets into /app/dist
+RUN npm run build
 
-        // Tangani paginasi --More-- otomatis dengan mengirim karakter spasi
-        if (this.buffer.includes('--More--')) {
-          this.buffer = this.buffer.replace(/--More--/g, '');
-          this.socket.write(' ');
-          return;
-        }
+# Persist local backup directory
+RUN mkdir -p /app/data
 
-        if (authStage === 'WAIT_USERNAME' && /(?:Username|login)\s*:/i.test(this.buffer)) {
-          this.buffer = '';
-          authStage = 'WAIT_PASSWORD';
-          this.socket.write(this.username + '\\r\\n');
-        } else if (authStage === 'WAIT_PASSWORD' && /Password\s*:/i.test(this.buffer)) {
-          this.buffer = '';
-          authStage = 'WAIT_PROMPT';
-          this.socket.write(this.password + '\\r\\n');
-        } else if (authStage === 'WAIT_PROMPT') {
-          if (/bad password|authentication failed|login incorrect/i.test(this.buffer)) {
-            this.socket.removeListener('data', onData);
-            reject(new Error('Autentikasi Telnet OLT gagal: Username atau Password salah.'));
-            return;
-          }
-          // Jika masuk ke user mode '>', eskalasi ke privileged mode 'enable'
-          if (/[A-Za-z0-9_\\-]+>\\s*$/.test(this.buffer)) {
-            this.buffer = '';
-            authStage = 'WAIT_ENABLE';
-            this.socket.write('enable\\r\\n');
-          } else if (/[A-Za-z0-9_\\-]+#\\s*$/.test(this.buffer)) {
-            this.buffer = '';
-            this.socket.removeListener('data', onData);
-            // Nonaktifkan paginasi terminal length 0 agar output panjang tidak terpotong
-            this.sendCommand('terminal length 0').then(() => resolve(true)).catch(reject);
-          }
-        } else if (authStage === 'WAIT_ENABLE') {
-          if (/Password\s*:/i.test(this.buffer)) {
-            this.buffer = '';
-            this.socket.write(this.enablePassword + '\\r\\n');
-          } else if (/[A-Za-z0-9_\\-]+#\\s*$/.test(this.buffer)) {
-            this.buffer = '';
-            this.socket.removeListener('data', onData);
-            this.sendCommand('terminal length 0').then(() => resolve(true)).catch(reject);
-          }
-        }
-      };
+ENV NODE_ENV=production
+ENV PORT=3004
+ENV PG_HOST=localhost
+ENV PG_PORT=5435
+ENV PG_USER=likhin
+ENV PG_PASSWORD=11013009
+ENV PG_DATABASE=smartolt_db
 
-      this.socket.on('data', onData);
-      this.socket.once('timeout', () => {
-        this.disconnect();
-        reject(new Error(\`Koneksi Telnet ke OLT \${this.host}:\${this.port} timeout (\${this.timeoutMs}ms)\`));
-      });
-      this.socket.once('error', (err) => {
-        this.disconnect();
-        reject(err);
-      });
+EXPOSE 3004
 
-      this.socket.connect(this.port, this.host);
-    });
-  }
+CMD ["npx", "tsx", "server.ts"]
+`,
+  },
+  {
+    moduleNumber: 3,
+    fileName: 'database/init.sql',
+    language: 'sql',
+    description:
+      'Skema Database PostgreSQL (Port 5435, User: likhin) — Bersih Tanpa Data Dummy (Otomatis dibuat oleh server.ts)',
+    code: `-- File: database/init.sql
+-- Database PostgreSQL (localhost:5435 | user: likhin | db: smartolt_db)
+-- Catatan: server.ts otomatis membuat database "smartolt_db" dan seluruh tabel ini saat startup!
 
-  /**
-   * Mengirim satu baris perintah CLI dan menunggu hingga prompt '#', '(config)#', atau '(config-if...)#' muncul
-   */
-  async sendCommand(command) {
-    return new Promise((resolve, reject) => {
-      if (!this.socket || this.socket.destroyed) {
-        return reject(new Error('Socket Telnet OLT belum terhubung.'));
-      }
+CREATE TABLE IF NOT EXISTS smartolt_relational_store (
+  store_key VARCHAR(64) PRIMARY KEY,
+  json_payload TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
-      let cmdBuffer = '';
-      const promptRegex = /[A-Za-z0-9_\\-]+(?:\\([a-z0-9_\\-/]+\\))?#\\s*$/i;
-      const confirmRegex = /\\[yes\\/no\\]\\s*:|confirm\\s*\\?/i;
+CREATE TABLE IF NOT EXISTS olts (
+  id INTEGER PRIMARY KEY,
+  name VARCHAR(120) NOT NULL,
+  manufacturer VARCHAR(32) NOT NULL DEFAULT 'ZTE',
+  hardware_model VARCHAR(64) NOT NULL DEFAULT 'ZTE-C300M',
+  firmware_version VARCHAR(32) NOT NULL DEFAULT 'V2.1.0',
+  ip_address VARCHAR(45) NOT NULL,
+  vpn_name VARCHAR(64) DEFAULT '',
+  vpn_subnet VARCHAR(45) DEFAULT '',
+  telnet_port INTEGER NOT NULL DEFAULT 23,
+  ssh_port INTEGER NOT NULL DEFAULT 22,
+  protocol VARCHAR(16) NOT NULL DEFAULT 'TELNET',
+  olt_username VARCHAR(64) NOT NULL,
+  olt_password VARCHAR(128) NOT NULL,
+  enable_password VARCHAR(128) DEFAULT 'zxr10',
+  snmp_read_community VARCHAR(128) NOT NULL,
+  snmp_write_community VARCHAR(128) NOT NULL,
+  snmp_port INTEGER NOT NULL DEFAULT 161,
+  snmp_traps_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  iptv_module BOOLEAN NOT NULL DEFAULT FALSE,
+  supported_pon_types VARCHAR(64) NOT NULL DEFAULT 'GPON',
+  uplink_interface VARCHAR(64) NOT NULL DEFAULT 'gei_1/19/3',
+  warning_rx_dbm NUMERIC(5,2) NOT NULL DEFAULT -28.00,
+  critical_rx_dbm NUMERIC(5,2) NOT NULL DEFAULT -30.00,
+  ntp_servers VARCHAR(255) DEFAULT '20.101.57.9, 216.239.35.4',
+  tr069_profile_name VARCHAR(64) DEFAULT 'DEFAULT-ACS',
+  status VARCHAR(32) NOT NULL DEFAULT 'ONLINE',
+  last_polled_at VARCHAR(64) DEFAULT ''
+);
 
-      const onData = (chunk) => {
-        cmdBuffer += chunk.toString('utf8');
+CREATE TABLE IF NOT EXISTS pon_ports (
+  id INTEGER PRIMARY KEY,
+  olt_id INTEGER NOT NULL REFERENCES olts(id) ON DELETE CASCADE,
+  rack SMALLINT NOT NULL DEFAULT 1,
+  shelf SMALLINT NOT NULL DEFAULT 3,
+  slot SMALLINT NOT NULL DEFAULT 3,
+  port_number SMALLINT NOT NULL,
+  interface_name VARCHAR(32) NOT NULL,
+  board_model VARCHAR(32) NOT NULL DEFAULT 'GTGH',
+  description VARCHAR(128) DEFAULT '',
+  admin_state VARCHAR(16) NOT NULL DEFAULT 'ENABLED',
+  oper_status VARCHAR(16) NOT NULL DEFAULT 'Up',
+  online_onus INTEGER NOT NULL DEFAULT 0,
+  total_onus INTEGER NOT NULL DEFAULT 0,
+  avg_signal_dbm NUMERIC(6,2) DEFAULT NULL,
+  tx_power_dbm NUMERIC(6,3) NOT NULL DEFAULT 10.500,
+  max_onu_capacity INTEGER NOT NULL DEFAULT 128
+);
 
-        // Jika OLT mengeluarkan prompt --More--, kirim spasi otomatis
-        if (cmdBuffer.includes('--More--')) {
-          cmdBuffer = cmdBuffer.replace(/--More--(\x08+|\s+)*/g, '');
-          this.socket.write(' ');
-          return;
-        }
+CREATE TABLE IF NOT EXISTS vlans (
+  id INTEGER PRIMARY KEY,
+  olt_id INTEGER NOT NULL REFERENCES olts(id) ON DELETE CASCADE,
+  vlan_id INTEGER NOT NULL,
+  name VARCHAR(64) NOT NULL,
+  description VARCHAR(150) DEFAULT '',
+  service_type VARCHAR(32) NOT NULL DEFAULT 'PPPOE',
+  used_for_mgmt_tr069_voip BOOLEAN NOT NULL DEFAULT FALSE,
+  used_for_iptv BOOLEAN NOT NULL DEFAULT FALSE,
+  dhcp_snooping BOOLEAN NOT NULL DEFAULT FALSE,
+  lan_to_lan BOOLEAN NOT NULL DEFAULT FALSE,
+  onus_count INTEGER NOT NULL DEFAULT 0
+);
 
-        // Jika OLT meminta konfirmasi [yes/no]: (misal saat reboot / restore factory)
-        if (confirmRegex.test(cmdBuffer)) {
-          this.socket.write('yes\\r\\n');
-          return;
-        }
+CREATE TABLE IF NOT EXISTS onus (
+  id BIGINT PRIMARY KEY,
+  olt_id INTEGER NOT NULL REFERENCES olts(id) ON DELETE CASCADE,
+  pon_port_id INTEGER NOT NULL,
+  board SMALLINT NOT NULL DEFAULT 3,
+  port SMALLINT NOT NULL,
+  onu_index SMALLINT DEFAULT NULL,
+  serial_number VARCHAR(32) NOT NULL,
+  onu_type VARCHAR(50) NOT NULL DEFAULT 'ALL',
+  is_authorized BOOLEAN NOT NULL DEFAULT FALSE,
+  customer_name VARCHAR(150) DEFAULT NULL,
+  address VARCHAR(255) DEFAULT NULL,
+  vlan_id INTEGER DEFAULT NULL,
+  onu_mode VARCHAR(32) NOT NULL DEFAULT 'Routing',
+  wan_mode VARCHAR(64) NOT NULL DEFAULT 'PPPOE',
+  config_method VARCHAR(16) NOT NULL DEFAULT 'OMCI',
+  wan_remote_access VARCHAR(128) NOT NULL DEFAULT 'Enabled from everywhere in the internet',
+  wan_remote_allowed_subnet VARCHAR(64) NOT NULL DEFAULT '0.0.0.0/0',
+  pppoe_username VARCHAR(100) DEFAULT NULL,
+  pppoe_password VARCHAR(100) DEFAULT NULL,
+  phase_state VARCHAR(32) NOT NULL DEFAULT 'working',
+  onu_rx_dbm NUMERIC(6,3) DEFAULT NULL,
+  onu_tx_dbm NUMERIC(6,3) DEFAULT NULL,
+  olt_rx_dbm NUMERIC(6,3) DEFAULT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
 
-        if (promptRegex.test(cmdBuffer)) {
-          this.socket.removeListener('data', onData);
-          resolve(cmdBuffer.trim());
-        }
-      };
+CREATE TABLE IF NOT EXISTS provisioning_logs (
+  id BIGINT PRIMARY KEY,
+  olt_id INTEGER NOT NULL,
+  onu_id BIGINT DEFAULT NULL,
+  serial_number VARCHAR(32) NOT NULL,
+  action_type VARCHAR(64) NOT NULL,
+  interface_target VARCHAR(64) NOT NULL,
+  summary_text VARCHAR(255) DEFAULT NULL,
+  cli_script TEXT NOT NULL,
+  olt_response TEXT DEFAULT NULL,
+  execution_status VARCHAR(32) NOT NULL DEFAULT 'SUCCESS',
+  executed_by VARCHAR(64) NOT NULL DEFAULT 'likhin',
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  created_at VARCHAR(64) NOT NULL
+);
+`,
+  },
+  {
+    moduleNumber: 4,
+    fileName: 'server.ts (PostgreSQL Pool)',
+    language: 'typescript',
+    description:
+      'Koneksi Pool PostgreSQL (pg) ke localhost:5435 dengan user likhin & Auto-Create Database/Tables',
+    code: `import pg from 'pg';
+const { Pool } = pg;
 
-      this.socket.on('data', onData);
-      this.socket.write(command + '\\r\\n');
-    });
-  }
+// Konfigurasi default koneksi PostgreSQL di server.ts:
+export const pgConfig = {
+  host: process.env.PG_HOST || 'localhost',
+  port: Number(process.env.PG_PORT || 5435), // Default 5432 diubah angka belakang jadi 5 -> 5435
+  user: process.env.PG_USER || 'likhin',
+  password: process.env.PG_PASSWORD || '11013009',
+  database: process.env.PG_DATABASE || 'smartolt_db',
+};
 
-  /**
-   * Mengeksekusi kumpulan baris perintah CLI secara berurutan (Sequential Batch Execution)
-   */
-  async executeScript(cliScriptText) {
-    const commands = cliScriptText
-      .split(/\\r?\\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.startsWith('!'));
-
-    const transcript = [];
-    await this.connect();
-    try {
-      for (const cmd of commands) {
-        const output = await this.sendCommand(cmd);
-        transcript.push(\`>> \${cmd}\\n\${output}\`);
-      }
-    } finally {
-      this.disconnect();
-    }
-    return transcript.join('\\n');
-  }
-
-  disconnect() {
-    if (this.socket && !this.socket.destroyed) {
-      try {
-        this.socket.write('exit\\r\\n');
-      } catch (_) {}
-      this.socket.destroy();
-    }
-  }
-}
+export const pgPool = new Pool({
+  host: pgConfig.host,
+  port: pgConfig.port,
+  user: pgConfig.user,
+  password: pgConfig.password,
+  database: pgConfig.database,
+  max: 15,
+});
 `,
   },
 ];
