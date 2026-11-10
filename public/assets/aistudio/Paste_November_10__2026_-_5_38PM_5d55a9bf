@@ -1,0 +1,1554 @@
+#show running-config
+Building configuration...
+olleh
+timestamp_write: 17:36:50 11/10/2026
+config-version 2.1
+!
+crtv disable
+!
+load-balance disable
+!
+operator-mode NORMAL
+!
+system-forwarding-mode normal-mode
+!
+!
+!
+set-pnp enable
+add-rack rackno 1 racktype IEC19
+add-shelf rackno 1 shelfno 1 shelftype IEC_SHELF
+add-card rackno 1 shelfno 1 slotno 3 GTGH
+add-card rackno 1 shelfno 1 slotno 19 HUVQ
+!
+ip tcp finwait-time 600
+ip tcp queuemax 5
+ip tcp synwait-time 30
+ip tcp window-size 2144
+!
+urpf log off
+!
+!
+!
+!
+!
+mac aging-time 300
+mac monitor-period 10
+mac usage-threshold 70
+!
+eth-switch max-frame-length  1600
+port diaglog status-info disable
+!
+sdisk disable
+!
+auto-update backup disable
+auto-update activate disable
+!
+!
+!
+!
+!
+gpon
+  profile tcont GPON-1G type 5 fixed 64 assured 64 maximum 1000192
+  profile tcont SMARTOLT-VOIPMNG-10M type 5 fixed 512 assured 1024 maximum 11264
+  profile tcont SMARTOLT-IPTV-10M-UP type 5 fixed 512 assured 1024 maximum 11264
+  profile tcont SMARTOLT-1G-UP type 5 fixed 128 assured 1024 maximum 1048064
+  profile traffic SMARTOLT-VOIPMNG-10M sir 10480 pir 11264
+  profile traffic SMARTOLT-IPTV-50M-DOWN sir 56320 pir 56320
+  profile traffic SMARTOLT-1G-DOWN sir 1048064 pir 1048064 cbs 1023 pbs 1023
+!
+!
+gpon
+  onu profile vlan SMARTOLT-vlan1011 tag-mode tag cvlan 1011
+  onu profile vlan SMARTOLT-vlan100 tag-mode tag cvlan 100
+!
+!
+epon
+  onu-sla-profile profile-name create EPON-1G
+  onu-sla-profile profile-set EPON-1G downstream maximum 1000000
+!
+!
+pon
+  onu-type ALL gpon
+  onu-type ALL gpon max-tcont 8
+  onu-type ALL gpon max-gemport 32
+  onu-type ALL gpon max-switch-perslot 8
+  onu-type ALL gpon max-flow-perswitch 8
+  onu-type ALL gpon max-iphost 5
+  onu-type F670LV9.0 gpon
+  onu-type F670LV9.0 gpon max-tcont 8
+  onu-type F670LV9.0 gpon max-gemport 32
+  onu-type F670LV9.0 gpon max-switch-perslot 8
+  onu-type F670LV9.0 gpon max-flow-perswitch 8
+  onu-type F670LV9.0 gpon max-iphost 5
+  onu-type-if ALL eth_0/1
+  onu-type-if ALL eth_0/2
+  onu-type-if ALL eth_0/3
+  onu-type-if ALL eth_0/4
+  onu-type-if ALL eth_0/5
+  onu-type-if ALL eth_0/6
+  onu-type-if ALL eth_0/7
+  onu-type-if ALL eth_0/8
+  onu-type-if ALL wifi_0/1
+  onu-type-if ALL wifi_0/2
+  onu-type-if ALL wifi_0/3
+  onu-type-if ALL wifi_0/4
+  onu-type-if ALL wifi_0/5
+  onu-type-if ALL wifi_0/6
+  onu-type-if ALL wifi_0/7
+  onu-type-if ALL wifi_0/8
+  onu-type-if F670LV9.0 eth_0/1
+  onu-type-if F670LV9.0 eth_0/2
+  onu-type-if F670LV9.0 eth_0/3
+  onu-type-if F670LV9.0 eth_0/4
+  onu-type-if F670LV9.0 wifi_0/1
+  uncfg-onu-display-info model sn pw
+!
+!
+onu-pnp
+  bandwidth epon EPON-1G
+  bandwidth gpon GPON-1G
+  onu-type-default gpon ZTE-F622
+  onu-type-default epon ZTE-F420
+  onu-vlan gpon-olt_1/3/1 mode transparent
+  onu-vlan gpon-olt_1/3/2 mode transparent
+  onu-vlan gpon-olt_1/3/3 mode transparent
+  onu-vlan gpon-olt_1/3/4 mode transparent
+  onu-vlan gpon-olt_1/3/5 mode transparent
+  onu-vlan gpon-olt_1/3/6 mode transparent
+  onu-vlan gpon-olt_1/3/7 mode transparent
+  onu-vlan gpon-olt_1/3/8 mode transparent
+  onu-vlan gpon-olt_1/3/9 mode transparent
+  onu-vlan gpon-olt_1/3/10 mode transparent
+  onu-vlan gpon-olt_1/3/11 mode transparent
+  onu-vlan gpon-olt_1/3/12 mode transparent
+  onu-vlan gpon-olt_1/3/13 mode transparent
+  onu-vlan gpon-olt_1/3/14 mode transparent
+  onu-vlan gpon-olt_1/3/15 mode transparent
+  onu-vlan gpon-olt_1/3/16 mode transparent
+  olt-vlan transparent gpon-olt_1/3/1
+  olt-vlan transparent gpon-olt_1/3/2
+  olt-vlan transparent gpon-olt_1/3/3
+  olt-vlan transparent gpon-olt_1/3/4
+  olt-vlan transparent gpon-olt_1/3/5
+  olt-vlan transparent gpon-olt_1/3/6
+  olt-vlan transparent gpon-olt_1/3/7
+  olt-vlan transparent gpon-olt_1/3/8
+  olt-vlan transparent gpon-olt_1/3/9
+  olt-vlan transparent gpon-olt_1/3/10
+  olt-vlan transparent gpon-olt_1/3/11
+  olt-vlan transparent gpon-olt_1/3/12
+  olt-vlan transparent gpon-olt_1/3/13
+  olt-vlan transparent gpon-olt_1/3/14
+  olt-vlan transparent gpon-olt_1/3/15
+  olt-vlan transparent gpon-olt_1/3/16
+  onu-uni-vlan gpon-olt_1/3/1 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/1 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/1 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/1 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/2 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/2 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/2 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/2 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/3 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/3 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/3 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/3 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/4 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/4 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/4 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/4 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/5 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/5 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/5 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/5 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/6 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/6 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/6 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/6 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/7 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/7 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/7 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/7 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/8 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/8 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/8 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/8 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/9 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/9 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/9 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/9 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/10 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/10 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/10 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/10 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/11 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/11 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/11 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/11 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/12 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/12 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/12 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/12 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/13 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/13 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/13 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/13 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/14 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/14 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/14 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/14 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/15 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/15 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/15 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/15 eth_0/4 mode tag vlan 46
+  onu-uni-vlan gpon-olt_1/3/16 eth_0/1 mode tag vlan 41
+  onu-uni-vlan gpon-olt_1/3/16 eth_0/2 mode tag vlan 42
+  onu-uni-vlan gpon-olt_1/3/16 eth_0/3 mode tag vlan 43
+  onu-uni-vlan gpon-olt_1/3/16 eth_0/4 mode tag vlan 46
+!
+no vlan-reserve 4091 out-voip
+no vlan-reserve 4092 in-voip
+no vlan-reserve 4094 gpon
+!
+vlan database
+  vlan 1,41-44,46,100-102
+  vlan 111,120,140,1011
+!
+vlan 100
+  name TR069
+!
+vlan 102
+  name VLAN_MJMT
+!
+vlan 111
+  name PPPOE
+!
+!
+!
+his-performance sample enable
+his-performance alarm enable
+his-performance auto-upload disable
+!
+!
+clock
+!
+!
+
+!
+clock
+!
+!
+
+!
+ptp
+!
+!
+ip dhcp snooping control-port enable
+port-identification access-node-id-type inband-mac
+port-identification rackno 1 frameno 1
+!
+igmp enable
+mld disable
+  mib-compatibility iftable v2
+!
+ip-source-guard disable
+ipv6 nd snooping disable
+!
+
+loopback-detection enable
+!
+security port-protect enable
+!
+!
+!
+
+!
+gpon
+sn 4cac0X0ace62bb
+!
+!
+!
+epm
+ mode passthrough
+
+
+
+
+
+!
+!
+!
+interface mng1
+  ip address 136.1.1.100 255.255.0.0
+  config-filename startrun.dat
+  negotiation auto
+  tag-mode untag
+!
+interface vlan 102
+  ip address 172.16.0.2 255.255.255.252
+!
+interface null1
+!
+interface gpon-olt_1/3/1
+  no shutdown
+  linktrap disable
+  onu 1 type ALL sn ZICGA8634758
+  onu 2 type ALL sn ZICGB35F53C6
+  onu 3 type ALL sn ZICGA87B6806
+!
+interface gpon-onu_1/3/1:1
+  name GITA MUSTIKA NADA
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/1:2
+  name ROSIKA
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/1:3
+  name SITI NURALIFAH
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-olt_1/3/2
+  no shutdown
+  linktrap disable
+  onu 1 type ALL sn ZICGB37FF704
+  onu 2 type ALL sn ZICGB38A30A1
+  onu 3 type ALL sn ZICGA86AC79A
+  onu 4 type ALL sn ZICGA86806FD
+  onu 5 type ALL sn ZXICFF061168
+  onu 6 type ALL sn ZTEGC8887AB7
+  onu 7 type ALL sn ZTEGC6A33CEE
+  onu 8 type ALL sn ZTEGC6A3BF19
+  onu 9 type ALL sn ZTEGC6A394D4
+!
+interface gpon-onu_1/3/2:1
+  name DEDEN SAEPULLAH
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/2:2
+  name DANI SUPIANI
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/2:3
+  name DIMAS PRAMBUDI
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/2:4
+  name DIAH NURHAYATI
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/2:5
+  name ANDI LBK
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/2:6
+  name EDI JUMHADI
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/2:7
+  name WIFI LEBAK SERVER
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/2:8
+  name RATMI
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/2:9
+  name LBK - CUCUN HASTUTI
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-olt_1/3/3
+  no shutdown
+  linktrap disable
+  onu 1 type ALL sn ZICGA85C876D
+  onu 2 type ALL sn ZICGB3750CDE
+  onu 3 type ALL sn ZICGA8608747
+  onu 4 type ALL sn ZICGA877CF5A
+  onu 5 type ALL sn ZICGB36D9CF6
+  onu 6 type ALL sn ZTEGC6A33949
+!
+interface gpon-onu_1/3/3:1
+  name SAIPUL RIFAI
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/3:2
+  name ENRI-SUTISNA-01-020104
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/3:3
+  name PEPEN-APENDI
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/3:4
+  name DESI-RATNA-SARI
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/3:5
+  name RANDI
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/3:6
+  name MUKSIN
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-olt_1/3/4
+  no shutdown
+  linktrap disable
+  onu 1 type ALL sn ZICGA887E581
+  onu 2 type ALL sn ZICGB3680404
+  onu 3 type ALL sn ZICGB3849DBE
+  onu 4 type ALL sn ZICGA86ED533
+  onu 5 type F670LV9.0 sn ZTEGCF050EFA
+  onu 6 type ALL sn ZTEGC6A3920D
+  onu 7 type ALL sn ZTEGC6A33B7E
+  onu 9 type ALL sn ZTEGC6A3B9FD
+!
+interface gpon-onu_1/3/4:1
+  name TARSINAH-020111
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/4:2
+  name HALIMAH-020202
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/4:3
+  name AYU ANDIRA
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/4:4
+  name WAINAH
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/4:5
+  name AGUS GINANJAR
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/4:6
+  name WATINAH
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/4:7
+  name KIKI-PANTAI-020112
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/4:9
+  name FUJI-AYU-020202
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-olt_1/3/5
+  no shutdown
+  linktrap disable
+  onu 1 type ALL sn ZICGB3783B2F
+  onu 2 type ALL sn ZICGA877E3AE
+  onu 3 type ALL sn ZICGA8881CB6
+  onu 4 type ALL sn FHTT9B04FDD0
+!
+interface gpon-onu_1/3/5:1
+  name JAKRI
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/5:2
+  name MUMIN
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/5:3
+  name ISMAIL
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  service-port 1 vport 1 user-vlan 101 vlan 101
+!
+interface gpon-onu_1/3/5:4
+  name SUHANAH
+  description none
+  sn-bind enable sn
+  tcont 1 profile SMARTOLT-1G-UP
+  tcont 2 profile SMARTOLT-VOIPMNG-10M
+  gemport 1 tcont 1
+  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN
+  gemport 2 tcont 2
+  gemport 2 traffic-limit downstream SMARTOLT-VOIPMNG-10M
+  service-port 1 vport 1 user-vlan 101 vlan 101
+  service-port 2 vport 2 user-vlan 100 vlan 100
+!
+interface gpon-olt_1/3/6
+  no shutdown
+  linktrap disable
+!
+interface gpon-olt_1/3/7
+  no shutdown
+  linktrap disable
+!
+interface gpon-olt_1/3/8
+  no shutdown
+  linktrap disable
+!
+interface gpon-olt_1/3/9
+  no shutdown
+  linktrap disable
+!
+interface gpon-olt_1/3/10
+  no shutdown
+  linktrap disable
+!
+interface gpon-olt_1/3/11
+  no shutdown
+  linktrap disable
+!
+interface gpon-olt_1/3/12
+  no shutdown
+  linktrap disable
+!
+interface gpon-olt_1/3/13
+  no shutdown
+  linktrap disable
+!
+interface gpon-olt_1/3/14
+  no shutdown
+  linktrap disable
+!
+interface gpon-olt_1/3/15
+  no shutdown
+  linktrap disable
+!
+interface gpon-olt_1/3/16
+  no shutdown
+  linktrap disable
+!
+interface xgei_1/19/1
+  phy-attribute lan
+  no shutdown
+  hybrid-attribute fiber
+  no negotiation auto
+  speed 10000
+  duplex full
+  flowcontrol disable
+  linktrap enable
+  switchport mode hybrid
+  switchport default vlan 41
+  switchport vlan 102 tag
+  port-protect disable
+  uplink-isolate disable
+!
+interface xgei_1/19/2
+  phy-attribute lan
+  no shutdown
+  hybrid-attribute fiber
+  no negotiation auto
+  speed 10000
+  duplex full
+  flowcontrol disable
+  linktrap enable
+  switchport mode hybrid
+  switchport default vlan 42
+  switchport vlan 102 tag
+  port-protect disable
+  uplink-isolate disable
+!
+interface gei_1/19/3
+  no shutdown
+  hybrid-attribute fiber
+  negotiation auto
+  flowcontrol disable
+  linktrap enable
+  switchport mode hybrid
+  switchport default vlan 41
+  switchport vlan 100-102 tag
+  port-protect disable
+  uplink-isolate disable
+!
+interface gei_1/19/4
+  no shutdown
+  hybrid-attribute fiber
+  negotiation auto
+  flowcontrol disable
+  linktrap enable
+  switchport mode hybrid
+  switchport default vlan 42
+  switchport vlan 102 tag
+  port-protect disable
+  uplink-isolate disable
+!
+!
+ip route 0.0.0.0 0.0.0.0 172.16.0.1
+!
+ipoa inatmarp-interval 10
+ipoa gateway-arp-interval 10
+!
+mpnat trans-table aging-time 60
+mpnat onu-telnet idle-time 3
+mpnat onu-ftp aging-time 5
+mpnat onu-snmp aging-time 30
+mpnat onu-ftp-data aging-time 5
+mpnat onu-mng-port auto-alloc disable
+!
+pon
+!
+!
+pon-onu-mng gpon-onu_1/3/1:1
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user GITA-MUSTIKA-NADA password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/1:2
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user ROSIKA-010108 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/1:3
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user SITI-NURALIFAH-010106 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/2:1
+  voip protocol sip
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user DEDEN-SAEPULLAH password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  veip 1 port udp 1232 host 2
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 5 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/2:2
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user DANI-SUPIANI-010111 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/2:3
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 140
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user DIMAS-PRAMBUDI-010112 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/2:4
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user DIAH-NURHAYATI password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/2:5
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user ANDI-01-010111 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/2:6
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user EDI-JUMHADI-010111 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/2:7
+  voip protocol sip
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user WIFI-LEBAK password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  veip 1 port udp 1232 host 2
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/2:8
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user RATMI-010111 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/2:9
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user CUCUN-HASTUTI password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/3:1
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user SAIPUL-RIFAI password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/3:2
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user ENRI-SUTISNA-01-020104 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/3:3
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user PEPEN-APENDI password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/3:4
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user DESI-RATNA-020103 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/3:5
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user RANDI-01-020103 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/3:6
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user MUKSIN-020104 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/4:1
+  voip protocol sip
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user TARSINAH-020111 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  veip 1 port udp 1232 host 2
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 5 state enable mode forward protocol web https
+  security-mgmt 10 state enable mode forward protocol web https
+  security-mgmt 10 start-src-ip 10.69.69.1 end-src-ip 10.69.69.1
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/4:2
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user HALIMAH-01-020202 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/4:3
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user AYU-ANDIRA password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/4:4
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  flow 1 pri 0 vlan 140
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user WAINAH-020201 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/4:5
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user AGUS-GINANJAR password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/4:6
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user WATINAH-020201 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/4:7
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user KIKI-PANTAI-020112 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/4:9
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user FUJI-AYU-020202 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/5:1
+  voip protocol sip
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  flow 1 pri 0 vlan 140
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user JAKRI password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  veip 1 port udp 1232 host 2
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 10 state enable mode forward protocol web https
+  security-mgmt 10 start-src-ip 10.69.69.1 end-src-ip 10.69.69.1
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/5:2
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user MUMIM-030105 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/5:3
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 1 pri 0 vlan 120
+  gemport 1 flow 1
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 veip 1
+  pppoe 1 nat enable user ISMAIL-030105 password jetcyber
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+pon-onu-mng gpon-onu_1/3/5:4
+  voip protocol sip
+  flow 2 switch switch_0/1
+  flow mode 1 tag-filter vlan-filter untag-filter discard
+  flow mode 2 tag-filter vlan-filter untag-filter discard
+  flow 1 pri 0 vlan 101
+  flow 2 pri 2 vlan 100
+  gemport 1 flow 1
+  gemport 2 flow 2
+  switchport-bind switch_0/1 iphost 1
+  switchport-bind switch_0/1 iphost 2
+  switchport-bind switch_0/1 veip 1
+  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable
+  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard
+  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard
+  vlan-filter iphost 1 pri 0 vlan 101
+  vlan-filter iphost 2 pri 2 vlan 100
+  dhcp-ip ethuni eth_0/1 from-onu
+  dhcp-ip ethuni eth_0/2 from-onu
+  dhcp-ip ethuni eth_0/3 from-onu
+  dhcp-ip ethuni eth_0/4 from-onu
+  dhcp-ip ethuni eth_0/5 from-onu
+  dhcp-ip ethuni eth_0/6 from-onu
+  dhcp-ip ethuni eth_0/7 from-onu
+  dhcp-ip ethuni eth_0/8 from-onu
+  veip 1 port udp 1232 host 2
+  tr069-mgmt 1 state unlock
+  tr069-mgmt 1 acs http://10.69.69.1:14501 validate basic username acsNet password acsNet@2024
+  tr069-mgmt 1 tag pri 2 vlan 100
+  security-mgmt 1 state enable mode forward protocol web https
+  security-mgmt 5 state enable mode forward protocol web https
+  security-mgmt 998 state enable mode forward ingress-type lan protocol web https
+  security-mgmt 999 state enable ingress-type lan protocol ftp telnet ssh snmp tr069
+!
+!
+pon
+!
+!
+ces
+!
+!
+!
+auto-write enable
+auto-write  3
+!
+inband-management enable
+!
+username user-suspend mode none
+!
+username high-level-security disable
+username inactivity-day 120
+username pwd-expire-day 90
+!
+version V4.8.35
+!
+hostname ZXAN
+!
+enable secret level 15 5 RcMLuUKvnFZX9kNAV6A/UA==
+!
+service password-encryption
+!
+!
+username zte password  7 dnXspUMqxfJOgln2Hm7Olw== privilege 15 first-login true
+username zte password  7 dnXspUMqxfJOgln2Hm7Olw== max-sessions 16
+username zte enable
+username login-range name zte login-begin 00:00:00  login-end 23:59:59
+username expire-date name zte datetime 12-31-2099 23:59:59
+username password-changed name zte is-changed false
+
+!
+!
+!
+user-authentication-type local
+user-authorization-type local
+!
+help message full
+!
+clock timezone Asia/Jakarta 7 0
+!
+banner incoming @
+*************************************************************************
+Welcome to ZXAN product C300 of ZTE Corporation
+*************************************************************************
+@
+!
+message-of-day @
+@
+!
+!
+service timestamps log datetime localtime
+service timestamps debug datetime localtime
+!
+!
+!
+!
+snmp-server location No.889 BiBo Rd.PuDong District, Shanghai, China
+snmp-server contact +86-21-68895000
+snmp-server packetsize 8192
+snmp-server engine-id mode mac
+snmp-server group GroupPriv15 v3 priv read AllView write AllView
+snmp-server group GroupPriv10 v3 priv read AllView write ViewPriv10
+snmp-server group GroupPriv5 v3 priv read AllView write ViewPriv5
+snmp-server group GroupPriv0 v3 priv read AllView
+snmp-server community JCN_Read view allview ro
+snmp-server community JCN_Write view allview rw
+snmp-server community st26c3f4oa2d9303a2c9323bb4 view allview ro
+snmp-server community st26c3f4ob2fe6b2207bb77a05 view allview ro
+snmp-server view AllView 1.2 included
+snmp-server view AllView 1.3 included
+snmp-server view allview 1.3 included
+snmp-server view ViewPriv5 1.2 included
+snmp-server view ViewPriv5 1.3 included
+snmp-server view ViewPriv5 1.3.6.1.4.1.3902.1082.10.1 excluded
+snmp-server view ViewPriv5 1.3.6.1.4.1.3902.1082.10.10 excluded
+snmp-server view ViewPriv5 1.3.6.1.4.1.3902.1082.20.1 excluded
+snmp-server view ViewPriv5 1.3.6.1.4.1.3902.1082.20.10 excluded
+snmp-server view ViewPriv10 1.2 included
+snmp-server view ViewPriv10 1.3 included
+snmp-server view ViewPriv10 1.3.6.1.4.1.3902.1082.20.10 excluded
+snmp-server host 10.69.69.1  version 2c st26c3f4ob2fe6b2207bb77a05 enable NOTIFICATIONS target-addr-name smartolt udp-port 162 third-party-server trap-report-
+compatibility v20
+!
+!
+no ftp-server enable listen 21
+ftp-server top-directory  /flash/
+!
+ntp server 20.101.57.9 priority 1 version 4
+ntp server 216.239.35.4 priority 2 version 4
+ntp server 162.159.200.123 priority 3 version 4
+ntp poll-interval 10
+ntp enable
+ntp client
+!
+logging alarmlog enable
+logging exc-event auto-write enable
+logging level notification
+logging cmdlog enable
+logging snmplog disable
+logging igmplog disable
+syslog facility local0
+syslog severity 6
+syslog hostname-field hostname
+line console idle-timeout 30
+line console absolute-timeout 1440
+line telnet idle-timeout 1
+line telnet absolute-timeout 9999
+line telnet users 8
+line cli detail-info-show disable
+
+no hotkey ctrl_g
+no hotkey ctrl_l
+no hotkey ctrl_o
+no hotkey ctrl_r
+no hotkey ctrl_s
+no hotkey ctrl_t
+!
+ssh server enable
+ssh server authentication mode local
+ssh server authentication type pap
+no ssh server only
+ssh server version 2
+!
+!
+radius attribute vendor-specific vendor-id 3902
+!
+!
+!
+radius server-port-check on
+!
+!
+tacacs disable
+tacacs-server timeout 5
+tacacs-server deadtime 5
+tacacs-server packet 1024
+!
+!
+alarm enable
+alarm confirm
+alarm trap-confirm retry 3 timeout 20
+nms-hello-trap disable
+alarm report-speed 0
+alarm anti-jitter 0
+alarm alarm-profile SMARTOLT
+    alarm-index 1 code 36629 status NALARM-DISCARD
+    alarm-index 2 code 36633 status NALARM-DISCARD
+    alarm-index 3 code 36610 status NALARM-DISCARD
+    alarm-index 4 code 36624 status NALARM-DISCARD
+    alarm-index 5 code 35117 status NALARM-DISCARD
+    alarm-index 31 code 34816 status NALARM
+    alarm-index 32 code 34817 status NALARM
+    alarm-profile-apply system
+ !
+!
+end
