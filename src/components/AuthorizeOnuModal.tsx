@@ -38,39 +38,69 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   onClose,
   onConfirmAuthorize,
 }) => {
-  const [selectedOltId, setSelectedOltId] = useState<number>(onu.olt_id || 11);
-  const olt = db.olts.find((o) => o.id === selectedOltId) || db.olts[0];
+  const [selectedOltId, setSelectedOltId] = useState<number>(
+    onu.olt_id || db.olts[0]?.id || 1
+  );
+  const [boardNum, setBoardNum] = useState<number>(onu.board || 3);
+  const [portNum, setPortNum] = useState<number>(onu.port || 3);
+
+  const olt =
+    db.olts.find((o) => o.id === selectedOltId) ||
+    db.olts[0] || {
+      id: selectedOltId,
+      name: `OLT-${selectedOltId}`,
+      firmware_version: 'V2.1.0' as const,
+    };
+
   const ponPort =
-    db.pon_ports.find((p) => p.id === onu.pon_port_id) || db.pon_ports[0];
+    db.pon_ports.find(
+      (p) =>
+        p.id === onu.pon_port_id ||
+        (p.olt_id === selectedOltId && p.port_number === portNum)
+    ) || db.pon_ports[0];
+
+  const maxCapacity = ponPort?.max_onu_capacity || 128;
 
   const allocatedOnuIndex = useMemo(() => {
     const usedIndices = db.onus
       .filter(
         (item) =>
-          item.pon_port_id === ponPort.id &&
           item.is_authorized &&
-          item.onu_index !== null
+          item.onu_index !== null &&
+          ((ponPort && item.pon_port_id === ponPort.id) ||
+            (item.olt_id === selectedOltId &&
+              item.board === boardNum &&
+              item.port === portNum))
       )
       .map((item) => item.onu_index as number);
-    return findNextAvailableOnuIndex(usedIndices, ponPort.max_onu_capacity);
-  }, [db.onus, ponPort]);
+    return findNextAvailableOnuIndex(usedIndices, maxCapacity);
+  }, [db.onus, ponPort, selectedOltId, boardNum, portNum, maxCapacity]);
 
-  const usedCount = ponPort.total_onus || 6;
-  const freeCount = 128 - usedCount;
-  const usagePct = Math.round((usedCount / 128) * 100);
+  const usedCount =
+    ponPort?.total_onus ??
+    db.onus.filter(
+      (item) =>
+        item.is_authorized &&
+        item.olt_id === selectedOltId &&
+        item.board === boardNum &&
+        item.port === portNum
+    ).length;
+  const freeCount = Math.max(0, maxCapacity - usedCount);
+  const usagePct = Math.round((usedCount / maxCapacity) * 100);
 
   const [usePreset, setUsePreset] = useState<boolean>(false);
   const [presetName, setPresetName] = useState<string>('None');
   const [ponType, setPonType] = useState<'GPON' | 'EPON'>('GPON');
   const [gponChannel, setGponChannel] = useState<'GPON' | 'XG-PON' | 'XGS-PON'>('GPON');
-  const [boardNum, setBoardNum] = useState<number>(onu.board || 3);
-  const [portNum, setPortNum] = useState<number>(onu.port || 3);
-  const [onuType, setOnuType] = useState<string>('ALL');
+  const [onuType, setOnuType] = useState<string>(onu.onu_type || 'ALL');
   const [useCustomProfile, setUseCustomProfile] = useState<boolean>(false);
   const [serviceProfile, setServiceProfile] = useState<string>('Default (ALL)');
   const [onuMode, setOnuMode] = useState<OnuModeOption>('Routing');
   const [vlanRecordId, setVlanRecordId] = useState<number>(
-    db.vlans.find((v) => v.vlan_id === 101)?.id || db.vlans[0]?.id || 1
+    db.vlans.find((v) => v.olt_id === selectedOltId && v.vlan_id === 101)?.id ||
+      db.vlans.find((v) => v.vlan_id === 101)?.id ||
+      db.vlans[0]?.id ||
+      101
   );
   const [zoneId, setZoneId] = useState<number>(
     db.zones.find((z) => z.name.includes('DONGKAL'))?.id || db.zones[0]?.id || 1
@@ -91,13 +121,19 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
     'Enabled from everywhere in the internet'
   );
   const [pppoeUsername, setPppoeUsername] = useState<string>(
-    `RATMI-0101${String(allocatedOnuIndex).padStart(2, '0')}`
+    `USER-${onu.serial_number.slice(-4)}-${String(allocatedOnuIndex).padStart(2, '0')}`
   );
   const [pppoePassword, setPppoePassword] = useState<string>('jetcyber');
   const [showCliPreview, setShowCliPreview] = useState<boolean>(false);
   const [copiedCli, setCopiedCli] = useState<boolean>(false);
 
-  const selectedVlan = db.vlans.find((v) => v.id === vlanRecordId) || db.vlans[0];
+  const selectedVlan =
+    db.vlans.find((v) => v.id === vlanRecordId) ||
+    db.vlans[0] || {
+      id: 101,
+      vlan_id: 101,
+      name: 'PPPOE',
+    };
   const selectedSpeed =
     db.speed_profiles.find((s) => s.id === downSpeedId) || db.speed_profiles[0];
   const selectedTcont = db.tcont_profiles[0];
@@ -105,7 +141,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
 
   const generatedCli = useMemo(() => {
     return generateAuthorizeCliScript({
-      firmwareVersion: olt.firmware_version,
+      firmwareVersion: olt?.firmware_version || 'V2.1.0',
       ponInterface: `gpon-olt_1/${boardNum}/${portNum}`,
       onuIndex: allocatedOnuIndex,
       serialNumber: onu.serial_number,
@@ -128,7 +164,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
       tr069PeriodicInterval: selectedTr069?.periodic_inform_interval,
     });
   }, [
-    olt.firmware_version,
+    olt?.firmware_version,
     boardNum,
     portNum,
     allocatedOnuIndex,
@@ -488,11 +524,18 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
               onChange={(e) => setVlanRecordId(Number(e.target.value))}
               className="w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
             >
-              {db.vlans.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.vlan_id} - {v.name}
-                </option>
-              ))}
+              {db.vlans.length === 0 ? (
+                <>
+                  <option value={101}>101 - PPPOE (Default)</option>
+                  <option value={100}>100 - TR069</option>
+                </>
+              ) : (
+                db.vlans.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.vlan_id} - {v.name}
+                  </option>
+                ))
+              )}
             </select>
           </div>
         </div>
@@ -508,11 +551,15 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
               onChange={(e) => setZoneId(Number(e.target.value))}
               className="w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
             >
-              {db.zones.map((z) => (
-                <option key={z.id} value={z.id}>
-                  {z.name}
-                </option>
-              ))}
+              {db.zones.length === 0 ? (
+                <option value={1}>Default Zone</option>
+              ) : (
+                db.zones.map((z) => (
+                  <option key={z.id} value={z.id}>
+                    {z.name}
+                  </option>
+                ))
+              )}
             </select>
           </div>
         </div>

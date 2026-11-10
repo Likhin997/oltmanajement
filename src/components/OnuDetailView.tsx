@@ -67,9 +67,21 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   onViewOlt,
   onExecuteAction,
 }) => {
-  const olt = db.olts.find((o) => o.id === onu.olt_id) || db.olts[0];
+  const olt =
+    db.olts.find((o) => o.id === onu.olt_id) ||
+    db.olts[0] || {
+      id: onu.olt_id || 1,
+      name: `OLT-${onu.olt_id || 1}`,
+      firmware_version: 'V2.1.0' as const,
+    };
   const vlan =
-    db.vlans.find((v) => v.id === onu.vlan_id) || db.vlans[1] || db.vlans[0];
+    db.vlans.find((v) => v.id === onu.vlan_id || v.vlan_id === onu.vlan_id) ||
+    db.vlans[1] ||
+    db.vlans[0] || {
+      id: 101,
+      vlan_id: 101,
+      name: 'PPPOE',
+    };
   const speedProfile =
     db.speed_profiles.find((s) => s.id === onu.speed_profile_id) ||
     db.speed_profiles[0];

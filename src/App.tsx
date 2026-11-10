@@ -270,45 +270,131 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     const targetOnu = db.onus.find((o) => o.id === onuId);
     if (!targetOnu) return;
 
-    const targetPortNum = updatedFields.port || targetOnu.port || 2;
+    const targetOltId = updatedFields.olt_id || targetOnu.olt_id || db.olts[0]?.id || 1;
+    const targetBoard = updatedFields.board || targetOnu.board || 3;
+    const targetPortNum = updatedFields.port || targetOnu.port || 1;
+
+    // Trigger live TCP Telnet execution in background if OLT is reachable
+    fetch('/api/telnet/exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        oltId: targetOltId,
+        commands: generatedCli
+          .split('\n')
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0 && !l.startsWith('!')),
+      }),
+    }).catch(() => {});
+
     const newLog: ProvisioningLogRecord = {
       id: Date.now(),
-      olt_id: updatedFields.olt_id || targetOnu.olt_id,
+      olt_id: targetOltId,
       onu_id: onuId,
       serial_number: targetOnu.serial_number,
       action_type: 'AUTHORIZE',
-      interface_target: `gpon-onu_1/${updatedFields.board || 3}/${targetPortNum}:${allocatedOnuIndex}`,
-      summary_text: `gpon-onu_1/${updatedFields.board || 3}/${targetPortNum}:${allocatedOnuIndex} authorized`,
+      interface_target: `gpon-onu_1/${targetBoard}/${targetPortNum}:${allocatedOnuIndex}`,
+      summary_text: `gpon-onu_1/${targetBoard}/${targetPortNum}:${allocatedOnuIndex} authorized`,
       cli_script: generatedCli,
       olt_response: '[OK - ZTE OMCI & TR-069 Provisioned]',
       execution_status: 'SUCCESS',
-      executed_by: 'muslikhin997@gmail.com',
+      executed_by: 'likhin',
       duration_ms: 290,
       created_at: 'Just now',
     };
 
-    setDb((prev) => ({
-      ...prev,
-      onus: prev.onus.map((item) =>
-        item.id === onuId ? { ...item, ...updatedFields } : item
-      ),
-      pon_ports: prev.pon_ports.map((p) =>
-        p.port_number === targetPortNum
-          ? {
-              ...p,
-              online_onus: p.online_onus + 1,
-              total_onus: p.total_onus + 1,
-            }
-          : p
-      ),
-      provisioning_logs: [newLog, ...prev.provisioning_logs],
-    }));
+    setDb((prev) => {
+      const hasPonPort = prev.pon_ports.some(
+        (p) => p.olt_id === targetOltId && p.port_number === targetPortNum
+      );
+      const updatedPonPorts = hasPonPort
+        ? prev.pon_ports.map((p) =>
+            p.olt_id === targetOltId && p.port_number === targetPortNum
+              ? {
+                  ...p,
+                  oper_status: 'Up' as const,
+                  online_onus: p.online_onus + 1,
+                  total_onus: p.total_onus + 1,
+                }
+              : p
+          )
+        : [
+            ...prev.pon_ports,
+            {
+              id: targetOltId * 100 + targetPortNum,
+              olt_id: targetOltId,
+              rack: 1,
+              shelf: 3,
+              slot: targetBoard,
+              port_number: targetPortNum,
+              interface_name: `gpon-olt_1/${targetBoard}/${targetPortNum}`,
+              board_model: 'GTGH',
+              description: `PON 1/${targetBoard}/${targetPortNum}`,
+              admin_state: 'ENABLED' as const,
+              oper_status: 'Up' as const,
+              online_onus: 1,
+              total_onus: 1,
+              avg_signal_dbm: -23.5,
+              tx_power_dbm: 10.5,
+              max_onu_capacity: 128,
+            },
+          ];
+
+      const hasVlan = prev.vlans.some((v) => v.olt_id === targetOltId);
+      const updatedVlans = hasVlan
+        ? prev.vlans
+        : [
+            ...prev.vlans,
+            {
+              id: targetOltId * 10000 + 100,
+              olt_id: targetOltId,
+              vlan_id: 100,
+              name: 'TR069',
+              description: 'TR069 Management',
+              default_for: 'None selected',
+              used_for_mgmt_tr069_voip: true,
+              used_for_iptv: false,
+              dhcp_snooping: false,
+              lan_to_lan: false,
+              onus_count: 0,
+              service_type: 'TR069_MGMT' as const,
+              svlan_id: null,
+              is_default: false,
+            },
+            {
+              id: targetOltId * 10000 + 101,
+              olt_id: targetOltId,
+              vlan_id: 101,
+              name: 'PPPOE',
+              description: 'PPPOE Subscribers',
+              default_for: 'None selected',
+              used_for_mgmt_tr069_voip: false,
+              used_for_iptv: false,
+              dhcp_snooping: false,
+              lan_to_lan: false,
+              onus_count: 1,
+              service_type: 'PPPOE' as const,
+              svlan_id: null,
+              is_default: true,
+            },
+          ];
+
+      return {
+        ...prev,
+        onus: prev.onus.map((item) =>
+          item.id === onuId ? { ...item, ...updatedFields } : item
+        ),
+        pon_ports: updatedPonPorts,
+        vlans: updatedVlans,
+        provisioning_logs: [newLog, ...prev.provisioning_logs],
+      };
+    });
 
     setAuthorizingOnu(null);
     setSelectedOnuId(onuId);
     setActiveView('ONU_DETAIL');
     showToast(
-      `ONU ${targetOnu.serial_number} berhasil di-Authorize pada gpon-onu_1/${updatedFields.board || 3}/${targetPortNum}:${allocatedOnuIndex}`
+      `ONU ${targetOnu.serial_number} berhasil di-Authorize pada gpon-onu_1/${targetBoard}/${targetPortNum}:${allocatedOnuIndex}`
     );
   };
 
@@ -1969,6 +2055,62 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     temp_c: 'N/A',
                     pvid_untag: 42,
                     tagged_vlans: 'Hybrid: 102',
+                  },
+                ],
+                pon_ports: [
+                  ...prev.pon_ports,
+                  ...Array.from({ length: 16 }, (_, idx) => ({
+                    id: nextId * 100 + idx + 1,
+                    olt_id: nextId,
+                    rack: 1,
+                    shelf: 3,
+                    slot: 3,
+                    port_number: idx + 1,
+                    interface_name: `gpon-olt_1/3/${idx + 1}`,
+                    board_model: 'GTGH',
+                    description: `PON 1/3/${idx + 1}`,
+                    admin_state: 'ENABLED' as const,
+                    oper_status: 'Up' as const,
+                    online_onus: 0,
+                    total_onus: 0,
+                    avg_signal_dbm: null,
+                    tx_power_dbm: 10.5,
+                    max_onu_capacity: 128,
+                  })),
+                ],
+                vlans: [
+                  ...prev.vlans,
+                  {
+                    id: nextId * 10000 + 100,
+                    olt_id: nextId,
+                    vlan_id: 100,
+                    name: 'TR069',
+                    description: 'TR069',
+                    default_for: 'None selected',
+                    used_for_mgmt_tr069_voip: true,
+                    used_for_iptv: false,
+                    dhcp_snooping: false,
+                    lan_to_lan: false,
+                    onus_count: 0,
+                    service_type: 'TR069_MGMT' as const,
+                    svlan_id: null,
+                    is_default: false,
+                  },
+                  {
+                    id: nextId * 10000 + 101,
+                    olt_id: nextId,
+                    vlan_id: 101,
+                    name: 'PPPOE',
+                    description: 'PPPOE',
+                    default_for: 'None selected',
+                    used_for_mgmt_tr069_voip: false,
+                    used_for_iptv: false,
+                    dhcp_snooping: false,
+                    lan_to_lan: false,
+                    onus_count: 0,
+                    service_type: 'PPPOE' as const,
+                    svlan_id: null,
+                    is_default: true,
                   },
                 ],
               }));

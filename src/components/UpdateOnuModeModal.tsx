@@ -26,11 +26,24 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
   onClose,
   onConfirmUpdate,
 }) => {
-  const olt = db.olts.find((o) => o.id === onu.olt_id) || db.olts[0];
-  const ponPort = db.pon_ports.find((p) => p.id === onu.pon_port_id) || db.pon_ports[0];
+  const olt =
+    db.olts.find((o) => o.id === onu.olt_id) ||
+    db.olts[0] || {
+      id: onu.olt_id || 1,
+      name: 'OLT-1',
+      firmware_version: 'V2.1.0' as const,
+    };
+  const ponPort =
+    db.pon_ports.find(
+      (p) =>
+        p.id === onu.pon_port_id ||
+        (p.olt_id === onu.olt_id && p.port_number === onu.port)
+    ) || db.pon_ports[0];
+  const ponInterfaceName =
+    ponPort?.interface_name || `gpon-olt_1/${onu.board || 3}/${onu.port || 1}`;
 
   const [vlanRecordId, setVlanRecordId] = useState<number>(
-    onu.vlan_id || db.vlans[0]?.id || 1
+    onu.vlan_id || db.vlans[0]?.id || 101
   );
   const [onuMode, setOnuMode] = useState<OnuModeOption>(onu.onu_mode || 'Routing');
   const [wanMode, setWanMode] = useState<WanModeOption>(
@@ -80,15 +93,20 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
   const [copied, setCopied] = useState<boolean>(false);
 
   const selectedVlan =
-    db.vlans.find((v) => v.id === vlanRecordId) || db.vlans[0];
+    db.vlans.find((v) => v.id === vlanRecordId) ||
+    db.vlans[0] || {
+      id: 101,
+      vlan_id: 101,
+      name: 'PPPOE',
+    };
   const selectedTr069Profile =
     db.tr069_profiles.find((p) => p.id === tr069ProfileId) ||
     db.tr069_profiles[0];
 
   const generatedCli = useMemo(() => {
     return generateUpdateOnuModeCliScript({
-      firmwareVersion: olt.firmware_version,
-      ponInterface: ponPort.interface_name,
+      firmwareVersion: olt?.firmware_version || 'V2.1.0',
+      ponInterface: ponInterfaceName,
       onuIndex: onu.onu_index || 1,
       serialNumber: onu.serial_number,
       vlanId: selectedVlan?.vlan_id || 101,
@@ -111,8 +129,8 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
       wifiPassword,
     });
   }, [
-    olt.firmware_version,
-    ponPort.interface_name,
+    olt?.firmware_version,
+    ponInterfaceName,
     onu.onu_index,
     onu.serial_number,
     selectedVlan,
@@ -169,7 +187,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
               Update ONU mode
             </h2>
             <span className="font-mono text-xs text-slate-400">
-              ({ponPort.interface_name.replace('olt', 'onu')}:{onu.onu_index || 1} · SN: {onu.serial_number})
+              ({ponInterfaceName.replace('olt', 'onu')}:{onu.onu_index || 1} · SN: {onu.serial_number})
             </span>
           </div>
           <div className="flex items-center gap-3">
