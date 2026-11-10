@@ -1,17 +1,41 @@
 # =============================================================================
-# Docker Compose — JETCYBERNET SmartOLT Web App (Terpisah dari Container DB)
-# - Port Aplikasi Web: 3004 (http://localhost:3004)
-# - Koneksi PostgreSQL Host: localhost:5435 (via host.docker.internal:5435)
-#   User: likhin | Pass: 11013009 | Port: 5435
+# Docker Compose — JETCYBERNET SmartOLT (Port 3004) + PostgreSQL Terpisah (Port 5435)
+# - Container PostgreSQL dibuat TERPISAH (container_name & volume sendiri)
+#   agar tidak bentrok dengan PostgreSQL default (5432) yang sudah ada di Docker Anda.
+# - Bisa diakses langsung dari localhost:5435 (User: likhin | Pass: 11013009)
+# - Web SmartOLT berjalan di http://localhost:3004
 # =============================================================================
 
 services:
+  smartolt-postgres:
+    image: postgres:16-alpine
+    container_name: jetcybernet-smartolt-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=likhin
+      - POSTGRES_PASSWORD=11013009
+      - POSTGRES_DB=smartolt_db
+      - PGPORT=5435
+    ports:
+      - "5435:5435"
+    volumes:
+      - smartolt_pg_separate_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U likhin -d smartolt_db -p 5435"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   smartolt-web:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: jetcybernet-smartolt-app
     restart: unless-stopped
+    depends_on:
+      smartolt-postgres:
+        condition: service_healthy
     ports:
       - "3004:3004"
     extra_hosts:
@@ -19,7 +43,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3004
-      - PG_HOST=host.docker.internal
+      - PG_HOST=localhost
       - PG_PORT=5435
       - PG_USER=likhin
       - PG_PASSWORD=11013009
@@ -27,3 +51,6 @@ services:
       - SQLITE_PATH=/app/data/smartolt_live.sqlite
     volumes:
       - ./data:/app/data
+
+volumes:
+  smartolt_pg_separate_data:

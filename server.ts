@@ -280,20 +280,24 @@ async function initPostgresConnection(cfg: PgConnectionConfig): Promise<{
 }> {
   currentPgConfig = cfg;
 
-  // Inside Docker, the host machine's localhost:5435 is reachable via host.docker.internal or Docker bridge gateway IPs.
-  // Automatically probe candidate hosts if user configured localhost / 127.0.0.1 / host.docker.internal.
-  const isLocalTarget = ['localhost', '127.0.0.1', 'host.docker.internal'].includes(
-    cfg.host.trim().toLowerCase()
-  );
+  // Inside Docker, localhost:5435 on the host or the dedicated smartolt-postgres container (port 5435)
+  // is probed automatically when user configures localhost / 127.0.0.1 / host.docker.internal.
+  const isLocalTarget = [
+    'localhost',
+    '127.0.0.1',
+    'host.docker.internal',
+    'smartolt-postgres',
+  ].includes(cfg.host.trim().toLowerCase());
   const candidateHosts = isLocalTarget
     ? Array.from(
         new Set([
-          cfg.host.trim(),
-          'host.docker.internal',
-          '127.0.0.1',
           'localhost',
+          '127.0.0.1',
+          'host.docker.internal',
+          'smartolt-postgres',
           '172.17.0.1',
           '172.18.0.1',
+          cfg.host.trim(),
         ])
       )
     : [cfg.host.trim()];
@@ -316,15 +320,18 @@ async function initPostgresConnection(cfg: PgConnectionConfig): Promise<{
       pgPool = pool;
       await pgPool.query(POSTGRES_SCHEMA_SQL);
 
+      const displayHost = isLocalTarget ? 'localhost' : candidateHost;
       currentPgConfig = {
         ...cfg,
-        host: candidateHost,
+        host: displayHost,
         database: resolvedDb,
       };
       pgConnected = true;
       pgLastError = null;
-      activeDbEngine = `PostgreSQL (${cfg.user}@${candidateHost}:${cfg.port}/${resolvedDb})`;
-      console.log(`[SmartOLT DB] Connected to ${activeDbEngine}`);
+      activeDbEngine = `PostgreSQL (${cfg.user}@${displayHost}:${cfg.port}/${resolvedDb})`;
+      console.log(
+        `[SmartOLT DB] Connected to ${activeDbEngine} (via ${candidateHost}:${cfg.port})`
+      );
       return { connected: true };
     } catch (err) {
       errorsByHost.push(`${candidateHost}:${cfg.port} -> ${formatPgError(err)}`);

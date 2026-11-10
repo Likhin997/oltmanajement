@@ -19,24 +19,42 @@ export const PRODUCTION_CODE_MODULES: CodeModuleFile[] = [
     fileName: 'docker-compose.yml',
     language: 'bash',
     description:
-      'Docker Compose App Terpisah (Port 3004) -> Konek ke PostgreSQL yang sudah ada di localhost:5435 (user: likhin)',
+      'Docker Compose: SmartOLT Web (Port 3004) + Container PostgreSQL Terpisah di localhost:5435 (user: likhin, pass: 11013009)',
     code: `# File: docker-compose.yml
-# Container SmartOLT dibuat TERPISAH dari container PostgreSQL Anda.
-# Menggunakan extra_hosts: "host.docker.internal:host-gateway" dan ports "3004:3004"
-# agar container dapat menembus localhost:5435 milik host utama di Linux, Windows, maupun macOS.
-#
-# Jalankan dengan perintah:
-#   docker compose up -d --build
-# Akses web di:
-#   http://localhost:3004
+# Membuat container PostgreSQL TERPISAH (jetcybernet-smartolt-postgres) di port 5435
+# agar tidak bentrok dengan PostgreSQL (5432) yang sudah ada di Docker Anda.
+# Bisa diakses dari localhost:5435 dengan user: likhin & pass: 11013009.
 
 services:
+  smartolt-postgres:
+    image: postgres:16-alpine
+    container_name: jetcybernet-smartolt-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=likhin
+      - POSTGRES_PASSWORD=11013009
+      - POSTGRES_DB=smartolt_db
+      - PGPORT=5435
+    ports:
+      - "5435:5435"
+    volumes:
+      - smartolt_pg_separate_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U likhin -d smartolt_db -p 5435"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   smartolt-web:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: jetcybernet-smartolt-app
     restart: unless-stopped
+    depends_on:
+      smartolt-postgres:
+        condition: service_healthy
     ports:
       - "3004:3004"
     extra_hosts:
@@ -44,7 +62,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3004
-      - PG_HOST=host.docker.internal
+      - PG_HOST=localhost
       - PG_PORT=5435
       - PG_USER=likhin
       - PG_PASSWORD=11013009
@@ -52,6 +70,9 @@ services:
       - SQLITE_PATH=/app/data/smartolt_live.sqlite
     volumes:
       - ./data:/app/data
+
+volumes:
+  smartolt_pg_separate_data:
 `,
   },
   {
