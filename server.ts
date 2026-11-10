@@ -182,63 +182,164 @@ const POSTGRES_SCHEMA_SQL = `
   );
 `;
 
+function formatPgError(err: unknown): string {
+  if (!err) return 'Unknown error';
+  const anyErr = err as {
+    message?: string;
+    code?: string;
+    errors?: Array<{ message?: string; code?: string; address?: string; port?: number }>;
+  };
+  if (Array.isArray(anyErr.errors) && anyErr.errors.length > 0) {
+    const parts = anyErr.errors.map(
+      (e) => `${e.code || 'ERR'} ${e.address || ''}:${e.port || ''}`.trim()
+    );
+    return `${anyErr.code || 'AggregateError'} (${parts.join(', ')})`;
+  }
+  return anyErr.message || anyErr.code || String(err);
+}
+
+async function tryConnectSingleHost(
+  host: string,
+  port: number,
+  user: string,
+  password: string,
+  targetDb: string
+): Promise<{ pool: pg.Pool; resolvedDb: string }> {
+  // 1. Try connecting directly to targetDb first
+  const directPool = new Pool({
+    host,
+    port,
+    user,
+    password,
+    database: targetDb,
+    max: 15,
+    connectionTimeoutMillis: 2500,
+  });
+
+  try {
+    await directPool.query('SELECT 1');
+    return { pool: directPool, resolvedDb: targetDb };
+  } catch (directErr) {
+    await directPool.end().catch(() => {});
+    const errCode = (directErr as { code?: string }).code;
+    // If error is NOT "database does not exist" (3D000), rethrow connection/auth error immediately
+    if (errCode !== '3D000') {
+      throw directErr;
+    }
+  }
+
+  // 2. Database does not exist yet (3D000): connect to default maintenance DB ('postgres', user, or 'template1') to create it
+  const adminDbs = Array.from(new Set(['postgres', user, 'template1']));
+  let lastAdminErr: unknown = null;
+
+  for (const adminDb of adminDbs) {
+    const adminPool = new Pool({
+      host,
+      port,
+      user,
+      password,
+      database: adminDb,
+      connectionTimeoutMillis: 2500,
+    });
+    try {
+      const dbCheck = await adminPool.query(
+        `SELECT 1 FROM pg_database WHERE datname = $1`,
+        [targetDb]
+      );
+      if (dbCheck.rowCount === 0) {
+        await adminPool.query(`CREATE DATABASE "${targetDb}"`);
+        console.log(
+          `[PostgreSQL] Created database "${targetDb}" on ${host}:${port}`
+        );
+      }
+      await adminPool.end().catch(() => {});
+
+      const createdPool = new Pool({
+        host,
+        port,
+        user,
+        password,
+        database: targetDb,
+        max: 15,
+        connectionTimeoutMillis: 3000,
+      });
+      await createdPool.query('SELECT 1');
+      return { pool: createdPool, resolvedDb: targetDb };
+    } catch (adminErr) {
+      lastAdminErr = adminErr;
+      await adminPool.end().catch(() => {});
+    }
+  }
+
+  throw lastAdminErr || new Error(`Could not create database ${targetDb}`);
+}
+
 async function initPostgresConnection(cfg: PgConnectionConfig): Promise<{
   connected: boolean;
   error?: string;
 }> {
   currentPgConfig = cfg;
-  try {
-    // Step 1: Connect to default 'postgres' database to ensure target database exists
-    const adminPool = new Pool({
-      host: cfg.host,
-      port: Number(cfg.port),
-      user: cfg.user,
-      password: cfg.password,
-      database: 'postgres',
-      connectionTimeoutMillis: 3000,
-    });
 
-    const dbCheck = await adminPool.query(
-      `SELECT 1 FROM pg_database WHERE datname = $1`,
-      [cfg.database]
-    );
-    if (dbCheck.rowCount === 0) {
-      await adminPool.query(`CREATE DATABASE "${cfg.database}"`);
-      console.log(`[PostgreSQL] Created database "${cfg.database}" on ${cfg.host}:${cfg.port}`);
+  // Inside Docker, the host machine's localhost:5435 is reachable via host.docker.internal or Docker bridge gateway IPs.
+  // Automatically probe candidate hosts if user configured localhost / 127.0.0.1 / host.docker.internal.
+  const isLocalTarget = ['localhost', '127.0.0.1', 'host.docker.internal'].includes(
+    cfg.host.trim().toLowerCase()
+  );
+  const candidateHosts = isLocalTarget
+    ? Array.from(
+        new Set([
+          cfg.host.trim(),
+          'host.docker.internal',
+          '127.0.0.1',
+          'localhost',
+          '172.17.0.1',
+          '172.18.0.1',
+        ])
+      )
+    : [cfg.host.trim()];
+
+  const errorsByHost: string[] = [];
+
+  for (const candidateHost of candidateHosts) {
+    try {
+      const { pool, resolvedDb } = await tryConnectSingleHost(
+        candidateHost,
+        Number(cfg.port),
+        cfg.user,
+        cfg.password,
+        cfg.database
+      );
+
+      if (pgPool) {
+        await pgPool.end().catch(() => {});
+      }
+      pgPool = pool;
+      await pgPool.query(POSTGRES_SCHEMA_SQL);
+
+      currentPgConfig = {
+        ...cfg,
+        host: candidateHost,
+        database: resolvedDb,
+      };
+      pgConnected = true;
+      pgLastError = null;
+      activeDbEngine = `PostgreSQL (${cfg.user}@${candidateHost}:${cfg.port}/${resolvedDb})`;
+      console.log(`[SmartOLT DB] Connected to ${activeDbEngine}`);
+      return { connected: true };
+    } catch (err) {
+      errorsByHost.push(`${candidateHost}:${cfg.port} -> ${formatPgError(err)}`);
     }
-    await adminPool.end();
-
-    // Step 2: Connect to target database and create tables
-    if (pgPool) {
-      await pgPool.end().catch(() => {});
-    }
-    pgPool = new Pool({
-      host: cfg.host,
-      port: Number(cfg.port),
-      user: cfg.user,
-      password: cfg.password,
-      database: cfg.database,
-      max: 15,
-      connectionTimeoutMillis: 3500,
-    });
-
-    await pgPool.query(POSTGRES_SCHEMA_SQL);
-    pgConnected = true;
-    pgLastError = null;
-    activeDbEngine = `PostgreSQL (${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database})`;
-    console.log(`[SmartOLT DB] Connected to ${activeDbEngine}`);
-    return { connected: true };
-  } catch (err) {
-    const msg = (err as Error).message;
-    pgConnected = false;
-    pgLastError = msg;
-    pgPool = null;
-    activeDbEngine = `PostgreSQL Target (${cfg.host}:${cfg.port}) [Local Cache Active]`;
-    console.warn(
-      `[SmartOLT DB] PostgreSQL at ${cfg.host}:${cfg.port} (user: ${cfg.user}) not reachable from this container (${msg}). Using persistent SQLite cache until run on your Docker host.`
-    );
-    return { connected: false, error: msg };
   }
+
+  const msg = errorsByHost.join(' | ');
+  pgConnected = false;
+  pgLastError = msg;
+  pgPool = null;
+  activeDbEngine = `PostgreSQL Target (${cfg.host}:${cfg.port}) [Local Cache Active]`;
+  console.warn(
+    `[SmartOLT DB] PostgreSQL at ${cfg.host}:${cfg.port} (user: ${cfg.user}) not reachable (${msg}). Using persistent SQLite cache until PostgreSQL is reachable.`
+  );
+  return { connected: false, error: msg };
 }
 
 async function syncRelationalTablesToPostgres(

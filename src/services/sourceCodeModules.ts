@@ -22,8 +22,8 @@ export const PRODUCTION_CODE_MODULES: CodeModuleFile[] = [
       'Docker Compose App Terpisah (Port 3004) -> Konek ke PostgreSQL yang sudah ada di localhost:5435 (user: likhin)',
     code: `# File: docker-compose.yml
 # Container SmartOLT dibuat TERPISAH dari container PostgreSQL Anda.
-# Menggunakan network_mode: "host" agar aplikasi jalan di Port 3004 dan
-# langsung terkoneksi ke PostgreSQL Anda di localhost:5435 (user: likhin).
+# Menggunakan extra_hosts: "host.docker.internal:host-gateway" dan ports "3004:3004"
+# agar container dapat menembus localhost:5435 milik host utama di Linux, Windows, maupun macOS.
 #
 # Jalankan dengan perintah:
 #   docker compose up -d --build
@@ -37,11 +37,14 @@ services:
       dockerfile: Dockerfile
     container_name: jetcybernet-smartolt-app
     restart: unless-stopped
-    network_mode: "host"
+    ports:
+      - "3004:3004"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - NODE_ENV=production
       - PORT=3004
-      - PG_HOST=localhost
+      - PG_HOST=host.docker.internal
       - PG_PORT=5435
       - PG_USER=likhin
       - PG_PASSWORD=11013009
@@ -49,31 +52,6 @@ services:
       - SQLITE_PATH=/app/data/smartolt_live.sqlite
     volumes:
       - ./data:/app/data
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-# -----------------------------------------------------------------------------
-# CATATAN: Jika Anda menggunakan Docker Desktop (Windows / Mac) di mana
-# network_mode: "host" membatasi port mapping, gunakan konfigurasi alternatif ini:
-#
-# services:
-#   smartolt-web:
-#     build: .
-#     container_name: jetcybernet-smartolt-app
-#     restart: unless-stopped
-#     ports:
-#       - "3004:3004"
-#     environment:
-#       - NODE_ENV=production
-#       - PORT=3004
-#       - PG_HOST=host.docker.internal
-#       - PG_PORT=5435
-#       - PG_USER=likhin
-#       - PG_PASSWORD=11013009
-#       - PG_DATABASE=smartolt_db
-#     extra_hosts:
-#       - "host.docker.internal:host-gateway"
-# -----------------------------------------------------------------------------
 `,
   },
   {
