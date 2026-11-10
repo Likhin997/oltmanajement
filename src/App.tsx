@@ -7,6 +7,7 @@ import React, { useState, useEffect } from 'react';
 import {
   INITIAL_DB_STATE,
   SmartOltDatabaseState,
+  OltRecord,
   OnuRecord,
   ProvisioningLogRecord,
   VlanRecord,
@@ -262,6 +263,66 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     return true;
   });
 
+  // Central Live OLT Full Synchronization — connects via Telnet to the target OLT,
+  // pulls `show card`, `show gpon onu uncfg`, `show gpon onu state`, and `show running-config`,
+  // and synchronizes all VLANs, Configured ONUs, Unconfigured ONUs, Uplinks, PON ports & Cards into PostgreSQL.
+  const syncOltFromTelnetLive = async (
+    oltId: number,
+    oltRecordOverride?: Partial<OltRecord>
+  ) => {
+    const targetOlt = db.olts.find((o) => o.id === oltId);
+    const mergedOlt = { ...(targetOlt || {}), ...(oltRecordOverride || {}), id: oltId };
+    showToast(
+      `Menghubungi OLT ${mergedOlt.name || mergedOlt.ip_address || oltId} via Telnet untuk sinkronisasi VLAN, ONU & Running Config...`
+    );
+    try {
+      const resp = await fetch(`/api/olts/${oltId}/sync-live`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ oltRecord: mergedOlt }),
+      });
+      const data = await resp.json();
+      if (data.state) {
+        setDb(data.state);
+      }
+      if (data.ok) {
+        showToast(
+          `✓ Sinkronisasi OLT Berhasil: ${data.synced?.vlans || 0} VLAN, ${
+            data.synced?.configuredOnus || 0
+          } ONU Terkonfigurasi, ${
+            data.synced?.unconfiguredOnus || 0
+          } Unconfigured ONU, ${data.synced?.uplinks || 0} Uplink ditarik dari OLT!`
+        );
+      } else {
+        showToast(
+          `⚠ Gagal menarik data dari OLT via Telnet: ${
+            data.error || 'Pastikan IP/Port Telnet & kredensial OLT benar'
+          }`
+        );
+      }
+    } catch (err) {
+      showToast(`⚠ Gagal menghubungi endpoint sync OLT: ${(err as Error).message}`);
+    }
+  };
+
+  // Auto-sync OLT configuration from Telnet on initial load if an OLT exists in DB
+  // but hasn't pulled its full VLAN / ONU running-config yet.
+  const [autoSyncedInitial, setAutoSyncedInitial] = useState(false);
+  useEffect(() => {
+    if (!dbLoaded || autoSyncedInitial) return;
+    if (db.olts.length > 0) {
+      setAutoSyncedInitial(true);
+      const firstOlt = db.olts[0];
+      const oltVlanCount = db.vlans.filter((v) => v.olt_id === firstOlt.id).length;
+      const oltConfOnuCount = db.onus.filter(
+        (u) => u.olt_id === firstOlt.id && u.is_authorized
+      ).length;
+      if (oltVlanCount <= 2 && oltConfOnuCount === 0) {
+        void syncOltFromTelnetLive(firstOlt.id, firstOlt);
+      }
+    }
+  }, [dbLoaded, autoSyncedInitial, db.olts]);
+
   // Central Live OLT CLI Executor — sends commands via Telnet/SSH to the target OLT
   // and updates provisioning_logs + toast with the real OLT execution response.
   const executeOltCliLive = async (
@@ -277,20 +338,27 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     }
   ) => {
     const startMs = Date.now();
+    const targetOlt = db.olts.find((o) => o.id === oltId);
+    const connPayload = {
+      ip_address: oltConnectionOverride?.ip_address || targetOlt?.ip_address,
+      telnet_port: oltConnectionOverride?.telnet_port || targetOlt?.telnet_port,
+      olt_username: oltConnectionOverride?.olt_username || targetOlt?.olt_username,
+      olt_password: oltConnectionOverride?.olt_password || targetOlt?.olt_password,
+    };
     try {
       const resp = await fetch('/api/telnet/exec', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           oltId,
-          ...(oltConnectionOverride || {}),
+          ...connPayload,
           commands: cliScript,
         }),
       });
       const data = await resp.json();
       const elapsedMs = Date.now() - startMs;
 
-      if (data.ok) {
+      if (data.ok || data.reachable) {
         const cleanOutput = (data.output || '[OK - Executed on OLT]').trim();
         setDb((prev) => ({
           ...prev,
@@ -1138,7 +1206,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             {o.id} - {o.name} ({o.ip_address})
                           </button>
                         </div>
-                        <div className="flex items-center gap-4 font-mono text-xs">
+                        <div className="flex items-center gap-3 font-mono text-xs">
+                          <button
+                            type="button"
+                            onClick={() => void syncOltFromTelnetLive(o.id, o)}
+                            className="flex items-center gap-1 rounded bg-emerald-600 px-2.5 py-1 font-sans text-[11px] font-bold text-white hover:bg-emerald-500"
+                            title="Ambil semua VLAN, ONU, Uplink & Running Config langsung dari OLT via Telnet"
+                          >
+                            <RefreshCw className="h-3 w-3" />
+                            Sync Data &amp; Config OLT
+                          </button>
                           <span className="text-slate-300">
                             Uptime: {o.uptime_str},
                           </span>
@@ -1290,33 +1367,14 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       showToast('Tambahkan OLT terlebih dahulu di menu Settings -> OLTs.');
                       return;
                     }
-                    let totalFound = 0;
                     for (const o of db.olts) {
-                      try {
-                        const resp = await fetch(`/api/olts/${o.id}/poll-uncfg`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({}),
-                        });
-                        const data = await resp.json();
-                        if (data.state) setDb(data.state);
-                        totalFound += data.discoveredCount || 0;
-                      } catch {
-                        // ignore
-                      }
+                      await syncOltFromTelnetLive(o.id, o);
                     }
-                    showToast(
-                      `Live Telnet Poll (show gpon onu uncfg) selesai: ${
-                        totalFound > 0
-                          ? `${totalFound} SN baru ditemukan!`
-                          : `${unconfiguredOnus.length} ONU menunggu otorisasi.`
-                      }`
-                    );
                   }}
                   className="flex items-center gap-1 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
-                  Poll OLT (Telnet)
+                  Poll &amp; Sync OLT (Telnet)
                 </button>
                 <button
                   type="button"
@@ -1990,12 +2048,21 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         <div className="inline-flex items-center gap-1.5">
                           <button
                             type="button"
+                            onClick={() => void syncOltFromTelnetLive(o.id, o)}
+                            title="Sync VLAN, ONU, Uplink & Running Config dari OLT via Telnet"
+                            className="flex items-center gap-1 rounded bg-emerald-600 px-2.5 py-1.5 text-[11px] font-bold text-white hover:bg-emerald-500"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            Sync OLT
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => {
                               setSelectedOltId(o.id);
-                              setInitialOltTab('UPLINK');
+                              setInitialOltTab('VLANS');
                               setActiveView('OLT_DETAIL');
                             }}
-                            title="Open Uplink & VLAN Tagging"
+                            title="Open VLANs & Uplink Tagging"
                             className="rounded bg-slate-600 p-1.5 text-white hover:bg-slate-500"
                           >
                             <Eye className="h-3.5 w-3.5" />
@@ -2211,40 +2278,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               }));
               setSelectedOltId(nextId);
               showToast(
-                `OLT ${newOltData.name} (${newOltData.hardware_model} - ${newOltData.ip_address}) berhasil disimpan & diinisialisasi!`
+                `OLT ${newOltData.name} (${newOltData.hardware_model} - ${newOltData.ip_address}) disimpan! Mengambil konfigurasi VLAN & ONU dari OLT...`
               );
               setActiveView('OLTS_LIST');
 
-              // Bootstrap base ZTE GPON profiles & default VLAN 100/101 on the OLT automatically
-              const bootstrapCli = [
-                'configure terminal',
-                'vlan database',
-                '  vlan 100,101',
-                'exit',
-                'gpon',
-                '  profile tcont SMARTOLT-1G-UP type 4 maximum 1000000',
-                '  profile tcont SMARTOLT-VOIPMNG-10M type 2 assured 10240 maximum 10240',
-                '  profile traffic SMARTOLT-1G-DOWN sir 1000000 pir 1000000',
-                '  profile traffic SMARTOLT-VOIPMNG-10M sir 10240 pir 10240',
-                '  onu profile vlan SMARTOLT-vlan100 tag-mode tag cvlan 100',
-                '  onu profile vlan SMARTOLT-vlan101 tag-mode tag cvlan 101',
-                'exit',
-                'onu-type ALL gpon max-tcont 8 max-gemport 32 max-switch-perslot 8 max-flow-perswitch 8 max-iphost 5',
-                'end',
-                'write',
-              ].join('\n');
-              void executeOltCliLive(
-                nextId,
-                bootstrapCli,
-                Date.now(),
-                `Bootstrap GPON Profiles on ${newOltData.name}`,
-                {
-                  ip_address: newOltData.ip_address,
-                  telnet_port: newOltData.telnet_port,
-                  olt_username: newOltData.olt_username,
-                  olt_password: newOltData.olt_password,
-                }
-              );
+              // Immediately pull all existing VLANs, ONUs, Uplinks, Cards & Running Config from the OLT over Telnet!
+              void syncOltFromTelnetLive(nextId, {
+                ...newOltData,
+                id: nextId,
+              });
             }}
           />
         )}
@@ -2692,6 +2734,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               } catch (err) {
                 showToast(`Gagal mengimpor running-config: ${(err as Error).message}`);
               }
+            }}
+            onSyncOltLive={async (oltId) => {
+              await syncOltFromTelnetLive(oltId);
             }}
           />
         )}

@@ -374,11 +374,6 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
     `vlan database`,
     `  vlan ${params.vlanId}`,
     `exit`,
-    `gpon`,
-    `  profile tcont ${tcontUpProfile} type 4 maximum 1000000`,
-    `  profile traffic ${trafficDownProfile} sir 1000000 pir 1000000`,
-    `  onu profile vlan SMARTOLT-vlan${params.vlanId} tag-mode tag cvlan ${params.vlanId}`,
-    `exit`,
     `interface ${oltIf}`,
     `  onu ${params.onuIndex} type ${zteOnuType} sn ${params.serialNumber}`,
     `exit`,
@@ -983,42 +978,142 @@ export interface ParsedRunningConfigOnu {
   wanRemoteRestrictedIp: string | null;
 }
 
+export interface ParsedOltCard {
+  slot: number;
+  type: string;
+  realType: string;
+  ports: number | null;
+  swVersion: string;
+  status: 'Online' | 'Standby' | 'Offline';
+  role: 'Main' | 'Standby';
+}
+
 export interface ParsedRunningConfigSummary {
+  hostname: string | null;
   vlans: { vlanId: number; name: string }[];
+  cards: ParsedOltCard[];
+  tcontProfiles: {
+    name: string;
+    type: number;
+    fixedKbps: number;
+    assuredKbps: number;
+    maxKbps: number;
+  }[];
+  trafficProfiles: {
+    name: string;
+    sirKbps: number;
+    pirKbps: number;
+  }[];
   uplinks: {
     name: string;
     pvidUntag: number;
     taggedVlans: string;
     speed: string;
+    adminState: 'Enabled' | 'Disabled';
   }[];
   onus: ParsedRunningConfigOnu[];
+}
+
+export function parseZteCardOutput(rawText: string): ParsedOltCard[] {
+  const cardsMap = new Map<number, ParsedOltCard>();
+
+  // 1. From `add-card rackno 1 shelfno 1 slotno 3 GTGH` in running-config
+  const addCardRegex = /add-card\s+rackno\s+\d+\s+shelfno\s+\d+\s+slotno\s+(\d+)\s+(\S+)/gi;
+  let acm: RegExpExecArray | null;
+  while ((acm = addCardRegex.exec(rawText)) !== null) {
+    const slot = parseInt(acm[1], 10);
+    const ctype = acm[2].trim().toUpperCase();
+    cardsMap.set(slot, {
+      slot,
+      type: ctype,
+      realType: ctype,
+      ports: ctype.startsWith('GTG') ? 16 : ctype.startsWith('GTXO') ? 8 : ctype.startsWith('HUV') ? 4 : null,
+      swVersion: 'V2.1.0',
+      status: 'Online',
+      role: 'Main',
+    });
+  }
+
+  // 2. From `show card` output:
+  // 1    1     3    GTGH    GTGH     16     V1.0.0  V2.1.0          Insigh
+  const showCardRegex =
+    /^\s*\d+\s+\d+\s+(\d+)\s+([A-Z0-9]{3,8})\s+([A-Z0-9]{3,8})?\s*(\d+)?\s*(?:V[\d.]+\s+)?(V[\d.P]+)?\s*(Insigh|Inservice|Online|Standby|Offline)/gim;
+  let scm: RegExpExecArray | null;
+  while ((scm = showCardRegex.exec(rawText)) !== null) {
+    const slot = parseInt(scm[1], 10);
+    const cfgType = scm[2].toUpperCase();
+    const realType = (scm[3] || cfgType).toUpperCase();
+    const ports = scm[4] ? parseInt(scm[4], 10) : cfgType.startsWith('GTG') ? 16 : null;
+    const swVer = scm[5] || 'V2.1.0';
+    const rawStat = (scm[6] || 'Online').toLowerCase();
+    const status: ParsedOltCard['status'] =
+      rawStat === 'offline' ? 'Offline' : rawStat === 'standby' ? 'Standby' : 'Online';
+    cardsMap.set(slot, {
+      slot,
+      type: cfgType,
+      realType,
+      ports: ports === 0 ? null : ports,
+      swVersion: swVer,
+      status,
+      role: status === 'Standby' ? 'Standby' : 'Main',
+    });
+  }
+
+  return Array.from(cardsMap.values()).sort((a, b) => a.slot - b.slot);
+}
+
+function expandVlanSpecToNumbers(spec: string): number[] {
+  const nums: number[] = [];
+  const parts = spec.split(',');
+  for (const p of parts) {
+    const token = p.trim();
+    if (!token) continue;
+    if (token.includes('-')) {
+      const [s, e] = token.split('-').map((n) => parseInt(n.trim(), 10));
+      if (!isNaN(s) && !isNaN(e) && s <= e && e - s <= 500) {
+        for (let v = s; v <= e; v++) nums.push(v);
+      }
+    } else {
+      const v = parseInt(token, 10);
+      if (!isNaN(v) && v >= 1 && v <= 4094) nums.push(v);
+    }
+  }
+  return nums;
 }
 
 export function parseZteRunningConfig(rawConfig: string): ParsedRunningConfigSummary {
   const vlansMap = new Map<number, string>();
   const uplinks: ParsedRunningConfigSummary['uplinks'] = [];
   const onuMap = new Map<string, ParsedRunningConfigOnu>();
+  const tcontProfiles: ParsedRunningConfigSummary['tcontProfiles'] = [];
+  const trafficProfiles: ParsedRunningConfigSummary['trafficProfiles'] = [];
+
+  const hostMatch = rawConfig.match(/^\s*hostname\s+(\S+)/m);
+  const hostname = hostMatch ? hostMatch[1].trim() : null;
 
   // 1. Parse `vlan database`
-  const vlanDbMatch = rawConfig.match(/vlan database([\s\S]*?)!/);
-  if (vlanDbMatch) {
-    const vlanLines = vlanDbMatch[1].split(/\r?\n/);
+  const vlanDbRegex = /vlan database([\s\S]*?)!/g;
+  let vdb: RegExpExecArray | null;
+  while ((vdb = vlanDbRegex.exec(rawConfig)) !== null) {
+    const vlanLines = vdb[1].split(/\r?\n/);
     for (const l of vlanLines) {
       const m = l.trim().match(/^vlan\s+(.+)$/i);
       if (m) {
-        const parts = m[1].split(',');
-        for (const p of parts) {
-          if (p.includes('-')) {
-            const [s, e] = p.split('-').map((n) => parseInt(n.trim(), 10));
-            if (!isNaN(s) && !isNaN(e)) {
-              for (let v = s; v <= e; v++) vlansMap.set(v, `VLAN_${v}`);
-            }
-          } else {
-            const v = parseInt(p.trim(), 10);
-            if (!isNaN(v)) vlansMap.set(v, `VLAN_${v}`);
-          }
+        for (const v of expandVlanSpecToNumbers(m[1])) {
+          if (!vlansMap.has(v)) vlansMap.set(v, `VLAN_${v}`);
         }
       }
+    }
+  }
+
+  // 1b. Parse `onu profile vlan <name> tag-mode tag cvlan <id>`
+  const gponVlanProfRegex = /onu\s+profile\s+vlan\s+(\S+)\s+tag-mode\s+\S+\s+cvlan\s+(\d+)/gi;
+  let gvp: RegExpExecArray | null;
+  while ((gvp = gponVlanProfRegex.exec(rawConfig)) !== null) {
+    const profName = gvp[1].trim();
+    const vid = parseInt(gvp[2], 10);
+    if (!isNaN(vid) && !vlansMap.has(vid)) {
+      vlansMap.set(vid, profName.replace(/^SMARTOLT-vlan/i, 'VLAN_'));
     }
   }
 
@@ -1029,6 +1124,30 @@ export function parseZteRunningConfig(rawConfig: string): ParsedRunningConfigSum
     const vid = parseInt(vm[1], 10);
     const vname = vm[2].trim();
     vlansMap.set(vid, vname);
+  }
+
+  // 2b. Parse GPON TCONT & Traffic profiles
+  const tcontProfRegex =
+    /profile\s+tcont\s+(\S+)\s+type\s+(\d+)(?:\s+fixed\s+(\d+))?(?:\s+assured\s+(\d+))?\s+maximum\s+(\d+)/gi;
+  let tcp: RegExpExecArray | null;
+  while ((tcp = tcontProfRegex.exec(rawConfig)) !== null) {
+    tcontProfiles.push({
+      name: tcp[1].trim(),
+      type: parseInt(tcp[2], 10),
+      fixedKbps: tcp[3] ? parseInt(tcp[3], 10) : 0,
+      assuredKbps: tcp[4] ? parseInt(tcp[4], 10) : 0,
+      maxKbps: parseInt(tcp[5], 10),
+    });
+  }
+
+  const trafficProfRegex = /profile\s+traffic\s+(\S+)\s+sir\s+(\d+)\s+pir\s+(\d+)/gi;
+  let trp: RegExpExecArray | null;
+  while ((trp = trafficProfRegex.exec(rawConfig)) !== null) {
+    trafficProfiles.push({
+      name: trp[1].trim(),
+      sirKbps: parseInt(trp[2], 10),
+      pirKbps: parseInt(trp[3], 10),
+    });
   }
 
   // 3. Parse `interface gpon-olt_1/x/y` for ONU registrations
@@ -1081,7 +1200,13 @@ export function parseZteRunningConfig(rawConfig: string): ParsedRunningConfigSum
     const trafficMatch = body.match(/gemport\s+1\s+traffic-limit\s+downstream\s+(\S+)/);
     if (trafficMatch) existing.trafficProfile = trafficMatch[1].trim();
     const spMatch = body.match(/service-port\s+1\s+vport\s+1\s+user-vlan\s+(\d+)\s+vlan\s+(\d+)/);
-    if (spMatch) existing.vlanId = parseInt(spMatch[2], 10);
+    if (spMatch) {
+      const svlan = parseInt(spMatch[2], 10);
+      existing.vlanId = svlan;
+      if (!vlansMap.has(svlan)) {
+        vlansMap.set(svlan, svlan === 101 ? 'PPPOE' : `VLAN_${svlan}`);
+      }
+    }
   }
 
   // 5. Parse `pon-onu-mng gpon-onu_1/x/y:z`
@@ -1101,6 +1226,9 @@ export function parseZteRunningConfig(rawConfig: string): ParsedRunningConfigSum
     let fm: RegExpExecArray | null;
     while ((fm = flowRegex.exec(body)) !== null) {
       const fVlan = parseInt(fm[1], 10);
+      if (!vlansMap.has(fVlan)) {
+        vlansMap.set(fVlan, `VLAN_${fVlan}`);
+      }
       if (fVlan !== existing.vlanId && !existing.extraFlowVlans.includes(fVlan)) {
         existing.extraFlowVlans.push(fVlan);
       }
@@ -1124,19 +1252,34 @@ export function parseZteRunningConfig(rawConfig: string): ParsedRunningConfigSum
     const body = ub[2];
     const pvidM = body.match(/switchport\s+default\s+vlan\s+(\d+)/);
     const tagM = body.match(/switchport\s+vlan\s+([^\r\n]+?)\s+tag/);
+    const isShutdown = /^\s*shutdown\b/m.test(body) && !/^\s*no\s+shutdown\b/m.test(body);
+    if (tagM) {
+      for (const tv of expandVlanSpecToNumbers(tagM[1].trim())) {
+        if (!vlansMap.has(tv)) vlansMap.set(tv, `VLAN_${tv}`);
+      }
+    }
     uplinks.push({
       name,
       pvidUntag: pvidM ? parseInt(pvidM[1], 10) : 41,
       taggedVlans: `Hybrid: ${tagM ? tagM[1].trim() : '102'}`,
       speed: name.startsWith('xgei') ? 'Forced 10G-FullD' : 'Auto',
+      adminState: isShutdown ? 'Disabled' : 'Enabled',
     });
   }
 
+  const cards = parseZteCardOutput(rawConfig);
+
   return {
-    vlans: Array.from(vlansMap.entries()).map(([vlanId, name]) => ({
-      vlanId,
-      name,
-    })),
+    hostname,
+    vlans: Array.from(vlansMap.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([vlanId, name]) => ({
+        vlanId,
+        name,
+      })),
+    cards,
+    tcontProfiles,
+    trafficProfiles,
     uplinks,
     onus: Array.from(onuMap.values()),
   };

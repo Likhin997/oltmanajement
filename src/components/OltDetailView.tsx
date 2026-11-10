@@ -90,6 +90,7 @@ interface OltDetailViewProps {
     defaultInterface: string
   ) => void;
   onImportRunningConfig?: (oltId: number, rawConfig: string) => void;
+  onSyncOltLive?: (oltId: number) => Promise<void>;
 }
 
 export const OltDetailView: React.FC<OltDetailViewProps> = ({
@@ -109,8 +110,10 @@ export const OltDetailView: React.FC<OltDetailViewProps> = ({
   onUpdateOltSettings,
   onUpdateOltTr069,
   onImportRunningConfig,
+  onSyncOltLive,
 }) => {
   const [activeTab, setActiveTab] = useState<OltDetailTab>(initialTab);
+  const [isSyncingLive, setIsSyncingLive] = useState(false);
   const [showTelnetUser, setShowTelnetUser] = useState(false);
   const [showTelnetPass, setShowTelnetPass] = useState(false);
   const [showSnmpRo, setShowSnmpRo] = useState(false);
@@ -473,12 +476,22 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
       const resp = await fetch('/api/telnet/exec', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ oltId: olt.id, commands: [clean] }),
+        body: JSON.stringify({
+          oltId: olt.id,
+          ip_address: olt.ip_address,
+          telnet_port: olt.telnet_port,
+          olt_username: olt.olt_username,
+          olt_password: olt.olt_password,
+          commands: [clean],
+        }),
       });
       const data = await resp.json();
       if (data.reachable && data.output) {
         setCliHistory((prev) => `${prev}\n${olt.name}# ${clean}\n${data.output}`);
         return;
+      }
+      if (data.error) {
+        setCliHistory((prev) => `${prev}\n${olt.name}# ${clean}\n[Telnet Error] ${data.error}`);
       }
     } catch {
       // fall through to local SQL database state representation
@@ -549,17 +562,39 @@ ${oltVlans
 
   return (
     <div className="space-y-4 text-xs text-slate-200">
-      {/* Top "Back to OLTs list" button */}
+      {/* Top "Back to OLTs list" button + Live Sync from OLT button */}
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={onBack}
-          className="rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white shadow-sm hover:bg-[#025aa5]"
-        >
-          Back to OLTs list
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white shadow-sm hover:bg-[#025aa5]"
+          >
+            Back to OLTs list
+          </button>
+          {onSyncOltLive && (
+            <button
+              type="button"
+              disabled={isSyncingLive}
+              onClick={async () => {
+                setIsSyncingLive(true);
+                try {
+                  await onSyncOltLive(olt.id);
+                } finally {
+                  setIsSyncingLive(false);
+                }
+              }}
+              className="flex items-center gap-1.5 rounded bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white shadow-sm hover:bg-emerald-500 disabled:opacity-60"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isSyncingLive ? 'animate-spin' : ''}`} />
+              {isSyncingLive
+                ? 'Menarik Data & Config dari OLT...'
+                : 'Sync Data & Config dari OLT (Telnet)'}
+            </button>
+          )}
+        </div>
         <div className="font-mono text-xs text-slate-300">
-          Connected OLT: <strong className="text-white">{olt.id} - {olt.name}</strong> ({olt.ip_address})
+          Connected OLT: <strong className="text-white">{olt.id} - {olt.name}</strong> ({olt.ip_address}:{olt.telnet_port})
         </div>
       </div>
 
@@ -1094,19 +1129,29 @@ ${oltVlans
          =================================================================== */}
       {activeTab === 'OLT_CARDS' && (
         <div className="space-y-4">
-          <div>
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => {
+              disabled={isSyncingLive}
+              onClick={async () => {
                 onRefreshOltCards();
+                if (onSyncOltLive) {
+                  setIsSyncingLive(true);
+                  try {
+                    await onSyncOltLive(olt.id);
+                  } finally {
+                    setIsSyncingLive(false);
+                  }
+                }
                 setLastCliBanner({
                   title: `Refreshed OLT Cards Status via ZTE CLI`,
                   cli: `${olt.name}# show card\nSlot 3 (GTGH 16-Port GPON): Online | Slot 10 (SCXM Main): Online | Slot 19 (HUVQ 4-Port Uplink): Online`,
                 });
               }}
-              className="rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+              className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-60"
             >
-              Refresh OLT cards info
+              <RefreshCw className={`h-3.5 w-3.5 ${isSyncingLive ? 'animate-spin' : ''}`} />
+              Refresh OLT cards info (Live Telnet)
             </button>
           </div>
 
@@ -1431,15 +1476,25 @@ ${oltVlans
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() =>
+                disabled={isSyncingLive}
+                onClick={async () => {
+                  if (onSyncOltLive) {
+                    setIsSyncingLive(true);
+                    try {
+                      await onSyncOltLive(olt.id);
+                    } finally {
+                      setIsSyncingLive(false);
+                    }
+                  }
                   setLastCliBanner({
                     title: `Refreshed Uplink Ports Optical & VLAN Tagging Status`,
-                    cli: `${olt.name}# show interface xgei_1/19/1-2, gei_1/19/3-4\nAll uplink interfaces polled successfully.`,
-                  })
-                }
-                className="rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+                    cli: `${olt.name}# show running-config | include interface xgei|gei\nAll uplink interfaces & VLAN tags synced from OLT.`,
+                  });
+                }}
+                className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-60"
               >
-                Refresh uplink ports info
+                <RefreshCw className={`h-3.5 w-3.5 ${isSyncingLive ? 'animate-spin' : ''}`} />
+                Refresh uplink ports info (Live Telnet)
               </button>
               <button
                 type="button"
@@ -1589,6 +1644,24 @@ ${oltVlans
               <Minus className="h-3.5 w-3.5" />
               Delete multiple VLANs
             </button>
+            {onSyncOltLive && (
+              <button
+                type="button"
+                disabled={isSyncingLive}
+                onClick={async () => {
+                  setIsSyncingLive(true);
+                  try {
+                    await onSyncOltLive(olt.id);
+                  } finally {
+                    setIsSyncingLive(false);
+                  }
+                }}
+                className="flex items-center gap-1.5 rounded bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-60"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${isSyncingLive ? 'animate-spin' : ''}`} />
+                {isSyncingLive ? 'Syncing VLANs...' : 'Sync VLANs dari OLT (Telnet)'}
+              </button>
+            )}
           </div>
 
           <p className="text-xs text-sky-300">
