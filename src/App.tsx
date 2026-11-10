@@ -15,6 +15,8 @@ import {
   parseZteUncfgOutput,
   parseZteOnuStateOutput,
   parseZteOpticalAttenuation,
+  generateAuthorizeCliScript,
+  findNextAvailableOnuIndex,
 } from './services/oltEngine';
 import { PRODUCTION_CODE_MODULES } from './services/sourceCodeModules';
 import { AuthorizeOnuModal } from './components/AuthorizeOnuModal';
@@ -260,6 +262,85 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     return true;
   });
 
+  // Central Live OLT CLI Executor — sends commands via Telnet/SSH to the target OLT
+  // and updates provisioning_logs + toast with the real OLT execution response.
+  const executeOltCliLive = async (
+    oltId: number,
+    cliScript: string,
+    logId: number,
+    summaryLabel: string,
+    oltConnectionOverride?: {
+      ip_address: string;
+      telnet_port: number;
+      olt_username: string;
+      olt_password: string;
+    }
+  ) => {
+    const startMs = Date.now();
+    try {
+      const resp = await fetch('/api/telnet/exec', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          oltId,
+          ...(oltConnectionOverride || {}),
+          commands: cliScript,
+        }),
+      });
+      const data = await resp.json();
+      const elapsedMs = Date.now() - startMs;
+
+      if (data.ok) {
+        const cleanOutput = (data.output || '[OK - Executed on OLT]').trim();
+        setDb((prev) => ({
+          ...prev,
+          provisioning_logs: prev.provisioning_logs.map((l) =>
+            l.id === logId
+              ? {
+                  ...l,
+                  olt_response: cleanOutput || '[OK - Executed on OLT]',
+                  execution_status: 'SUCCESS',
+                  duration_ms: elapsedMs,
+                }
+              : l
+          ),
+        }));
+        showToast(`✓ LIVE OLT: ${summaryLabel} berhasil dieksekusi di OLT (${elapsedMs}ms)`);
+      } else {
+        const errMsg = data.error || 'Telnet execution failed';
+        setDb((prev) => ({
+          ...prev,
+          provisioning_logs: prev.provisioning_logs.map((l) =>
+            l.id === logId
+              ? {
+                  ...l,
+                  olt_response: `[TELNET ERROR] ${errMsg}`,
+                  execution_status: 'FAILED',
+                  duration_ms: elapsedMs,
+                }
+              : l
+          ),
+        }));
+        showToast(`⚠ Disimpan ke DB, namun gagal eksekusi Telnet OLT: ${errMsg}`);
+      }
+    } catch (err) {
+      const elapsedMs = Date.now() - startMs;
+      setDb((prev) => ({
+        ...prev,
+        provisioning_logs: prev.provisioning_logs.map((l) =>
+          l.id === logId
+            ? {
+                ...l,
+                olt_response: `[NETWORK ERROR] ${(err as Error).message}`,
+                execution_status: 'FAILED',
+                duration_ms: elapsedMs,
+              }
+            : l
+        ),
+      }));
+    }
+  };
+
   // Authorize ONU Handler
   const handleConfirmAuthorize = (
     onuId: number,
@@ -273,33 +354,22 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     const targetOltId = updatedFields.olt_id || targetOnu.olt_id || db.olts[0]?.id || 1;
     const targetBoard = updatedFields.board || targetOnu.board || 3;
     const targetPortNum = updatedFields.port || targetOnu.port || 1;
-
-    // Trigger live TCP Telnet execution in background if OLT is reachable
-    fetch('/api/telnet/exec', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        oltId: targetOltId,
-        commands: generatedCli
-          .split('\n')
-          .map((l) => l.trim())
-          .filter((l) => l.length > 0 && !l.startsWith('!')),
-      }),
-    }).catch(() => {});
+    const logId = Date.now();
+    const onuIf = `gpon-onu_1/${targetBoard}/${targetPortNum}:${allocatedOnuIndex}`;
 
     const newLog: ProvisioningLogRecord = {
-      id: Date.now(),
+      id: logId,
       olt_id: targetOltId,
       onu_id: onuId,
       serial_number: targetOnu.serial_number,
       action_type: 'AUTHORIZE',
-      interface_target: `gpon-onu_1/${targetBoard}/${targetPortNum}:${allocatedOnuIndex}`,
-      summary_text: `gpon-onu_1/${targetBoard}/${targetPortNum}:${allocatedOnuIndex} authorized`,
+      interface_target: onuIf,
+      summary_text: `${onuIf} authorized (${targetOnu.serial_number})`,
       cli_script: generatedCli,
-      olt_response: '[OK - ZTE OMCI & TR-069 Provisioned]',
+      olt_response: '[Executing on OLT via Telnet...]',
       execution_status: 'SUCCESS',
       executed_by: 'likhin',
-      duration_ms: 290,
+      duration_ms: 0,
       created_at: 'Just now',
     };
 
@@ -394,7 +464,14 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     setSelectedOnuId(onuId);
     setActiveView('ONU_DETAIL');
     showToast(
-      `ONU ${targetOnu.serial_number} berhasil di-Authorize pada gpon-onu_1/${targetBoard}/${targetPortNum}:${allocatedOnuIndex}`
+      `Mengeksekusi Authorize ${targetOnu.serial_number} pada ${onuIf} ke OLT...`
+    );
+
+    void executeOltCliLive(
+      targetOltId,
+      generatedCli,
+      logId,
+      `Authorize ${targetOnu.serial_number} (${onuIf})`
     );
   };
 
@@ -416,31 +493,33 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     const targetOnu = db.onus.find((o) => o.id === onuId);
     if (!targetOnu) return;
 
-    const onuIf = `gpon-onu_1/${targetOnu.board}/${targetOnu.port}:${targetOnu.onu_index || 8}`;
+    const targetOltId = targetOnu.olt_id || db.olts[0]?.id || 1;
+    const onuIf = `gpon-onu_1/${targetOnu.board}/${targetOnu.port}:${targetOnu.onu_index || 1}`;
     const summaryMap: Record<string, string> = {
-      UPDATE_ONU_MODE: `${onuIf} Changed WAN mode to ${updatedFields?.wan_mode || 'PPPoE'} & WAN remote access`,
+      UPDATE_ONU_MODE: `${onuIf} Changed WAN mode & WAN remote access`,
       TR069_PUSH: `${onuIf} TR-069 CWMP Inform & SetParameterValues pushed`,
       REBOOT: `${onuIf} Rebooted ONU`,
       RESYNC_CONFIG: `${onuIf} Resync config`,
       FACTORY_RESET: `${onuIf} Restored factory defaults`,
-      UPDATE_PPPOE: `${onuIf} Changed WAN PPPoE authentication data`,
-      DELETE_ONU: `${onuIf} Deleted ONU`,
+      UPDATE_PPPOE: `${onuIf} Updated CLI configuration`,
+      DELETE_ONU: `${onuIf} Deleted ONU (${targetOnu.serial_number})`,
       POLL_SIGNAL: `${onuIf} Polled optical power attenuation`,
     };
 
+    const logId = Date.now();
     const newLog: ProvisioningLogRecord = {
-      id: Date.now(),
-      olt_id: targetOnu.olt_id,
+      id: logId,
+      olt_id: targetOltId,
       onu_id: onuId,
       serial_number: targetOnu.serial_number,
       action_type: actionType,
       interface_target: onuIf,
       summary_text: summaryMap[actionType] || `${onuIf} ${actionType}`,
       cli_script: cliScript,
-      olt_response: '[OK]',
+      olt_response: '[Executing on OLT via Telnet...]',
       execution_status: 'SUCCESS',
-      executed_by: 'muslikhin997@gmail.com',
-      duration_ms: 185,
+      executed_by: 'likhin',
+      duration_ms: 0,
       created_at: 'Just now',
     };
 
@@ -461,7 +540,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         provisioning_logs: [newLog, ...prev.provisioning_logs],
       }));
       setActiveView('UNCONFIGURED');
-      showToast(`ONU ${targetOnu.serial_number} dihapus dan dikembalikan ke Unconfigured.`);
+      showToast(`Menghapus ONU ${targetOnu.serial_number} dari OLT (${onuIf})...`);
+      void executeOltCliLive(
+        targetOltId,
+        cliScript,
+        logId,
+        `Delete ONU ${targetOnu.serial_number} (${onuIf})`
+      );
       return;
     }
 
@@ -473,7 +558,17 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       provisioning_logs: [newLog, ...prev.provisioning_logs],
     }));
 
-    showToast(`${summaryMap[actionType]} berhasil dieksekusi.`);
+    showToast(`Mengeksekusi ${summaryMap[actionType]} ke OLT...`);
+
+    // Execute CLI script on live OLT via Telnet (skip if it's an HTTP JSON preview like TR069_PUSH)
+    if (actionType !== 'TR069_PUSH' && cliScript && !cliScript.trim().startsWith('# [TR-069')) {
+      void executeOltCliLive(
+        targetOltId,
+        cliScript,
+        logId,
+        summaryMap[actionType] || actionType
+      );
+    }
   };
 
   // Render Signal Bars helper matching Screenshot _D6CCC96A
@@ -2116,9 +2211,40 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               }));
               setSelectedOltId(nextId);
               showToast(
-                `OLT ${newOltData.name} (${newOltData.hardware_model} - ${newOltData.ip_address}) berhasil disimpan ke Database (${dbMeta.dbEngine})!`
+                `OLT ${newOltData.name} (${newOltData.hardware_model} - ${newOltData.ip_address}) berhasil disimpan & diinisialisasi!`
               );
               setActiveView('OLTS_LIST');
+
+              // Bootstrap base ZTE GPON profiles & default VLAN 100/101 on the OLT automatically
+              const bootstrapCli = [
+                'configure terminal',
+                'vlan database',
+                '  vlan 100,101',
+                'exit',
+                'gpon',
+                '  profile tcont SMARTOLT-1G-UP type 4 maximum 1000000',
+                '  profile tcont SMARTOLT-VOIPMNG-10M type 2 assured 10240 maximum 10240',
+                '  profile traffic SMARTOLT-1G-DOWN sir 1000000 pir 1000000',
+                '  profile traffic SMARTOLT-VOIPMNG-10M sir 10240 pir 10240',
+                '  onu profile vlan SMARTOLT-vlan100 tag-mode tag cvlan 100',
+                '  onu profile vlan SMARTOLT-vlan101 tag-mode tag cvlan 101',
+                'exit',
+                'onu-type ALL gpon max-tcont 8 max-gemport 32 max-switch-perslot 8 max-flow-perswitch 8 max-iphost 5',
+                'end',
+                'write',
+              ].join('\n');
+              void executeOltCliLive(
+                nextId,
+                bootstrapCli,
+                Date.now(),
+                `Bootstrap GPON Profiles on ${newOltData.name}`,
+                {
+                  ip_address: newOltData.ip_address,
+                  telnet_port: newOltData.telnet_port,
+                  olt_username: newOltData.olt_username,
+                  olt_password: newOltData.olt_password,
+                }
+              );
             }}
           />
         )}
@@ -2138,6 +2264,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 id: Date.now() + idx,
               }));
               const addedVlanNums = newVlans.map((v) => v.vlan_id);
+              const logId = Date.now() + 99;
 
               setDb((prev) => ({
                 ...prev,
@@ -2157,7 +2284,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 }),
                 provisioning_logs: [
                   {
-                    id: Date.now(),
+                    id: logId,
                     olt_id: selectedOlt.id,
                     onu_id: null,
                     serial_number: 'OLT-VLAN',
@@ -2165,37 +2292,113 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     interface_target: `vlan ${addedVlanNums.join(',')}`,
                     summary_text: `Created VLAN(s) ${addedVlanNums.join(',')} & tagged on Uplink`,
                     cli_script: cliScript,
-                    olt_response: '[OK]',
+                    olt_response: '[Executing on OLT via Telnet...]',
                     execution_status: 'SUCCESS',
-                    executed_by: 'muslikhin997@gmail.com',
-                    duration_ms: 165,
+                    executed_by: 'likhin',
+                    duration_ms: 0,
                     created_at: 'Just now',
                   },
                   ...prev.provisioning_logs,
                 ],
               }));
               showToast(
-                `VLAN ${addedVlanNums.join(', ')} berhasil dibuat dan di-tag ke Uplink OLT.`
+                `Mengeksekusi pembuatan VLAN ${addedVlanNums.join(', ')} ke OLT ${selectedOlt.name}...`
+              );
+              void executeOltCliLive(
+                selectedOlt.id,
+                cliScript,
+                logId,
+                `Create VLAN ${addedVlanNums.join(',')}`
               );
             }}
             onToggleVlanFlag={(vlanRecordId, field) => {
+              const targetVlan = db.vlans.find((v) => v.id === vlanRecordId);
               setDb((prev) => ({
                 ...prev,
                 vlans: prev.vlans.map((v) =>
                   v.id === vlanRecordId ? { ...v, [field]: !v[field] } : v
                 ),
               }));
-              showToast(`Pengaturan ${field} pada VLAN berhasil diperbarui.`);
+              if (targetVlan && field === 'dhcp_snooping') {
+                const nextEnable = !targetVlan.dhcp_snooping;
+                const cli = [
+                  'configure terminal',
+                  nextEnable
+                    ? 'ip dhcp snooping control-port enable'
+                    : 'no ip dhcp snooping control-port enable',
+                  'end',
+                  'write',
+                ].join('\n');
+                void executeOltCliLive(
+                  selectedOlt.id,
+                  cli,
+                  Date.now(),
+                  `VLAN ${targetVlan.vlan_id} DHCP Snooping`
+                );
+              } else {
+                showToast(`Pengaturan ${field} pada VLAN berhasil diperbarui.`);
+              }
             }}
             onDeleteVlans={(vlanRecordIds) => {
+              const targetVlans = db.vlans.filter((v) =>
+                vlanRecordIds.includes(v.id)
+              );
+              const vlanNums = targetVlans.map((v) => v.vlan_id);
+              const logId = Date.now();
+              const cliScript =
+                vlanNums.length > 0
+                  ? [
+                      'configure terminal',
+                      'vlan database',
+                      `  no vlan ${vlanNums.join(',')}`,
+                      'exit',
+                      'gpon',
+                      ...vlanNums.map(
+                        (vid) => `  no onu profile vlan SMARTOLT-vlan${vid}`
+                      ),
+                      'exit',
+                      'end',
+                      'write',
+                    ].join('\n')
+                  : '';
+
               setDb((prev) => ({
                 ...prev,
                 vlans: prev.vlans.filter((v) => !vlanRecordIds.includes(v.id)),
+                provisioning_logs: cliScript
+                  ? [
+                      {
+                        id: logId,
+                        olt_id: selectedOlt.id,
+                        onu_id: null,
+                        serial_number: 'OLT-VLAN',
+                        action_type: 'RESYNC_CONFIG',
+                        interface_target: `no vlan ${vlanNums.join(',')}`,
+                        summary_text: `Deleted VLAN(s) ${vlanNums.join(',')} from OLT`,
+                        cli_script: cliScript,
+                        olt_response: '[Executing on OLT via Telnet...]',
+                        execution_status: 'SUCCESS',
+                        executed_by: 'likhin',
+                        duration_ms: 0,
+                        created_at: 'Just now',
+                      },
+                      ...prev.provisioning_logs,
+                    ]
+                  : prev.provisioning_logs,
               }));
-              showToast(`${vlanRecordIds.length} VLAN dihapus dari OLT.`);
+              showToast(`Menghapus VLAN ${vlanNums.join(', ')} dari OLT...`);
+              if (cliScript) {
+                void executeOltCliLive(
+                  selectedOlt.id,
+                  cliScript,
+                  logId,
+                  `Delete VLAN ${vlanNums.join(',')}`
+                );
+              }
             }}
             onUpdateUplinkPort={(uplinkId, updated, cliScript) => {
               const targetUplink = db.uplink_ports.find((u) => u.id === uplinkId);
+              const logId = Date.now();
               setDb((prev) => ({
                 ...prev,
                 uplink_ports: prev.uplink_ports.map((u) =>
@@ -2203,7 +2406,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 ),
                 provisioning_logs: [
                   {
-                    id: Date.now(),
+                    id: logId,
                     olt_id: selectedOlt.id,
                     onu_id: null,
                     serial_number: 'OLT-UPLINK',
@@ -2211,29 +2414,36 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     interface_target: targetUplink?.name || 'gei_1/19/3',
                     summary_text: `Uplink ${targetUplink?.name || ''} tagged VLANs updated (${updated.tagged_vlans || ''})`,
                     cli_script: cliScript,
-                    olt_response: '[OK]',
+                    olt_response: '[Executing on OLT via Telnet...]',
                     execution_status: 'SUCCESS',
-                    executed_by: 'muslikhin997@gmail.com',
-                    duration_ms: 145,
+                    executed_by: 'likhin',
+                    duration_ms: 0,
                     created_at: 'Just now',
                   },
                   ...prev.provisioning_logs,
                 ],
               }));
               showToast(
-                `Konfigurasi & Tag VLAN pada Uplink ${targetUplink?.name || ''} berhasil disimpan ke OLT!`
+                `Mengeksekusi konfigurasi Uplink ${targetUplink?.name || ''} ke OLT...`
+              );
+              void executeOltCliLive(
+                selectedOlt.id,
+                cliScript,
+                logId,
+                `Configure Uplink ${targetUplink?.name || ''}`
               );
             }}
             onCreateLagUplink={(newUplink, cliScript) => {
+              const logId = Date.now();
               setDb((prev) => ({
                 ...prev,
                 uplink_ports: [
                   ...prev.uplink_ports,
-                  { ...newUplink, id: Date.now() },
+                  { ...newUplink, id: Date.now() + 1 },
                 ],
                 provisioning_logs: [
                   {
-                    id: Date.now(),
+                    id: logId,
                     olt_id: selectedOlt.id,
                     onu_id: null,
                     serial_number: 'OLT-LAG',
@@ -2241,30 +2451,39 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     interface_target: newUplink.name,
                     summary_text: `Created LACP LAG ${newUplink.name} (${newUplink.tagged_vlans})`,
                     cli_script: cliScript,
-                    olt_response: '[OK]',
+                    olt_response: '[Executing on OLT via Telnet...]',
                     execution_status: 'SUCCESS',
-                    executed_by: 'muslikhin997@gmail.com',
-                    duration_ms: 190,
+                    executed_by: 'likhin',
+                    duration_ms: 0,
                     created_at: 'Just now',
                   },
                   ...prev.provisioning_logs,
                 ],
               }));
-              showToast(`LAG ${newUplink.name} berhasil dibuat pada Uplink OLT!`);
+              showToast(`Mengeksekusi pembuatan LAG ${newUplink.name} ke OLT...`);
+              void executeOltCliLive(
+                selectedOlt.id,
+                cliScript,
+                logId,
+                `Create LAG ${newUplink.name}`
+              );
             }}
             onUpdatePonPort={(portNumber, updated, cliScript) => {
+              const logId = Date.now();
               setDb((prev) => {
                 const exists = prev.pon_ports.some(
-                  (p) => p.port_number === portNumber
+                  (p) => p.olt_id === selectedOlt.id && p.port_number === portNumber
                 );
                 const nextPonPorts = exists
                   ? prev.pon_ports.map((p) =>
-                      p.port_number === portNumber ? { ...p, ...updated } : p
+                      p.olt_id === selectedOlt.id && p.port_number === portNumber
+                        ? { ...p, ...updated }
+                        : p
                     )
                   : [
                       ...prev.pon_ports,
                       {
-                        id: Date.now(),
+                        id: Date.now() + 1,
                         olt_id: selectedOlt.id,
                         rack: 1,
                         shelf: 3,
@@ -2287,7 +2506,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   pon_ports: nextPonPorts,
                   provisioning_logs: [
                     {
-                      id: Date.now(),
+                      id: logId,
                       olt_id: selectedOlt.id,
                       onu_id: null,
                       serial_number: 'OLT-PON',
@@ -2295,30 +2514,79 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       interface_target: `gpon-olt_1/3/${portNumber}`,
                       summary_text: `Updated PON port gpon-olt_1/3/${portNumber}`,
                       cli_script: cliScript,
-                      olt_response: '[OK]',
+                      olt_response: '[Executing on OLT via Telnet...]',
                       execution_status: 'SUCCESS',
-                      executed_by: 'muslikhin997@gmail.com',
-                      duration_ms: 130,
+                      executed_by: 'likhin',
+                      duration_ms: 0,
                       created_at: 'Just now',
                     },
                     ...prev.provisioning_logs,
                   ],
                 };
               });
-              showToast(`Port GPON 1/3/${portNumber} berhasil diperbarui.`);
+              showToast(`Mengeksekusi konfigurasi Port GPON 1/3/${portNumber} ke OLT...`);
+              void executeOltCliLive(
+                selectedOlt.id,
+                cliScript,
+                logId,
+                `Update PON gpon-olt_1/3/${portNumber}`
+              );
             }}
             onEnableAllPonPorts={() => {
+              const logId = Date.now();
+              const enableAllCli = [
+                'configure terminal',
+                ...Array.from({ length: 16 }, (_, idx) =>
+                  [
+                    `interface gpon-olt_1/3/${idx + 1}`,
+                    '  no shutdown',
+                    '  uncfg-onu-display-info model sn pw',
+                    'exit',
+                  ].join('\n')
+                ),
+                'end',
+                'write',
+              ].join('\n');
+
               setDb((prev) => ({
                 ...prev,
-                pon_ports: prev.pon_ports.map((p) => ({
-                  ...p,
-                  admin_state: 'ENABLED',
-                  oper_status: 'Up',
-                })),
+                pon_ports: prev.pon_ports.map((p) =>
+                  p.olt_id === selectedOlt.id
+                    ? {
+                        ...p,
+                        admin_state: 'ENABLED',
+                        oper_status: 'Up',
+                      }
+                    : p
+                ),
+                provisioning_logs: [
+                  {
+                    id: logId,
+                    olt_id: selectedOlt.id,
+                    onu_id: null,
+                    serial_number: 'OLT-PON-ALL',
+                    action_type: 'RESYNC_CONFIG',
+                    interface_target: 'gpon-olt_1/3/1..16',
+                    summary_text: 'Enabled all 16 GPON ports on Slot 3 GTGH',
+                    cli_script: enableAllCli,
+                    olt_response: '[Executing on OLT via Telnet...]',
+                    execution_status: 'SUCCESS',
+                    executed_by: 'likhin',
+                    duration_ms: 0,
+                    created_at: 'Just now',
+                  },
+                  ...prev.provisioning_logs,
+                ],
               }));
-              showToast('Seluruh port GPON pada Slot 3 GTGH diaktifkan (Up).');
+              showToast('Mengeksekusi no shutdown pada seluruh 16 port GPON ke OLT...');
+              void executeOltCliLive(
+                selectedOlt.id,
+                enableAllCli,
+                logId,
+                'Enable All PON Ports (1/3/1..16)'
+              );
             }}
-            onRefreshOltCards={() => {
+            onRefreshOltCards={async () => {
               const nowStr = new Date()
                 .toISOString()
                 .slice(0, 19)
@@ -2330,9 +2598,19 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   updated_at: nowStr,
                 })),
               }));
-              showToast('Informasi kartu OLT (GTGH, SCXM, HUVQ) diperbarui.');
+              showToast('Meminta status kartu OLT (`show card`) via Telnet...');
+              await executeOltCliLive(
+                selectedOlt.id,
+                'show card',
+                Date.now(),
+                `Refresh OLT Cards (${selectedOlt.name})`
+              );
             }}
             onRebootOltCard={(cardId) => {
+              const targetCard = db.olt_cards.find((c) => c.id === cardId);
+              const slotNum = targetCard?.slot || 3;
+              const logId = Date.now();
+              const rebootCardCli = `reset-card slotno ${slotNum}`;
               const nowStr = new Date()
                 .toISOString()
                 .slice(0, 19)
@@ -2344,8 +2622,32 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     ? { ...c, status: 'Online', updated_at: nowStr }
                     : c
                 ),
+                provisioning_logs: [
+                  {
+                    id: logId,
+                    olt_id: selectedOlt.id,
+                    onu_id: null,
+                    serial_number: `SLOT-${slotNum}`,
+                    action_type: 'REBOOT',
+                    interface_target: `card slot ${slotNum}`,
+                    summary_text: `Rebooted OLT card on Slot ${slotNum}`,
+                    cli_script: rebootCardCli,
+                    olt_response: '[Executing on OLT via Telnet...]',
+                    execution_status: 'SUCCESS',
+                    executed_by: 'likhin',
+                    duration_ms: 0,
+                    created_at: 'Just now',
+                  },
+                  ...prev.provisioning_logs,
+                ],
               }));
-              showToast('Perintah Reboot-card berhasil dikirim ke sasis OLT.');
+              showToast(`Mengeksekusi reset-card slotno ${slotNum} ke sasis OLT...`);
+              void executeOltCliLive(
+                selectedOlt.id,
+                rebootCardCli,
+                logId,
+                `Reboot Card Slot ${slotNum}`
+              );
             }}
             onUpdateOltSettings={(oltId, updated) => {
               setDb((prev) => ({
@@ -2958,27 +3260,114 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   setAutoAuthEnabled(true);
                   if (unconfiguredOnus.length > 0) {
                     const targetVlan =
-                      db.vlans.find((v) => v.id === autoAuthVlanId) || db.vlans[0];
+                      db.vlans.find((v) => v.id === autoAuthVlanId) ||
+                      db.vlans[0] || {
+                        id: 101,
+                        vlan_id: 101,
+                        name: 'PPPOE',
+                      };
+
+                    // Track allocated indices per PON port
+                    const usedMap = new Map<string, number[]>();
+                    for (const u of db.onus) {
+                      if (u.is_authorized && u.onu_index !== null) {
+                        const key = `${u.olt_id}-${u.board}-${u.port}`;
+                        const list = usedMap.get(key) || [];
+                        list.push(u.onu_index);
+                        usedMap.set(key, list);
+                      }
+                    }
+
+                    const batchScriptsByOlt = new Map<number, string[]>();
+                    const allocatedIndexByOnuId = new Map<number, number>();
+
+                    for (const u of unconfiguredOnus) {
+                      const key = `${u.olt_id}-${u.board}-${u.port}`;
+                      const usedList = usedMap.get(key) || [];
+                      const nextIdx = findNextAvailableOnuIndex(usedList);
+                      usedList.push(nextIdx);
+                      usedMap.set(key, usedList);
+                      allocatedIndexByOnuId.set(u.id, nextIdx);
+
+                      const oltRec = db.olts.find((o) => o.id === u.olt_id) || db.olts[0];
+                      const script = generateAuthorizeCliScript({
+                        firmwareVersion: oltRec?.firmware_version || 'V2.1.0',
+                        ponInterface: `gpon-olt_1/${u.board}/${u.port}`,
+                        onuIndex: nextIdx,
+                        serialNumber: u.serial_number,
+                        onuType: u.onu_type || 'ALL',
+                        customerName: `AUTO-${u.serial_number.slice(-6)}`,
+                        address: 'None',
+                        tcontProfile: 'SMARTOLT-1G-UP',
+                        speedProfile: 'SMARTOLT-1G-DOWN',
+                        vlanId: targetVlan.vlan_id,
+                        onuMode: 'Routing',
+                        wanMode: 'PPPOE',
+                        configMethod: 'OMCI',
+                        wanRemoteAccess: 'Enabled from everywhere in the internet',
+                        pppoeUsername: `USER-${u.serial_number.slice(-4)}-${String(nextIdx).padStart(2, '0')}`,
+                        pppoePassword: 'jetcyber',
+                        tr069Enabled: false,
+                      });
+                      const oltIdKey = u.olt_id || oltRec?.id || 1;
+                      const list = batchScriptsByOlt.get(oltIdKey) || [];
+                      list.push(script);
+                      batchScriptsByOlt.set(oltIdKey, list);
+                    }
+
+                    const logId = Date.now();
+                    const firstOltId =
+                      unconfiguredOnus[0]?.olt_id || db.olts[0]?.id || 1;
+                    const combinedCli = Array.from(batchScriptsByOlt.values())
+                      .flat()
+                      .join('\n');
+
                     setDb((prev) => ({
                       ...prev,
-                      onus: prev.onus.map((u, idx) =>
-                        !u.is_authorized
-                          ? {
-                              ...u,
-                              is_authorized: true,
-                              onu_index: 15 + idx,
-                              customer_name: `AUTO-${u.serial_number.slice(-6)}`,
-                              vlan_id: targetVlan.id,
-                              phase_state: 'working',
-                              last_offline_reason: 'None',
-                              auth_date_label: 'Just now (Auto)',
-                            }
-                          : u
-                      ),
+                      onus: prev.onus.map((u) => {
+                        const allocIdx = allocatedIndexByOnuId.get(u.id);
+                        if (!u.is_authorized && allocIdx) {
+                          return {
+                            ...u,
+                            is_authorized: true,
+                            onu_index: allocIdx,
+                            customer_name: `AUTO-${u.serial_number.slice(-6)}`,
+                            vlan_id: targetVlan.id,
+                            phase_state: 'working',
+                            last_offline_reason: 'None',
+                            auth_date_label: 'Just now (Auto)',
+                          };
+                        }
+                        return u;
+                      }),
+                      provisioning_logs: [
+                        {
+                          id: logId,
+                          olt_id: firstOltId,
+                          onu_id: null,
+                          serial_number: 'BATCH-AUTO',
+                          action_type: 'AUTHORIZE',
+                          interface_target: `${unconfiguredOnus.length} ONUs`,
+                          summary_text: `Batch Auto-Authorized ${unconfiguredOnus.length} ONUs on VLAN ${targetVlan.vlan_id}`,
+                          cli_script: combinedCli,
+                          olt_response: '[Executing on OLT via Telnet...]',
+                          execution_status: 'SUCCESS',
+                          executed_by: 'likhin',
+                          duration_ms: 0,
+                          created_at: 'Just now',
+                        },
+                        ...prev.provisioning_logs,
+                      ],
                     }));
-                    showToast(
-                      `Auto-Authorize selesai: ${unconfiguredOnus.length} ONU berhasil didaftarkan ke VLAN ${targetVlan.vlan_id}!`
-                    );
+
+                    for (const [oltIdKey, scripts] of batchScriptsByOlt.entries()) {
+                      void executeOltCliLive(
+                        oltIdKey,
+                        scripts.join('\n'),
+                        logId,
+                        `Batch Auto-Authorize (${scripts.length} ONUs)`
+                      );
+                    }
                   } else {
                     showToast('Auto-Authorization diaktifkan.');
                   }

@@ -157,7 +157,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
       wanRemoteAccess,
       pppoeUsername,
       pppoePassword,
-      tr069Enabled: true,
+      tr069Enabled: configMethod === 'TR069',
       tr069AcsUrl: selectedTr069?.acs_url,
       tr069AcsUsername: selectedTr069?.acs_username,
       tr069AcsPassword: selectedTr069?.acs_password,

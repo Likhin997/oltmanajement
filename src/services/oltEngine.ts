@@ -371,10 +371,17 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
 
   const lines: string[] = [
     `configure terminal`,
-    `!`,
+    `vlan database`,
+    `  vlan ${params.vlanId}`,
+    `exit`,
+    `gpon`,
+    `  profile tcont ${tcontUpProfile} type 4 maximum 1000000`,
+    `  profile traffic ${trafficDownProfile} sir 1000000 pir 1000000`,
+    `  onu profile vlan SMARTOLT-vlan${params.vlanId} tag-mode tag cvlan ${params.vlanId}`,
+    `exit`,
     `interface ${oltIf}`,
     `  onu ${params.onuIndex} type ${zteOnuType} sn ${params.serialNumber}`,
-    `!`,
+    `exit`,
     `interface ${onuIf}`,
     `  name ${cleanName}`,
     `  description ${cleanDesc}`,
@@ -404,7 +411,7 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
     lines.push(`  service-port 2 vport 2 user-vlan 100 vlan 100`);
   }
 
-  lines.push(`!`, `pon-onu-mng ${onuIf}`);
+  lines.push(`exit`, `pon-onu-mng ${onuIf}`);
 
   if (params.voipSipEnabled) {
     lines.push(`  voip protocol sip`);
@@ -491,7 +498,7 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
   // Security management rules (WAN Remote Access + LAN management)
   lines.push(
     ...buildWanRemoteAccessCliLines(wanRemoteAccess, params.wanRemoteAllowedSubnet),
-    `!`,
+    `exit`,
     `end`,
     `write`
   );
@@ -531,7 +538,6 @@ export function generateUpdateOnuModeCliScript(params: {
 
   const lines: string[] = [
     `configure terminal`,
-    `!`,
     `interface ${onuIf}`,
     `  no service-port 1`,
     `  service-port 1 vport 1 user-vlan ${params.vlanId} vlan ${params.vlanId}`,
@@ -547,7 +553,7 @@ export function generateUpdateOnuModeCliScript(params: {
   }
 
   lines.push(
-    `!`,
+    `exit`,
     `pon-onu-mng ${onuIf}`,
     `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
     `  flow 1 pri 0 vlan ${params.vlanId}`,
@@ -614,7 +620,7 @@ export function generateUpdateOnuModeCliScript(params: {
       params.wanRemoteAccess,
       params.wanRemoteAllowedSubnet
     ),
-    `!`,
+    `exit`,
     `end`,
     `write`
   );
@@ -718,7 +724,7 @@ export function generateUpdatePppoeCliScript(
     `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
     `  vlan-filter iphost 1 pri 0 vlan ${vlanId}`,
     ...buildWanRemoteAccessCliLines(wanRemoteAccess),
-    `!`,
+    `exit`,
     `end`,
     `write`,
   ].join('\n');
@@ -731,7 +737,7 @@ export function generateDeleteOnuCliScript(ponInterface: string, onuIndex: numbe
     `configure terminal`,
     `interface ${oltIf}`,
     `  no onu ${onuIndex}`,
-    `!`,
+    `exit`,
     `end`,
     `write`,
   ].join('\n');
@@ -814,9 +820,7 @@ export function generateUplinkConfigCliScript(params: {
 
   const lines = [
     `configure terminal`,
-    `!`,
     `eth-switch max-frame-length ${params.mtu || 1600}`,
-    `!`,
     `interface ${params.uplinkName}`,
   ];
 
@@ -848,7 +852,7 @@ export function generateUplinkConfigCliScript(params: {
   lines.push(
     `  port-protect disable`,
     `  uplink-isolate disable`,
-    `!`,
+    `exit`,
     `end`,
     `write`
   );
@@ -868,10 +872,9 @@ export function generateCreateVlanCliScript(params: {
   const vlanCsv = params.vlanIds.join(',');
   const lines = [
     `configure terminal`,
-    `!`,
     `vlan database`,
     `  vlan ${vlanCsv}`,
-    `!`,
+    `exit`,
   ];
 
   for (const vid of params.vlanIds) {
@@ -879,17 +882,17 @@ export function generateCreateVlanCliScript(params: {
       params.vlanIds.length === 1
         ? (params.descriptionPrefix || `VLAN_${vid}`).replace(/\s+/g, '_')
         : `${(params.descriptionPrefix || 'VLAN').replace(/\s+/g, '_')}_${vid}`;
-    lines.push(`vlan ${vid}`, `  name ${vName}`, `!`);
+    lines.push(`vlan ${vid}`, `  name ${vName}`, `exit`);
   }
 
   lines.push(`gpon`);
   for (const vid of params.vlanIds) {
     lines.push(`  onu profile vlan SMARTOLT-vlan${vid} tag-mode tag cvlan ${vid}`);
   }
-  lines.push(`!`);
+  lines.push(`exit`);
 
   if (params.dhcpSnooping) {
-    lines.push(`ip dhcp snooping control-port enable`, `!`);
+    lines.push(`ip dhcp snooping control-port enable`);
   }
 
   if (params.tagToUplinks.length > 0) {
@@ -898,7 +901,7 @@ export function generateCreateVlanCliScript(params: {
         `interface ${uplinkIf}`,
         `  switchport mode hybrid`,
         `  switchport vlan ${vlanCsv} tag`,
-        `!`
+        `exit`
       );
     }
   }
@@ -923,13 +926,13 @@ export function generateOnuEthPortCliScript(params: {
   const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
   const oltIf = `gpon-olt_${coords}`;
   const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
-  const lines = [`configure terminal`, `!`];
+  const lines = [`configure terminal`];
 
   if (params.mode === 'Tag VLAN') {
     lines.push(
       `onu-pnp`,
       `  onu-uni-vlan ${oltIf} ${params.ethPort} mode tag vlan ${params.vlanId}`,
-      `!`
+      `exit`
     );
   }
 
@@ -950,7 +953,7 @@ export function generateOnuEthPortCliScript(params: {
     params.dhcpMode === 'From Internet'
       ? `  dhcp-ip ethuni ${params.ethPort} from-internet`
       : `  dhcp-ip ethuni ${params.ethPort} from-onu`,
-    `!`,
+    `exit`,
     `end`,
     `write`
   );

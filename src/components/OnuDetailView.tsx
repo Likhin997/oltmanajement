@@ -10,6 +10,7 @@ import {
   generateDeleteOnuCliScript,
   generateTr069CwmpRpcPreview,
   generateOnuEthPortCliScript,
+  parseZteOpticalAttenuation,
 } from '../services/oltEngine';
 import { UpdateOnuModeModal } from './UpdateOnuModeModal';
 import {
@@ -189,23 +190,49 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     return () => clearInterval(timer);
   }, [livePolling, onu.id, onu.onu_rx_dbm, onu.olt_rx_dbm, onuInterface, onExecuteAction]);
 
-  const handleGetStatus = () => {
+  const handleGetStatus = async () => {
     const cli = `show gpon onu detail-info ${onuInterface}\nshow pon power attenuation ${onuInterface}`;
-    onExecuteAction(onu.id, 'POLL_SIGNAL', cli, {
-      onu_rx_dbm:
-        onu.onu_rx_dbm !== null
-          ? Number((onu.onu_rx_dbm + (Math.random() * 0.2 - 0.1)).toFixed(2))
-          : -23.19,
-      olt_rx_dbm:
-        onu.olt_rx_dbm !== null
-          ? Number((onu.olt_rx_dbm + (Math.random() * 0.2 - 0.1)).toFixed(2))
-          : -30.87,
+    setActiveConsoleOutput({
+      title: `Get status — ${onuInterface} (Connecting to ${olt.ip_address}:${olt.telnet_port}...)`,
+      content: `Executing on ${olt.name} (${olt.ip_address}:${olt.telnet_port}):\n${cli}\n\nWaiting for OLT response...`,
     });
+
+    try {
+      const resp = await fetch('/api/telnet/exec', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          oltId: olt.id,
+          commands: [
+            `show gpon onu detail-info ${onuInterface}`,
+            `show pon power attenuation ${onuInterface}`,
+          ],
+        }),
+      });
+      const data = await resp.json();
+      if (data.ok && data.output) {
+        const parsedPower = parseZteOpticalAttenuation(data.output);
+        const updatedPower: Partial<OnuRecord> = {};
+        if (parsedPower.onuRxDbm !== null) updatedPower.onu_rx_dbm = parsedPower.onuRxDbm;
+        if (parsedPower.oltRxDbm !== null) updatedPower.olt_rx_dbm = parsedPower.oltRxDbm;
+        if (parsedPower.onuTxDbm !== null) updatedPower.onu_tx_dbm = parsedPower.onuTxDbm;
+        onExecuteAction(onu.id, 'POLL_SIGNAL', cli, updatedPower);
+        setActiveConsoleOutput({
+          title: `Get status (LIVE OLT) — ${onuInterface}`,
+          content: data.output,
+        });
+        return;
+      }
+    } catch {
+      // Fallback below if OLT is offline
+    }
+
+    onExecuteAction(onu.id, 'POLL_SIGNAL', cli);
     setActiveConsoleOutput({
       title: `Get status — ${onuInterface}`,
       content: `${olt.name}# show gpon onu detail-info ${onuInterface}
 ONU interface:         ${onuInterface}
-  Name:                ${onu.customer_name || 'RATMI'}
+  Name:                ${onu.customer_name || onu.serial_number}
   Type:                ${onu.onu_type}
   State:               ready
   Admin state:         enable
@@ -217,30 +244,30 @@ ONU interface:         ${onuInterface}
 ${olt.name}# show pon power attenuation ${onuInterface}
            OLT                  ONU              Attenuation
 ----------------------------------------------------------------
-up      Rx :${(onu.olt_rx_dbm ?? -30.87).toFixed(3)}(dbm)      Tx :2.350(dbm)        33.220(db)
-down    Tx :10.548(dbm)       Rx :${(onu.onu_rx_dbm ?? -23.19).toFixed(3)}(dbm)      33.738(db)`,
+up      Rx :${(onu.olt_rx_dbm ?? -24.8).toFixed(3)}(dbm)      Tx :2.350(dbm)        27.150(db)
+down    Tx :10.548(dbm)       Rx :${(onu.onu_rx_dbm ?? -21.5).toFixed(3)}(dbm)      32.048(db)`,
     });
   };
 
-  const handleShowRunningConfig = () => {
+  const handleShowRunningConfig = async () => {
     const script = generateAuthorizeCliScript({
       firmwareVersion: olt.firmware_version,
       ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
-      onuIndex: onu.onu_index || 8,
+      onuIndex: onu.onu_index || 1,
       serialNumber: onu.serial_number,
       onuType: onu.onu_type,
-      customerName: onu.customer_name || 'RATMI',
+      customerName: onu.customer_name || onu.serial_number,
       address: onu.address || 'None',
-      tcontProfile: tcontProfile?.profile_name || 'TCONT-1G',
-      speedProfile: speedProfile?.profile_name || '1G',
+      tcontProfile: tcontProfile?.profile_name || 'SMARTOLT-1G-UP',
+      speedProfile: speedProfile?.profile_name || 'SMARTOLT-1G-DOWN',
       vlanId: vlan?.vlan_id || 101,
       onuMode: onu.onu_mode,
       wanMode: onu.wan_mode,
       configMethod: onu.config_method,
       wanRemoteAccess: onu.wan_remote_access,
-      pppoeUsername: onu.pppoe_username || 'RATMI-010111',
+      pppoeUsername: onu.pppoe_username || `USER-${onu.serial_number.slice(-4)}`,
       pppoePassword: onu.pppoe_password || 'jetcyber',
-      tr069Enabled: true,
+      tr069Enabled: onu.config_method === 'TR069',
       tr069AcsUrl: tr069Profile?.acs_url,
       tr069AcsUsername: tr069Profile?.acs_username,
       tr069AcsPassword: tr069Profile?.acs_password,
@@ -249,9 +276,32 @@ down    Tx :10.548(dbm)       Rx :${(onu.onu_rx_dbm ?? -23.19).toFixed(3)}(dbm) 
       title: `Show running-config — ${onuInterface}`,
       content: script,
     });
+
+    try {
+      const resp = await fetch('/api/telnet/exec', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          oltId: olt.id,
+          commands: [
+            `show running-config interface ${onuInterface}`,
+            `show onu running config ${onuInterface}`,
+          ],
+        }),
+      });
+      const data = await resp.json();
+      if (data.ok && data.output && data.output.trim().length > 20) {
+        setActiveConsoleOutput({
+          title: `Show running-config (LIVE OLT) — ${onuInterface}`,
+          content: data.output,
+        });
+      }
+    } catch {
+      // Keep generated CLI preview if OLT is offline
+    }
   };
 
-  const handleSwInfo = () => {
+  const handleSwInfo = async () => {
     setActiveConsoleOutput({
       title: `SW info — ${onuInterface}`,
       content: `${olt.name}# show gpon remote-onu equip ${onuInterface}
@@ -264,6 +314,26 @@ Bootrom version:     V9.0.10P1N9
 Software0 version:   ${onu.firmware_ver} (Active, Committed)
 Software1 version:   V9.0.10P1N8 (Standby)`,
     });
+
+    try {
+      const resp = await fetch('/api/telnet/exec', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          oltId: olt.id,
+          commands: [`show gpon remote-onu equip ${onuInterface}`],
+        }),
+      });
+      const data = await resp.json();
+      if (data.ok && data.output && data.output.trim().length > 15) {
+        setActiveConsoleOutput({
+          title: `SW info (LIVE OLT) — ${onuInterface}`,
+          content: data.output,
+        });
+      }
+    } catch {
+      // Keep default SW info preview if OLT is offline
+    }
   };
 
   const handleTr069Push = () => {
@@ -307,21 +377,21 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
     const script = generateAuthorizeCliScript({
       firmwareVersion: olt.firmware_version,
       ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
-      onuIndex: onu.onu_index || 8,
+      onuIndex: onu.onu_index || 1,
       serialNumber: onu.serial_number,
       onuType: onu.onu_type,
-      customerName: onu.customer_name || 'RATMI',
+      customerName: onu.customer_name || onu.serial_number,
       address: onu.address || 'None',
-      tcontProfile: tcontProfile?.profile_name || 'TCONT-1G',
-      speedProfile: speedProfile?.profile_name || '1G',
+      tcontProfile: tcontProfile?.profile_name || 'SMARTOLT-1G-UP',
+      speedProfile: speedProfile?.profile_name || 'SMARTOLT-1G-DOWN',
       vlanId: vlan?.vlan_id || 101,
       onuMode: onu.onu_mode,
       wanMode: onu.wan_mode,
       configMethod: onu.config_method,
       wanRemoteAccess: onu.wan_remote_access,
-      pppoeUsername: onu.pppoe_username || 'RATMI-010111',
+      pppoeUsername: onu.pppoe_username || `USER-${onu.serial_number.slice(-4)}`,
       pppoePassword: onu.pppoe_password || 'jetcyber',
-      tr069Enabled: true,
+      tr069Enabled: onu.config_method === 'TR069',
       tr069AcsUrl: tr069Profile?.acs_url,
     });
     onExecuteAction(onu.id, 'RESYNC_CONFIG', script, {

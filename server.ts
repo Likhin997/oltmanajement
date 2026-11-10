@@ -592,73 +592,385 @@ async function saveDatabaseState(state: SmartOltDatabaseState): Promise<void> {
 }
 
 // ============================================================================
-// 2. REAL TCP TELNET CLIENT FOR ZTE / HUAWEI OLT
+// 2. REAL TCP TELNET CLIENT FOR ZTE / HUAWEI OLT (IAC + PROMPT STATE MACHINE)
 // ============================================================================
+
+/**
+ * Strip Telnet IAC (0xFF) negotiation sequences from incoming chunk and send
+ * standard WONT/DONT/DO replies so ZTE C300/C320 & Huawei Telnet daemons
+ * immediately present the Username:/Password: prompt.
+ */
+function handleTelnetIacAndExtractText(
+  socket: net.Socket,
+  chunk: Buffer
+): string {
+  const cleanBytes: number[] = [];
+  const replies: number[] = [];
+  let i = 0;
+
+  while (i < chunk.length) {
+    if (chunk[i] === 0xff) {
+      if (i + 1 >= chunk.length) break;
+      const cmd = chunk[i + 1];
+
+      // Escaped 0xFF
+      if (cmd === 0xff) {
+        cleanBytes.push(0xff);
+        i += 2;
+        continue;
+      }
+
+      // Subnegotiation IAC SB (0xFA) ... IAC SE (0xF0)
+      if (cmd === 0xfa) {
+        i += 2;
+        while (i < chunk.length) {
+          if (chunk[i] === 0xff && chunk[i + 1] === 0xf0) {
+            i += 2;
+            break;
+          }
+          i++;
+        }
+        continue;
+      }
+
+      // 3-byte IAC commands: WILL (0xFB), WONT (0xFC), DO (0xFD), DONT (0xFE)
+      if (cmd >= 0xfb && cmd <= 0xfe && i + 2 < chunk.length) {
+        const opt = chunk[i + 2];
+        if (cmd === 0xfd) {
+          // Server says DO <opt> -> Reply WONT <opt>
+          replies.push(0xff, 0xfc, opt);
+        } else if (cmd === 0xfb) {
+          // Server says WILL <opt> -> Accept ECHO (1) & SGA (3), otherwise DONT
+          if (opt === 1 || opt === 3) {
+            replies.push(0xff, 0xfd, opt);
+          } else {
+            replies.push(0xff, 0xfe, opt);
+          }
+        }
+        i += 3;
+        continue;
+      }
+
+      // 2-byte IAC command
+      i += 2;
+      continue;
+    }
+
+    // Strip NULL bytes (0x00) that some Telnet servers send after CR
+    if (chunk[i] !== 0x00) {
+      cleanBytes.push(chunk[i]);
+    }
+    i++;
+  }
+
+  if (replies.length > 0 && !socket.destroyed) {
+    socket.write(Buffer.from(replies));
+  }
+
+  return Buffer.from(cleanBytes).toString('utf8');
+}
+
+/**
+ * Convert multi-line CLI scripts into executable ZTE/Huawei CLI commands.
+ * Automatically converts standalone `!` separators inside configuration blocks
+ * into `exit` so ZTE sub-modes (`interface gpon-olt_...`, `interface gpon-onu_...`,
+ * `pon-onu-mng ...`, `vlan database`, `gpon`, `onu-pnp`) cleanly return to `(config)#`.
+ */
+export function normalizeCliCommandsForExecution(
+  rawCommands: string[] | string
+): string[] {
+  const inputLines = (
+    Array.isArray(rawCommands) ? rawCommands.join('\n') : String(rawCommands)
+  ).split(/\r?\n/);
+
+  const result: string[] = [];
+  let inConfigMode = false;
+  let inSubBlock = false;
+
+  const isTopSubBlockStart = (cmd: string): boolean =>
+    /^(interface\s+|pon-onu-mng\s+|vlan\s+database\b|vlan\s+\d+\b|gpon\b|epon\b|pon\b|onu-pnp\b)/i.test(
+      cmd
+    );
+
+  for (const raw of inputLines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    if (/^(configure\s+terminal|conf\s+t)$/i.test(line)) {
+      inConfigMode = true;
+      inSubBlock = false;
+      result.push('configure terminal');
+      continue;
+    }
+
+    if (line === '!') {
+      if (inConfigMode && inSubBlock) {
+        result.push('exit');
+        inSubBlock = false;
+      }
+      continue;
+    }
+
+    if (/^end$/i.test(line)) {
+      inConfigMode = false;
+      inSubBlock = false;
+      result.push('end');
+      continue;
+    }
+
+    if (/^exit$/i.test(line)) {
+      inSubBlock = false;
+      result.push('exit');
+      continue;
+    }
+
+    if (inConfigMode && isTopSubBlockStart(line)) {
+      if (inSubBlock) {
+        result.push('exit');
+      }
+      inSubBlock = true;
+      result.push(line);
+      continue;
+    }
+
+    result.push(line);
+  }
+
+  return result;
+}
+
 async function executeTelnetSession(params: {
   host: string;
   port: number;
   username?: string;
   password?: string;
+  enablePassword?: string;
   commands: string[];
   timeoutMs?: number;
 }): Promise<{
   reachable: boolean;
   output: string;
+  commandsExecuted: string[];
   durationMs: number;
   error?: string;
 }> {
   const startTime = Date.now();
-  const timeout = params.timeoutMs || 4500;
+  const normalizedCmds = normalizeCliCommandsForExecution(params.commands);
+  const timeout =
+    params.timeoutMs || Math.max(12000, normalizedCmds.length * 450 + 6000);
 
   return new Promise((resolve) => {
     const socket = new net.Socket();
-    let buffer = '';
+    let fullOutput = '';
+    let stepBuffer = '';
     let settled = false;
+
+    type SessionStage =
+      | 'WAIT_USER'
+      | 'WAIT_PASS'
+      | 'WAIT_ENABLE_PASS'
+      | 'WAIT_PROMPT'
+      | 'EXEC_CMDS'
+      | 'DONE';
+
+    let stage: SessionStage = 'WAIT_USER';
+    const cmdQueue: string[] = ['terminal length 0', ...normalizedCmds];
+    let cmdIndex = 0;
+    let waitingForPrompt = false;
+    let stepTimer: NodeJS.Timeout | null = null;
+    let wakeTimer: NodeJS.Timeout | null = null;
+
+    const clearTimers = () => {
+      if (stepTimer) {
+        clearTimeout(stepTimer);
+        stepTimer = null;
+      }
+      if (wakeTimer) {
+        clearTimeout(wakeTimer);
+        wakeTimer = null;
+      }
+    };
 
     const finish = (reachable: boolean, output: string, error?: string) => {
       if (settled) return;
       settled = true;
+      clearTimers();
       socket.destroy();
       resolve({
         reachable,
         output,
+        commandsExecuted: normalizedCmds,
         durationMs: Date.now() - startTime,
         error,
       });
     };
 
+    const sendNextCommand = () => {
+      if (settled) return;
+      if (stepTimer) {
+        clearTimeout(stepTimer);
+        stepTimer = null;
+      }
+
+      if (cmdIndex >= cmdQueue.length) {
+        stage = 'DONE';
+        setTimeout(() => finish(true, fullOutput), 350);
+        return;
+      }
+
+      const nextCmd = cmdQueue[cmdIndex++];
+      stepBuffer = '';
+      waitingForPrompt = true;
+      socket.write(nextCmd + '\r\n');
+
+      // Wait for OLT prompt; give `write` or `show running-config` longer time
+      const isSlowCmd = /^(write|wr|show\s+running-config|show\s+gpon)/i.test(
+        nextCmd
+      );
+      const waitMs = isSlowCmd ? 5500 : 450;
+
+      stepTimer = setTimeout(() => {
+        if (waitingForPrompt && stage === 'EXEC_CMDS') {
+          waitingForPrompt = false;
+          sendNextCommand();
+        }
+      }, waitMs);
+    };
+
     socket.setTimeout(timeout);
 
     socket.connect(params.port || 23, params.host, () => {
-      const sequence: string[] = [];
-      if (params.username) sequence.push(params.username);
-      if (params.password) sequence.push(params.password);
-      sequence.push('terminal length 0');
-      sequence.push(...params.commands);
-
-      let idx = 0;
-      const timer = setInterval(() => {
-        if (idx < sequence.length) {
-          socket.write(sequence[idx] + '\r\n');
-          idx++;
-        } else {
-          clearInterval(timer);
-          setTimeout(() => finish(true, buffer), 400);
+      // If OLT doesn't send a login prompt within 900ms after TCP connect, send CRLF to wake up banner
+      wakeTimer = setTimeout(() => {
+        if (stage === 'WAIT_USER' && stepBuffer.trim().length === 0 && !settled) {
+          socket.write('\r\n');
         }
-      }, 180);
+      }, 900);
+
+      // Fallback if OLT doesn't prompt for Username/Password or has unusual prompt
+      stepTimer = setTimeout(() => {
+        if (stage === 'WAIT_USER' && !settled) {
+          if (params.username) {
+            socket.write(params.username + '\r\n');
+            stage = 'WAIT_PASS';
+          } else {
+            stage = 'EXEC_CMDS';
+            sendNextCommand();
+          }
+        }
+      }, 2200);
     });
 
-    socket.on('data', (chunk) => {
-      const text = chunk.toString('utf8');
-      buffer += text;
-      if (text.includes('--More--')) {
+    socket.on('data', (rawChunk: Buffer) => {
+      const text = handleTelnetIacAndExtractText(socket, rawChunk);
+      if (!text) return;
+
+      fullOutput += text;
+      stepBuffer += text;
+
+      // Handle `--More--` paging automatically
+      if (/--\s*More\s*--/i.test(stepBuffer)) {
+        stepBuffer = stepBuffer.replace(/--\s*More\s*--/gi, '');
         socket.write(' ');
+        return;
+      }
+
+      // Handle ZTE/Huawei interactive confirmation prompts: `[yes/no]:`, `(y/n)`, `Confirm to`
+      if (
+        /(\[yes\/no\]|\(y\/n\)|confirm\s+to\s+\w+|are\s+you\s+sure)/i.test(
+          stepBuffer
+        )
+      ) {
+        stepBuffer = '';
+        socket.write('yes\r\n');
+        return;
+      }
+
+      if (stage === 'WAIT_USER') {
+        if (/(username|login|user\s*name)\s*:/i.test(stepBuffer)) {
+          stepBuffer = '';
+          stage = 'WAIT_PASS';
+          socket.write((params.username || 'zte') + '\r\n');
+          if (stepTimer) clearTimeout(stepTimer);
+          stepTimer = setTimeout(() => {
+            if (stage === 'WAIT_PASS' && !settled) {
+              socket.write((params.password || '') + '\r\n');
+              stage = 'WAIT_PROMPT';
+            }
+          }, 2200);
+          return;
+        }
+        if (/password\s*:/i.test(stepBuffer)) {
+          stepBuffer = '';
+          stage = 'WAIT_PROMPT';
+          socket.write((params.password || '') + '\r\n');
+          return;
+        }
+        if (/[>#]\s*$/.test(stepBuffer.trim())) {
+          if (/>\s*$/.test(stepBuffer.trim())) {
+            stepBuffer = '';
+            stage = 'WAIT_ENABLE_PASS';
+            socket.write('enable\r\n');
+          } else {
+            stepBuffer = '';
+            stage = 'EXEC_CMDS';
+            sendNextCommand();
+          }
+          return;
+        }
+      } else if (stage === 'WAIT_PASS') {
+        if (/password\s*:/i.test(stepBuffer)) {
+          stepBuffer = '';
+          stage = 'WAIT_PROMPT';
+          socket.write((params.password || '') + '\r\n');
+          if (stepTimer) clearTimeout(stepTimer);
+          stepTimer = setTimeout(() => {
+            if (stage === 'WAIT_PROMPT' && !settled) {
+              stage = 'EXEC_CMDS';
+              sendNextCommand();
+            }
+          }, 2000);
+          return;
+        }
+        if (/[>#]\s*$/.test(stepBuffer.trim())) {
+          stepBuffer = '';
+          stage = 'EXEC_CMDS';
+          sendNextCommand();
+          return;
+        }
+      } else if (stage === 'WAIT_PROMPT' || stage === 'WAIT_ENABLE_PASS') {
+        if (stage === 'WAIT_ENABLE_PASS' && /password\s*:/i.test(stepBuffer)) {
+          stepBuffer = '';
+          stage = 'WAIT_PROMPT';
+          socket.write(
+            (params.enablePassword || params.password || 'zxr10') + '\r\n'
+          );
+          return;
+        }
+        if (/>\s*$/.test(stepBuffer.trim())) {
+          stepBuffer = '';
+          stage = 'WAIT_ENABLE_PASS';
+          socket.write('enable\r\n');
+          return;
+        }
+        if (/#\s*$/.test(stepBuffer.trim())) {
+          stepBuffer = '';
+          stage = 'EXEC_CMDS';
+          sendNextCommand();
+          return;
+        }
+      } else if (stage === 'EXEC_CMDS') {
+        // When OLT prints prompt (`ZXAN#`, `ZXAN(config)#`, `ZXAN(config-if)#`, `ZXAN(gpon-onu-mng)#`)
+        if (waitingForPrompt && /[>#]\s*$/.test(stepBuffer.trim())) {
+          waitingForPrompt = false;
+          sendNextCommand();
+        }
       }
     });
 
     socket.on('timeout', () => {
-      if (buffer.length > 0) {
-        finish(true, buffer);
+      if (fullOutput.length > 0) {
+        finish(true, fullOutput);
       } else {
         finish(
           false,
@@ -669,7 +981,7 @@ async function executeTelnetSession(params: {
     });
 
     socket.on('error', (err) => {
-      finish(false, buffer, err.message);
+      finish(false, fullOutput, err.message);
     });
   });
 }
@@ -779,29 +1091,42 @@ app.post('/api/telnet/test', async (req, res) => {
     username,
     password,
     commands: ['show version'],
-    timeoutMs: 3000,
+    timeoutMs: 6000,
   });
   res.json(result);
 });
 
 // POST /api/telnet/exec — Execute live CLI commands on OLT via TCP Telnet
 app.post('/api/telnet/exec', async (req, res) => {
-  const { oltId, commands } = req.body as { oltId: number; commands: string[] };
+  const { oltId, commands } = req.body as {
+    oltId: number;
+    commands: string[] | string;
+  };
   const state = await loadDatabaseState();
-  const olt = state.olts.find((o) => o.id === Number(oltId));
+  const olt =
+    state.olts.find((o) => o.id === Number(oltId)) || state.olts[0];
   if (!olt) {
     res.status(404).json({ error: 'OLT not found in database' });
     return;
   }
+
+  const cmdList = Array.isArray(commands) ? commands : [String(commands)];
+  console.log(
+    `[OLT Telnet Exec] Connecting to ${olt.name} (${olt.ip_address}:${olt.telnet_port}) to run ${cmdList.length} command block(s)...`
+  );
 
   const result = await executeTelnetSession({
     host: olt.ip_address,
     port: olt.telnet_port,
     username: olt.olt_username,
     password: olt.olt_password,
-    commands: Array.isArray(commands) ? commands : [String(commands)],
-    timeoutMs: 4000,
+    enablePassword: olt.enable_password,
+    commands: cmdList,
   });
+
+  console.log(
+    `[OLT Telnet Exec] ${olt.name} (${olt.ip_address}:${olt.telnet_port}) -> reachable=${result.reachable}, executed=${result.commandsExecuted.length} cmds in ${result.durationMs}ms${result.error ? ` (error: ${result.error})` : ''}`
+  );
 
   res.json(result);
 });
