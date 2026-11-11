@@ -138,8 +138,48 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
   >('Daily');
   const [signalPeriod, setSignalPeriod] = useState<
-    'Weekly' | 'Monthly' | 'Yearly'
+    'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
   >('Weekly');
+  const [telemetryData, setTelemetryData] = useState<{
+    polledAt: string;
+    periods: Record<
+      'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
+      {
+        period: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
+        intervalLabel: string;
+        points: Array<{
+          timestampMs: number;
+          label: string;
+          shortLabel: string;
+          downloadMbps: number;
+          uploadMbps: number;
+          onuRxDbm: number | null;
+          oltRxDbm: number | null;
+          onuTxDbm: number | null;
+          phaseState: string;
+          sampleCount: number;
+          isLive: boolean;
+        }>;
+        maxDownloadMbps: number;
+        avgDownloadMbps: number;
+        curDownloadMbps: number;
+        maxUploadMbps: number;
+        avgUploadMbps: number;
+        curUploadMbps: number;
+        curOnuRxDbm: number | null;
+        minOnuRxDbm: number | null;
+        maxOnuRxDbm: number | null;
+        avgOnuRxDbm: number | null;
+        curOltRxDbm: number | null;
+        minOltRxDbm: number | null;
+        maxOltRxDbm: number | null;
+        avgOltRxDbm: number | null;
+        losEventsCount: number;
+        powerFailEventsCount: number;
+        statusSummaryText: string;
+      }
+    >;
+  } | null>(null);
   const [activeConsoleOutput, setActiveConsoleOutput] = useState<{
     title: string;
     content: string;
@@ -295,15 +335,31 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const [onlineDuration, setOnlineDuration] = useState<string>('1h 33m');
   const [refreshingWanIp, setRefreshingWanIp] = useState<boolean>(false);
 
+  const fetchStoredTelemetry = async () => {
+    try {
+      const resp = await fetch(`/api/onus/${onu.id}/telemetry`);
+      const json = await resp.json();
+      if (json && json.ok && json.periods) {
+        setTelemetryData({
+          polledAt: json.polledAt || new Date().toISOString(),
+          periods: json.periods,
+        });
+      }
+    } catch {
+      // Ignore network error
+    }
+  };
+
   const pollLiveOnuStatusAndWanIp = async (showInConsole = false) => {
     const cliCommands = [
+      `show interface ${onuInterface}`,
       `show gpon onu detail-info ${onuInterface}`,
       `show pon power attenuation ${onuInterface}`,
       `show gpon remote-onu ip-host ${onuInterface}`,
       `show gpon remote-onu pppoe ${onuInterface}`,
       `show gpon remote-onu wan-ip ${onuInterface}`,
     ];
-    const cliJoined = cliCommands.slice(0, 4).join('\n');
+    const cliJoined = cliCommands.slice(0, 5).join('\n');
 
     if (showInConsole) {
       setActiveConsoleOutput({
@@ -326,6 +382,24 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
         const parsedDetail = parseZteOnuDetailInfo(data.output);
         const parsedPower = parseZteOpticalAttenuation(data.output);
         const parsedWan = parseZteWanIpOutput(data.output);
+
+        // Record real-time traffic & optical signal sample and update Daily/Weekly/Monthly/Yearly charts
+        try {
+          const teleResp = await fetch(`/api/onus/${onu.id}/record-telemetry`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rawOutput: data.output }),
+          });
+          const teleJson = await teleResp.json();
+          if (teleJson && teleJson.ok && teleJson.periods) {
+            setTelemetryData({
+              polledAt: teleJson.polledAt || new Date().toISOString(),
+              periods: teleJson.periods,
+            });
+          }
+        } catch {
+          // Ignore telemetry record error
+        }
 
         const updatedFields: Partial<OnuRecord> = {};
         if (parsedDetail.phaseState) {
@@ -422,17 +496,18 @@ Username:              ${onu.pppoe_username || onu.customer_name || onu.serial_n
     }
   };
 
-  // Automatically fetch real-time status, signal & MikroTik WAN IP when viewing this ONU
+  // Automatically fetch real-time status, traffic, signal & MikroTik WAN IP when viewing this ONU
   useEffect(() => {
+    void fetchStoredTelemetry();
     void pollLiveOnuStatusAndWanIp(false);
   }, [onu.id, onuInterface]);
 
-  // Live Polling Effect when LIVE! button is active
+  // Continuous real-time polling for Traffic & Signal History (5s when LIVE!, 15s default)
   useEffect(() => {
-    if (!livePolling) return;
+    const intervalMs = livePolling ? 5000 : 15000;
     const timer = setInterval(() => {
       void pollLiveOnuStatusAndWanIp(false);
-    }, 5000);
+    }, intervalMs);
     return () => clearInterval(timer);
   }, [livePolling, onu.id, onuInterface]);
 
@@ -1568,123 +1643,302 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
 
       {/* Traffic history + Signal & Status history */}
       <div className="space-y-5 pt-2">
-        <div>
-          <div className="mb-2 flex items-center gap-2 text-sm">
-            <span className="font-bold text-white">Traffic history</span>
-            <div className="flex items-center gap-1.5 text-xs">
-              {(['Daily', 'Weekly', 'Monthly', 'Yearly'] as const).map((p, i) => (
-                <React.Fragment key={p}>
-                  {i > 0 && <span className="text-slate-600">|</span>}
-                  <button
-                    type="button"
-                    onClick={() => setTrafficPeriod(p)}
-                    className={
-                      trafficPeriod === p
-                        ? 'font-bold text-white'
-                        : 'text-sky-400 hover:underline'
-                    }
-                  >
-                    {p}
-                  </button>
-                </React.Fragment>
-              ))}
-            </div>
-          </div>
+        {(() => {
+          const activeTraffic = telemetryData?.periods?.[trafficPeriod];
+          const trafficPoints = activeTraffic?.points || [];
+          const peakTrafficScale = Math.max(
+            5,
+            activeTraffic?.maxDownloadMbps || 10,
+            activeTraffic?.maxUploadMbps || 5
+          );
 
-          <div className="rounded border border-slate-800 bg-[#05080f] p-4">
-            <div className="text-center font-mono text-xs font-bold text-slate-200">
-              {onu.customer_name || 'RATMI'} (SN: {onu.serial_number}) -{' '}
-              {trafficPeriod} Traffic
-            </div>
-            <div className="mt-3 flex h-32 items-end gap-1 border-b border-l border-slate-800 px-3 pb-1">
-              {[
-                12, 18, 25, 14, 22, 38, 45, 52, 40, 34, 48, 62, 58, 74, 82, 68,
-                55, 64, 78, 86, 72, 60, 52, 66,
-              ].map((val, idx) => (
-                <div key={idx} className="flex flex-1 flex-col items-center gap-0.5">
-                  <div
-                    className="w-full rounded-t bg-emerald-500/80"
-                    style={{ height: `${val}px` }}
-                  />
-                  <div
-                    className="w-full rounded-b bg-sky-500/80"
-                    style={{ height: `${Math.round(val * 0.35)}px` }}
-                  />
+          const activeSignal = telemetryData?.periods?.[signalPeriod];
+          const signalPoints = activeSignal?.points || [];
+
+          // Map dBm (-12 dBm top .. -35 dBm bottom) to percentage height (8% .. 90%)
+          const dbmToTopPercent = (dbm: number | null, fallbackDbm: number) => {
+            const v = dbm !== null && !isNaN(dbm) ? dbm : fallbackDbm;
+            const clamped = Math.max(-35, Math.min(-12, v));
+            // -12 dBm -> 10% from top, -35 dBm -> 88% from top
+            return 10 + ((Math.abs(clamped) - 12) / (35 - 12)) * 78;
+          };
+
+          return (
+            <>
+              <div>
+                <div className="mb-2 flex items-center gap-2 text-sm">
+                  <span className="font-bold text-white">Traffic history</span>
+                  <div className="flex items-center gap-1.5 text-xs">
+                    {(['Daily', 'Weekly', 'Monthly', 'Yearly'] as const).map(
+                      (p, i) => (
+                        <React.Fragment key={p}>
+                          {i > 0 && <span className="text-slate-600">|</span>}
+                          <button
+                            type="button"
+                            onClick={() => setTrafficPeriod(p)}
+                            className={
+                              trafficPeriod === p
+                                ? 'font-bold text-white'
+                                : 'text-sky-400 hover:underline'
+                            }
+                          >
+                            {p}
+                          </button>
+                        </React.Fragment>
+                      )
+                    )}
+                  </div>
                 </div>
-              ))}
-            </div>
-            <div className="mt-2 flex flex-wrap items-center justify-between font-mono text-[11px] text-slate-400">
-              <div className="flex items-center gap-4">
-                <span className="flex items-center gap-1.5 text-emerald-400">
-                  <span className="h-2.5 w-2.5 bg-emerald-500" />
-                  Download: Max 18.42 Mbps / Avg 6.18 Mbps
-                </span>
-                <span className="flex items-center gap-1.5 text-sky-400">
-                  <span className="h-2.5 w-2.5 bg-sky-500" />
-                  Upload: Max 6.20 Mbps / Avg 1.94 Mbps
-                </span>
-              </div>
-              <span>Last 24 Hours (15-min SNMP IF-MIB Polling)</span>
-            </div>
-          </div>
-        </div>
 
-        {/* Signal & Status history */}
-        <div>
-          <div className="mb-2 flex items-center gap-2 text-sm">
-            <span className="font-bold text-white">Signal & Status history</span>
-            <div className="flex items-center gap-1.5 text-xs">
-              {(['Weekly', 'Monthly', 'Yearly'] as const).map((p, i) => (
-                <React.Fragment key={p}>
-                  {i > 0 && <span className="text-slate-600">|</span>}
-                  <button
-                    type="button"
-                    onClick={() => setSignalPeriod(p)}
-                    className={
-                      signalPeriod === p
-                        ? 'font-bold text-white'
-                        : 'text-sky-400 hover:underline'
-                    }
-                  >
-                    {p}
-                  </button>
-                </React.Fragment>
-              ))}
-            </div>
-          </div>
+                <div className="rounded border border-slate-800 bg-[#05080f] p-4">
+                  <div className="text-center font-mono text-xs font-bold text-slate-200">
+                    {onu.customer_name || onu.serial_number} (SN:{' '}
+                    {onu.serial_number}) - {trafficPeriod} Traffic
+                  </div>
 
-          <div className="rounded border border-slate-800 bg-[#05080f] p-4">
-            <div className="text-center font-mono text-xs font-bold text-slate-200">
-              {onu.customer_name || 'RATMI'} (SN: {onu.serial_number}) -{' '}
-              {signalPeriod} Optical Power
-            </div>
-            <div className="mt-3 flex h-28 items-center justify-between border-b border-l border-slate-800 px-4">
-              {Array.from({ length: 18 }, (_, idx) => (
-                <div key={idx} className="flex flex-col items-center gap-4">
-                  <div
-                    className="h-2 w-2 rounded-full bg-emerald-400"
-                    title={`ONU Rx: ${(onu.onu_rx_dbm ?? -23.19).toFixed(2)} dBm`}
-                  />
-                  <div
-                    className="h-2 w-2 rounded-full bg-amber-400"
-                    title={`OLT Rx: ${(onu.olt_rx_dbm ?? -30.87).toFixed(2)} dBm`}
-                  />
+                  <div className="mt-3 flex h-36 items-end gap-1 border-b border-l border-slate-800 px-3 pb-1">
+                    {trafficPoints.map((pt, idx) => {
+                      const downHeightPx = Math.max(
+                        4,
+                        Math.round((pt.downloadMbps / peakTrafficScale) * 86)
+                      );
+                      const upHeightPx = Math.max(
+                        3,
+                        Math.round((pt.uploadMbps / peakTrafficScale) * 44)
+                      );
+                      return (
+                        <div
+                          key={idx}
+                          title={`${pt.label}\nDownload: ${pt.downloadMbps.toFixed(2)} Mbps\nUpload: ${pt.uploadMbps.toFixed(2)} Mbps`}
+                          className="group relative flex flex-1 flex-col items-center gap-0.5"
+                        >
+                          <div
+                            className={`w-full rounded-t transition-all ${
+                              pt.isLive
+                                ? 'bg-emerald-400 ring-1 ring-emerald-300/60'
+                                : 'bg-emerald-500/85 group-hover:bg-emerald-400'
+                            }`}
+                            style={{ height: `${downHeightPx}px` }}
+                          />
+                          <div
+                            className={`w-full rounded-b transition-all ${
+                              pt.isLive
+                                ? 'bg-sky-400 ring-1 ring-sky-300/60'
+                                : 'bg-sky-500/85 group-hover:bg-sky-400'
+                            }`}
+                            style={{ height: `${upHeightPx}px` }}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* X-axis period labels */}
+                  {trafficPoints.length > 0 && (
+                    <div className="mt-1 flex items-center justify-between px-3 font-mono text-[10px] text-slate-500">
+                      {trafficPoints.map((pt, idx) => (
+                        <span
+                          key={idx}
+                          className="flex-1 text-center truncate"
+                        >
+                          {pt.shortLabel}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="mt-2 flex flex-wrap items-center justify-between font-mono text-[11px] text-slate-400">
+                    <div className="flex flex-wrap items-center gap-4">
+                      <span className="flex items-center gap-1.5 text-emerald-400">
+                        <span className="h-2.5 w-2.5 bg-emerald-500" />
+                        Download: Now{' '}
+                        {(activeTraffic?.curDownloadMbps ?? 0).toFixed(2)} Mbps / Max{' '}
+                        {(activeTraffic?.maxDownloadMbps ?? 0).toFixed(2)} Mbps / Avg{' '}
+                        {(activeTraffic?.avgDownloadMbps ?? 0).toFixed(2)} Mbps
+                      </span>
+                      <span className="flex items-center gap-1.5 text-sky-400">
+                        <span className="h-2.5 w-2.5 bg-sky-500" />
+                        Upload: Now{' '}
+                        {(activeTraffic?.curUploadMbps ?? 0).toFixed(2)} Mbps / Max{' '}
+                        {(activeTraffic?.maxUploadMbps ?? 0).toFixed(2)} Mbps / Avg{' '}
+                        {(activeTraffic?.avgUploadMbps ?? 0).toFixed(2)} Mbps
+                      </span>
+                    </div>
+                    <span>
+                      {activeTraffic?.intervalLabel ||
+                        `Real-Time OLT Traffic (${trafficPeriod})`}
+                    </span>
+                  </div>
                 </div>
-              ))}
-            </div>
-            <div className="mt-2 flex flex-wrap items-center justify-between font-mono text-[11px] text-slate-400">
-              <div className="flex items-center gap-4">
-                <span className="text-emerald-400">
-                  ■ 1490 nm ONU Rx: {(onu.onu_rx_dbm ?? -23.19).toFixed(2)} dBm
-                </span>
-                <span className="text-amber-400">
-                  ■ 1310 nm OLT Rx: {(onu.olt_rx_dbm ?? -30.87).toFixed(2)} dBm
-                </span>
               </div>
-              <span>Status: Working (No LOS in last 7 days)</span>
-            </div>
-          </div>
-        </div>
+
+              {/* Signal & Status history */}
+              <div>
+                <div className="mb-2 flex items-center gap-2 text-sm">
+                  <span className="font-bold text-white">
+                    Signal & Status history
+                  </span>
+                  <div className="flex items-center gap-1.5 text-xs">
+                    {(['Daily', 'Weekly', 'Monthly', 'Yearly'] as const).map(
+                      (p, i) => (
+                        <React.Fragment key={p}>
+                          {i > 0 && <span className="text-slate-600">|</span>}
+                          <button
+                            type="button"
+                            onClick={() => setSignalPeriod(p)}
+                            className={
+                              signalPeriod === p
+                                ? 'font-bold text-white'
+                                : 'text-sky-400 hover:underline'
+                            }
+                          >
+                            {p}
+                          </button>
+                        </React.Fragment>
+                      )
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded border border-slate-800 bg-[#05080f] p-4">
+                  <div className="text-center font-mono text-xs font-bold text-slate-200">
+                    {onu.customer_name || onu.serial_number} (SN:{' '}
+                    {onu.serial_number}) - {signalPeriod} Optical Power
+                  </div>
+
+                  <div className="relative mt-3 flex h-32 items-stretch justify-between border-b border-l border-slate-800 px-4">
+                    {/* Reference dBm horizontal guide lines */}
+                    <div className="pointer-events-none absolute inset-x-0 top-[25%] border-t border-dashed border-slate-800/70">
+                      <span className="pl-1 font-mono text-[9px] text-slate-600">
+                        -18 dBm
+                      </span>
+                    </div>
+                    <div className="pointer-events-none absolute inset-x-0 top-[52%] border-t border-dashed border-slate-800/70">
+                      <span className="pl-1 font-mono text-[9px] text-slate-600">
+                        -24 dBm
+                      </span>
+                    </div>
+                    <div className="pointer-events-none absolute inset-x-0 top-[76%] border-t border-dashed border-rose-950/60">
+                      <span className="pl-1 font-mono text-[9px] text-rose-500/50">
+                        -30 dBm
+                      </span>
+                    </div>
+
+                    {signalPoints.map((pt, idx) => {
+                      const onuTop = dbmToTopPercent(
+                        pt.onuRxDbm,
+                        onu.onu_rx_dbm ?? -21.85
+                      );
+                      const oltTop = dbmToTopPercent(
+                        pt.oltRxDbm,
+                        onu.olt_rx_dbm ?? -25.4
+                      );
+                      const isLos = pt.phaseState === 'LOS';
+                      const isPwr = pt.phaseState === 'DyingGasp';
+                      return (
+                        <div
+                          key={idx}
+                          title={`${pt.label}\n1490nm ONU Rx: ${
+                            pt.onuRxDbm !== null ? `${pt.onuRxDbm.toFixed(2)} dBm` : 'N/A (LOS)'
+                          }\n1310nm OLT Rx: ${
+                            pt.oltRxDbm !== null ? `${pt.oltRxDbm.toFixed(2)} dBm` : 'N/A (LOS)'
+                          }\nStatus: ${pt.phaseState}`}
+                          className="group relative flex flex-1 flex-col items-center"
+                        >
+                          {!isLos && (
+                            <>
+                              <div
+                                className={`absolute h-2.5 w-2.5 -translate-y-1/2 rounded-full transition-transform group-hover:scale-125 ${
+                                  pt.isLive
+                                    ? 'bg-emerald-300 ring-2 ring-emerald-400/60'
+                                    : 'bg-emerald-400'
+                                }`}
+                                style={{ top: `${onuTop}%` }}
+                              />
+                              <div
+                                className={`absolute h-2.5 w-2.5 -translate-y-1/2 rounded-full transition-transform group-hover:scale-125 ${
+                                  pt.isLive
+                                    ? 'bg-amber-300 ring-2 ring-amber-400/60'
+                                    : 'bg-amber-400'
+                                }`}
+                                style={{ top: `${oltTop}%` }}
+                              />
+                            </>
+                          )}
+                          {/* Bottom status indicator dot for LOS / Power Fail / Working */}
+                          <div
+                            className={`mt-auto mb-1 h-1.5 w-3 rounded-sm ${
+                              isLos
+                                ? 'bg-rose-500'
+                                : isPwr
+                                ? 'bg-amber-500'
+                                : 'bg-emerald-500/40'
+                            }`}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* X-axis period labels */}
+                  {signalPoints.length > 0 && (
+                    <div className="mt-1 flex items-center justify-between px-4 font-mono text-[10px] text-slate-500">
+                      {signalPoints.map((pt, idx) => (
+                        <span
+                          key={idx}
+                          className="flex-1 text-center truncate"
+                        >
+                          {pt.shortLabel}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="mt-2 flex flex-wrap items-center justify-between font-mono text-[11px] text-slate-400">
+                    <div className="flex flex-wrap items-center gap-4">
+                      <span className="text-emerald-400">
+                        ■ 1490 nm ONU Rx:{' '}
+                        {(
+                          activeSignal?.curOnuRxDbm ??
+                          onu.onu_rx_dbm ??
+                          -21.85
+                        ).toFixed(2)}{' '}
+                        dBm
+                        {activeSignal?.avgOnuRxDbm !== null &&
+                          activeSignal?.avgOnuRxDbm !== undefined && (
+                            <span className="text-slate-400">
+                              {' '}
+                              (Avg {activeSignal.avgOnuRxDbm.toFixed(2)} dBm)
+                            </span>
+                          )}
+                      </span>
+                      <span className="text-amber-400">
+                        ■ 1310 nm OLT Rx:{' '}
+                        {(
+                          activeSignal?.curOltRxDbm ??
+                          onu.olt_rx_dbm ??
+                          -25.4
+                        ).toFixed(2)}{' '}
+                        dBm
+                        {activeSignal?.avgOltRxDbm !== null &&
+                          activeSignal?.avgOltRxDbm !== undefined && (
+                            <span className="text-slate-400">
+                              {' '}
+                              (Avg {activeSignal.avgOltRxDbm.toFixed(2)} dBm)
+                            </span>
+                          )}
+                      </span>
+                    </div>
+                    <span>
+                      {activeSignal?.statusSummaryText ||
+                        `Status: ${onu.phase_state === 'working' ? 'Working' : onu.phase_state}`}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </>
+          );
+        })()}
       </div>
 
       {/* Speed profiles Table + Ethernet ports Table + WiFi Section */}

@@ -529,6 +529,101 @@ export function parseZteOpticalAttenuation(rawOutput: string): OpticalPowerParse
   return result;
 }
 
+export interface InterfaceTrafficParsed {
+  downloadMbps: number | null; // OLT Output -> ONU Download
+  uploadMbps: number | null;   // OLT Input  <- ONU Upload
+  inBytes: number | null;      // Cumulative Upstream Bytes (ONU Upload)
+  outBytes: number | null;     // Cumulative Downstream Bytes (ONU Download)
+  inPackets: number | null;
+  outPackets: number | null;
+}
+
+/**
+ * 3b. ALGORITMA REGEX PARSER: `show interface gpon-onu_1/x/y:z`
+ * Membaca real-time input/output rate (Bps / bps / Kbps / Mbps) serta total Input/Output Bytes
+ * Catatan arah trafik pada interface OLT `gpon-onu_1/B/P:I`:
+ * - OLT `input rate` / `Input Bytes`   = Upstream dari ONU ke OLT  (UPLOAD pelanggan)
+ * - OLT `output rate` / `Output Bytes` = Downstream dari OLT ke ONU (DOWNLOAD pelanggan)
+ */
+export function parseZteInterfaceTraffic(rawOutput: string): InterfaceTrafficParsed {
+  const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const ifSectionIdx = cleaned.search(/show\s+interface\s+gpon-onu_/i);
+  const section = ifSectionIdx >= 0 ? cleaned.slice(ifSectionIdx) : cleaned;
+
+  const parseRateToMbps = (valStr: string, unitRaw: string): number => {
+    const val = parseFloat(valStr);
+    if (isNaN(val) || val < 0) return 0;
+    const u = unitRaw.trim();
+    if (/^MBps$/i.test(u) && u.includes('B')) {
+      return Number((val * 8).toFixed(3));
+    }
+    if (/^Mbps$/i.test(u)) {
+      return Number(val.toFixed(3));
+    }
+    if (/^KBps$/i.test(u) && u.includes('B')) {
+      return Number(((val * 8) / 1000).toFixed(3));
+    }
+    if (/^Kbps$/i.test(u)) {
+      return Number((val / 1000).toFixed(3));
+    }
+    // ZTE C300/C320 uses `Bps` (capital B = Bytes per second) vs `bps` / `bits/sec`
+    if (u === 'Bps' || /^bytes\/s/i.test(u)) {
+      return Number(((val * 8) / 1_000_000).toFixed(3));
+    }
+    // bits/sec or bps
+    return Number((val / 1_000_000).toFixed(3));
+  };
+
+  const inRateMatch = section.match(
+    /input\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Mbps|MBps)/i
+  );
+  const outRateMatch = section.match(
+    /output\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Mbps|MBps)/i
+  );
+
+  // Extract cumulative Input Bytes & Output Bytes
+  const inputBlockMatch = section.match(
+    /Input\s*:\s*[\r\n]+([\s\S]*?)(?=Output\s*:|ZXAN|$)/i
+  );
+  const outputBlockMatch = section.match(
+    /Output\s*:\s*[\r\n]+([\s\S]*?)(?=ZXAN|show\s+|$)/i
+  );
+
+  let inBytes: number | null = null;
+  let inPackets: number | null = null;
+  if (inputBlockMatch) {
+    const pm = inputBlockMatch[1].match(/Packets\s*:\s*(\d+)/i);
+    const bm = inputBlockMatch[1].match(/Bytes\s*:\s*(\d+)/i);
+    if (pm) inPackets = parseInt(pm[1], 10);
+    if (bm) inBytes = parseInt(bm[1], 10);
+  }
+
+  let outBytes: number | null = null;
+  let outPackets: number | null = null;
+  if (outputBlockMatch) {
+    const pm = outputBlockMatch[1].match(/Packets\s*:\s*(\d+)/i);
+    const bm = outputBlockMatch[1].match(/Bytes\s*:\s*(\d+)/i);
+    if (pm) outPackets = parseInt(pm[1], 10);
+    if (bm) outBytes = parseInt(bm[1], 10);
+  }
+
+  const uploadMbps = inRateMatch
+    ? parseRateToMbps(inRateMatch[1], inRateMatch[2])
+    : null;
+  const downloadMbps = outRateMatch
+    ? parseRateToMbps(outRateMatch[1], outRateMatch[2])
+    : null;
+
+  return {
+    downloadMbps,
+    uploadMbps,
+    inBytes,
+    outBytes,
+    inPackets,
+    outPackets,
+  };
+}
+
 /**
  * 4. ALGORITMA PENCARI `onu_index` KOSONG OTOMATIS PADA PORT PON (1 s/d 128)
  * Contoh nyata pada running-config: Port 1/3/4 memiliki ONU 1,2,3,4,5,6,7,9 -> otomatis menemukan index 8!
