@@ -281,9 +281,11 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     const cliCommands = [
       `show gpon onu detail-info ${onuInterface}`,
       `show pon power attenuation ${onuInterface}`,
+      `show gpon remote-onu ip-host ${onuInterface}`,
+      `show gpon remote-onu pppoe ${onuInterface}`,
       `show gpon remote-onu wan-ip ${onuInterface}`,
     ];
-    const cliJoined = cliCommands.join('\n');
+    const cliJoined = cliCommands.slice(0, 4).join('\n');
 
     if (showInConsole) {
       setActiveConsoleOutput({
@@ -333,7 +335,7 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
           updatedFields.olt_rx_dbm = null;
         }
 
-        // Real PPPoE WAN IP assigned by MikroTik (from show gpon remote-onu wan-ip)
+        // Real PPPoE WAN IP assigned by MikroTik (from show gpon remote-onu ip-host / pppoe / wan-ip)
         if (parsedWan.currentIp) {
           updatedFields.ip_address = parsedWan.currentIp;
         } else if (
@@ -349,9 +351,23 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
 
         void onExecuteAction(onu.id, 'POLL_SIGNAL', cliJoined, updatedFields);
         if (showInConsole) {
+          // Clean redundant `%Code 64040-GPONRM : No relate information to show.` from wan-ip when ip-host is used
+          const cleanedConsole = data.output
+            .replace(
+              /[^\r\n]*show\s+gpon\s+remote-onu\s+wan-ip[^\r\n]*[\r\n]+\s*%Code\s+64040-GPONRM\s*:\s*No\s+relate\s+information\s+to\s+show\.?[\r\n]*/gi,
+              ''
+            )
+            .trim();
+          const summaryBanner = `\n\n--- [Ringkasan Real-Time OLT & WAN PPPoE MikroTik] ---\nPhase State : ${
+            parsedDetail.phaseState || onu.phase_state
+          }\nWAN PPPoE IP: ${
+            parsedWan.currentIp || '0.0.0.0 (Belum terkoneksi PPPoE / Menunggu dial MikroTik)'
+          }${parsedWan.gateway ? `\nWAN Gateway : ${parsedWan.gateway}` : ''}${
+            parsedWan.macAddress ? `\nWAN MAC     : ${parsedWan.macAddress}` : ''
+          }`;
           setActiveConsoleOutput({
             title: `Get status & Real WAN IP (LIVE OLT) — ${onuInterface}`,
-            content: data.output,
+            content: `${cleanedConsole || data.output}${summaryBanner}`,
           });
         }
         return;
@@ -374,11 +390,9 @@ ONU interface:         ${onuInterface}
   ONU Distance:        ${onu.distance_m}m
   Online Duration:     ${onlineDuration}
 
-${olt.name}# show gpon remote-onu wan-ip ${onuInterface}
-WAN index:             1
-Mode:                  PPPoE
-Status:                ${onu.ip_address ? 'connected' : 'connecting'}
-Current IP:            ${onu.ip_address || '0.0.0.0'}
+${olt.name}# show gpon remote-onu ip-host ${onuInterface}
+Host ID:               1
+CurIP:                 ${onu.ip_address || '0.0.0.0'}
 Username:              ${onu.pppoe_username || onu.customer_name || onu.serial_number}`,
       });
     }

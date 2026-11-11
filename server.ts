@@ -2024,7 +2024,11 @@ app.post('/api/olts/:id/sync-live', async (req, res) => {
       .slice(0, 20)
       .map((st) => st.fullInterface);
     for (const onuIf of workingIfs) {
-      telemetryCmds.push(`show gpon remote-onu wan-ip ${onuIf}`);
+      telemetryCmds.push(
+        `show gpon remote-onu ip-host ${onuIf}`,
+        `show gpon remote-onu pppoe ${onuIf}`,
+        `show gpon remote-onu wan-ip ${onuIf}`
+      );
     }
 
     let rawTelemetryOutput = '';
@@ -2071,7 +2075,7 @@ app.post('/api/olts/:id/sync-live', async (req, res) => {
 });
 
 // POST /api/olts/:id/poll-realtime — Real-Time SmartOLT Telemetry Engine!
-// Polls live `show gpon onu state`, `show gpon onu uncfg`, `show pon power`, and `show gpon remote-onu wan-ip`
+// Polls live `show gpon onu state`, `show gpon onu uncfg`, `show pon power`, and `show gpon remote-onu ip-host / pppoe / wan-ip`
 // so Online / Power Fail (DyingGasp) / LOS / Offline status and MikroTik PPPoE WAN IP update in real time!
 app.post('/api/olts/:id/poll-realtime', async (req, res) => {
   const oltId = Number(req.params.id);
@@ -2103,6 +2107,8 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       cmds.push(
         `show gpon onu detail-info ${onuIf}`,
         `show pon power attenuation ${onuIf}`,
+        `show gpon remote-onu ip-host ${onuIf}`,
+        `show gpon remote-onu pppoe ${onuIf}`,
         `show gpon remote-onu wan-ip ${onuIf}`
       );
     } else {
@@ -2118,12 +2124,16 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         cmds.push(`show pon power onu-rx gpon-olt_${portCoord}`);
       }
       if (oltOnus.length > 0) {
-        const batchSize = Math.min(4, oltOnus.length);
+        const batchSize = Math.min(3, oltOnus.length);
         for (let i = 0; i < batchSize; i++) {
           const target =
             oltOnus[(roundRobinTelemetryCursor + i) % oltOnus.length];
           const onuIf = `gpon-onu_1/${target.board}/${target.port}:${target.onu_index}`;
-          cmds.push(`show gpon remote-onu wan-ip ${onuIf}`);
+          cmds.push(
+            `show gpon remote-onu ip-host ${onuIf}`,
+            `show gpon remote-onu pppoe ${onuIf}`,
+            `show gpon remote-onu wan-ip ${onuIf}`
+          );
           if (target.phase_state !== 'working') {
             cmds.push(`show gpon onu detail-info ${onuIf}`);
           }

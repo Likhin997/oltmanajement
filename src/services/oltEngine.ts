@@ -322,37 +322,56 @@ export function parseZteOnuDetailInfo(rawOutput: string): OnuDetailInfoParsed {
 }
 
 /**
- * 2c. ALGORITMA REGEX PARSER: `show gpon remote-onu wan-ip gpon-onu_1/x/y:z`
- * Membaca IP PPPoE / DHCP nyata yang didapat ONU dari MikroTik / BNG melalui OMCI OLT!
+ * 2c. ALGORITMA REGEX PARSER:
+ * Mendukung ketiga perintah ZTE C300/C320 untuk membaca IP WAN PPPoE dari MikroTik / BNG:
+ * - `show gpon remote-onu ip-host gpon-onu_1/x/y:z` (`CurIP: 10.x.x.x`, `CurMask:`, `CurGateway:`, `MAC:`)
+ * - `show gpon remote-onu pppoe gpon-onu_1/x/y:z` (`User:`, `Status:`, `CurIP:`)
+ * - `show gpon remote-onu wan-ip gpon-onu_1/x/y:z` (`Current IP: 10.x.x.x`, `Status:`, `Username:`)
  */
 export function parseZteWanIpOutput(rawOutput: string): WanIpParsed {
   const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
 
-  const ipMatch =
-    cleaned.match(/Current\s+IP\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
-    cleaned.match(/IP\s+address\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
+  // Collect all candidate runtime IPs from CurIP / Cur IP / Current IP (ignoring `Identify: IP: 0.0.0.0`)
+  const ipCandidates: string[] = [];
+  const ipRegex =
+    /(?:Cur\s*IP|Current\s+IP(?:\s+address)?|^\s*IP\s+address)\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/gim;
+  let im: RegExpExecArray | null;
+  while ((im = ipRegex.exec(cleaned)) !== null) {
+    if (im[1]) {
+      ipCandidates.push(im[1].trim());
+    }
+  }
+
+  // Pick the first active non-zero IP (Host ID 1 PPPoE WAN IP from MikroTik)
+  const validIp =
+    ipCandidates.find(
+      (ip) => ip !== '0.0.0.0' && ip !== '255.255.255.255' && ip !== '127.0.0.1'
+    ) || null;
+
   const maskMatch =
+    cleaned.match(/Cur\s*Mask\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
     cleaned.match(/Current\s+mask\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
     cleaned.match(/Subnet\s+mask\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
   const gwMatch =
+    cleaned.match(/Cur\s*Gateway\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
     cleaned.match(/Current\s+gateway\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
     cleaned.match(/Default\s+gateway\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
-  const dns1Match = cleaned.match(
-    /Current\s+primary\s+DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i
+  const dns1Match =
+    cleaned.match(/Cur\s*(?:Pri|Primary)\s*DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
+    cleaned.match(/Current\s+primary\s+DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
+  const dns2Match =
+    cleaned.match(/Cur\s*(?:Sec|Secondary)\s*DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
+    cleaned.match(/Current\s+secondary\s+DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
+  const statusMatch = cleaned.match(/^\s*Status\s*:\s*([^\r\n.]+)/im);
+  const userMatch = cleaned.match(
+    /^\s*(?:User\s*name|Username|User)\s*:\s*([^\r\n.]+)/im
   );
-  const dns2Match = cleaned.match(
-    /Current\s+secondary\s+DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i
-  );
-  const statusMatch = cleaned.match(/^\s*Status\s*:\s*([^\r\n]+)/im);
-  const userMatch = cleaned.match(/^\s*Username\s*:\s*([^\r\n]+)/im);
-  const passMatch = cleaned.match(/^\s*Password\s*:\s*([^\r\n]+)/im);
+  const passMatch = cleaned.match(/^\s*Password\s*:\s*([^\r\n.]+)/im);
   const cvlanMatch = cleaned.match(/^\s*CVLAN\s*:\s*(\d+)/im);
-  const macMatch = cleaned.match(/^\s*MAC\s+address\s*:\s*([0-9a-fA-F:.\-]+)/im);
-  const modeMatch = cleaned.match(/^\s*Mode\s*:\s*([^\r\n]+)/im);
-
-  const rawIp = ipMatch ? ipMatch[1].trim() : null;
-  const validIp =
-    rawIp && rawIp !== '0.0.0.0' && rawIp !== '255.255.255.255' ? rawIp : rawIp;
+  const macMatch = cleaned.match(
+    /^\s*MAC(?:\s+address)?\s*:\s*([0-9a-fA-F:.\-]+)/im
+  );
+  const modeMatch = cleaned.match(/^\s*Mode\s*:\s*([^\r\n.]+)/im);
 
   return {
     currentIp: validIp,
@@ -360,38 +379,60 @@ export function parseZteWanIpOutput(rawOutput: string): WanIpParsed {
     gateway: gwMatch ? gwMatch[1].trim() : null,
     primaryDns: dns1Match ? dns1Match[1].trim() : null,
     secondaryDns: dns2Match ? dns2Match[1].trim() : null,
-    status: statusMatch ? statusMatch[1].trim() : null,
+    status: statusMatch ? statusMatch[1].trim() : validIp ? 'connected' : null,
     username:
-      userMatch && userMatch[1].trim() && userMatch[1].trim().toLowerCase() !== 'n/a'
+      userMatch &&
+      userMatch[1].trim() &&
+      userMatch[1].trim().toLowerCase() !== 'n/a' &&
+      userMatch[1].trim().toLowerCase() !== 'null'
         ? userMatch[1].trim()
         : null,
     password:
-      passMatch && passMatch[1].trim() && passMatch[1].trim().toLowerCase() !== 'n/a'
+      passMatch &&
+      passMatch[1].trim() &&
+      passMatch[1].trim().toLowerCase() !== 'n/a'
         ? passMatch[1].trim()
         : null,
     cvlan:
       cvlanMatch && parseInt(cvlanMatch[1], 10) > 0
         ? parseInt(cvlanMatch[1], 10)
         : null,
-    macAddress: macMatch ? macMatch[1].trim() : null,
+    macAddress: macMatch ? macMatch[1].trim().replace(/\.$/, '') : null,
     mode: modeMatch ? modeMatch[1].trim() : null,
   };
 }
 
 /**
- * 2d. Multi-ONU WAN IP Parser untuk batch `show gpon remote-onu wan-ip gpon-onu_1/B/P:I`
+ * 2d. Multi-ONU WAN IP Parser untuk batch `show gpon remote-onu ip-host / pppoe / wan-ip gpon-onu_1/B/P:I`
  */
 export function parseZteMultiWanIpOutput(
   rawOutput: string
 ): Map<string, WanIpParsed> {
   const map = new Map<string, WanIpParsed>();
   const regex =
-    /show\s+gpon\s+remote-onu\s+wan-ip\s+(gpon-onu_\d+\/\d+\/\d+:\d+)([\s\S]*?)(?=show\s+gpon\s+remote-onu\s+wan-ip|show\s+pon\s+power|$)/gi;
+    /show\s+gpon\s+remote-onu\s+(?:ip-host|pppoe|wan-ip)\s+(gpon-onu_\d+\/\d+\/\d+:\d+)([\s\S]*?)(?=show\s+gpon\s+(?:remote-onu|onu)|show\s+pon\s+power|$)/gi;
   let m: RegExpExecArray | null;
   while ((m = regex.exec(rawOutput)) !== null) {
     const key = m[1].trim().toLowerCase();
     const parsed = parseZteWanIpOutput(m[2]);
-    map.set(key, parsed);
+    const prev = map.get(key);
+    if (!prev) {
+      map.set(key, parsed);
+    } else {
+      map.set(key, {
+        currentIp: parsed.currentIp || prev.currentIp,
+        currentMask: parsed.currentMask || prev.currentMask,
+        gateway: parsed.gateway || prev.gateway,
+        primaryDns: parsed.primaryDns || prev.primaryDns,
+        secondaryDns: parsed.secondaryDns || prev.secondaryDns,
+        status: parsed.status || prev.status,
+        username: parsed.username || prev.username,
+        password: parsed.password || prev.password,
+        cvlan: parsed.cvlan || prev.cvlan,
+        macAddress: parsed.macAddress || prev.macAddress,
+        mode: parsed.mode || prev.mode,
+      });
+    }
   }
   return map;
 }
