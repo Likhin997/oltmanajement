@@ -1541,6 +1541,30 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
 app.get('/api/state', async (_req, res) => {
   try {
     const state = await loadDatabaseState();
+    // Auto-repair any ONU whose pppoe_username or pppoe_password was polluted by OLT Telnet login banner
+    let repaired = false;
+    state.onus = state.onus.map((u) => {
+      const badUser =
+        u.pppoe_username &&
+        (u.pppoe_username.trim().toLowerCase() === 'zte' ||
+          u.pppoe_username.includes('%'));
+      const badPass =
+        u.pppoe_password &&
+        (u.pppoe_password.includes('%') ||
+          u.pppoe_password.toLowerCase().includes('not strong'));
+      if (!badUser && !badPass) return u;
+      repaired = true;
+      return {
+        ...u,
+        pppoe_username: badUser
+          ? (u.customer_name || u.serial_number).toLowerCase()
+          : u.pppoe_username,
+        pppoe_password: badPass ? 'jetcyber' : u.pppoe_password,
+      };
+    });
+    if (repaired) {
+      await saveDatabaseState(state);
+    }
     res.json({
       state,
       meta: {
@@ -2238,6 +2262,19 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
           nextIp = effectiveWan.currentIp;
         }
 
+        const safeExistingUser =
+          u.pppoe_username &&
+          u.pppoe_username.trim().toLowerCase() !== 'zte' &&
+          !u.pppoe_username.includes('%')
+            ? u.pppoe_username.trim()
+            : null;
+        const safeExistingPass =
+          u.pppoe_password &&
+          !u.pppoe_password.includes('%') &&
+          !u.pppoe_password.toLowerCase().includes('not strong')
+            ? u.pppoe_password.trim()
+            : null;
+
         return {
           ...u,
           admin_state: st ? st.adminState : u.admin_state,
@@ -2251,10 +2288,12 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
               : u.distance_m,
           ip_address: nextIp,
           pppoe_username:
+            safeExistingUser ||
             effectiveWan?.username ||
             (isFocused && focusedWan?.username) ||
-            u.pppoe_username,
+            (u.customer_name || u.serial_number).toLowerCase(),
           pppoe_password:
+            safeExistingPass ||
             (effectiveWan?.password && !effectiveWan.password.includes('*')
               ? effectiveWan.password
               : null) ||
@@ -2263,7 +2302,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
             !focusedWan.password.includes('*')
               ? focusedWan.password
               : null) ||
-            u.pppoe_password,
+            'jetcyber',
           last_online_at:
             nextPhase === 'working'
               ? nowStr

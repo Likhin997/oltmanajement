@@ -61,12 +61,21 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
   const [configMethod, setConfigMethod] = useState<ConfigMethodOption>(
     onu.config_method || 'OMCI'
   );
-  const [username, setUsername] = useState<string>(
-    onu.pppoe_username || onu.customer_name || 'SAIPUL-RIFAI'
-  );
-  const [password, setPassword] = useState<string>(
-    onu.pppoe_password || 'jetcyber'
-  );
+  const safeInitialUser =
+    onu.pppoe_username &&
+    onu.pppoe_username.trim().toLowerCase() !== 'zte' &&
+    !onu.pppoe_username.includes('%')
+      ? onu.pppoe_username.trim()
+      : (onu.customer_name || onu.serial_number).toLowerCase();
+  const safeInitialPass =
+    onu.pppoe_password &&
+    !onu.pppoe_password.includes('%') &&
+    !onu.pppoe_password.toLowerCase().includes('not strong')
+      ? onu.pppoe_password.trim()
+      : 'jetcyber';
+
+  const [username, setUsername] = useState<string>(safeInitialUser);
+  const [password, setPassword] = useState<string>(safeInitialPass);
   const [wanRemoteAccess, setWanRemoteAccess] = useState<WanRemoteAccessOption>(
     onu.wan_remote_access || 'Enabled from everywhere in the internet'
   );

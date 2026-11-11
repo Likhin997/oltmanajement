@@ -109,15 +109,25 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     db.tr069_profiles.find((p) => p.id === onu.tr069_profile_id) ||
     db.tr069_profiles[0];
 
+  const cleanPppoeUser =
+    onu.pppoe_username &&
+    onu.pppoe_username.trim().toLowerCase() !== 'zte' &&
+    !onu.pppoe_username.includes('%')
+      ? onu.pppoe_username.trim()
+      : (onu.customer_name || onu.serial_number).toLowerCase();
+
+  const cleanPppoePass =
+    onu.pppoe_password &&
+    !onu.pppoe_password.includes('%') &&
+    !onu.pppoe_password.toLowerCase().includes('not strong')
+      ? onu.pppoe_password.trim()
+      : 'jetcyber';
+
   const [showPppoeUser, setShowPppoeUser] = useState(true);
   const [showPppoePass, setShowPppoePass] = useState(true);
   const [editingInlinePppoe, setEditingInlinePppoe] = useState(false);
-  const [inlinePppoeUser, setInlinePppoeUser] = useState(
-    onu.pppoe_username || onu.customer_name || 'test'
-  );
-  const [inlinePppoePass, setInlinePppoePass] = useState(
-    onu.pppoe_password || 'jetcyber'
-  );
+  const [inlinePppoeUser, setInlinePppoeUser] = useState(cleanPppoeUser);
+  const [inlinePppoePass, setInlinePppoePass] = useState(cleanPppoePass);
   const [isPushingToOlt, setIsPushingToOlt] = useState(false);
   const [showUpdateModeModal, setShowUpdateModeModal] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -168,18 +178,14 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const [metaOdbPort, setMetaOdbPort] = useState<number | 'NONE'>(
     onu.odb_port || 'NONE'
   );
-  const [metaPppoeUser, setMetaPppoeUser] = useState(
-    onu.pppoe_username || onu.customer_name || onu.serial_number
-  );
-  const [metaPppoePass, setMetaPppoePass] = useState(
-    onu.pppoe_password || 'jetcyber'
-  );
+  const [metaPppoeUser, setMetaPppoeUser] = useState(cleanPppoeUser);
+  const [metaPppoePass, setMetaPppoePass] = useState(cleanPppoePass);
   const [metaRebindAll, setMetaRebindAll] = useState<boolean>(false);
 
   // Keep inline PPPoE & metadata fields synced when `onu` prop updates
   useEffect(() => {
-    setInlinePppoeUser(onu.pppoe_username || onu.customer_name || onu.serial_number);
-    setInlinePppoePass(onu.pppoe_password || 'jetcyber');
+    setInlinePppoeUser(cleanPppoeUser);
+    setInlinePppoePass(cleanPppoePass);
     setMetaName(onu.customer_name || onu.serial_number);
     setMetaSn(onu.serial_number);
     setMetaAddress(onu.address || 'none');
@@ -189,9 +195,9 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     setMetaSectorId(onu.sector_id || 'NONE');
     setMetaOdbId(onu.odb_id || 'NONE');
     setMetaOdbPort(onu.odb_port || 'NONE');
-    setMetaPppoeUser(onu.pppoe_username || onu.customer_name || onu.serial_number);
-    setMetaPppoePass(onu.pppoe_password || 'jetcyber');
-  }, [onu]);
+    setMetaPppoeUser(cleanPppoeUser);
+    setMetaPppoePass(cleanPppoePass);
+  }, [onu, cleanPppoeUser, cleanPppoePass]);
 
   const openMetadataDialog = (rebindDefault = false) => {
     setMetaName(onu.customer_name || onu.serial_number);
@@ -203,8 +209,8 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     setMetaSectorId(onu.sector_id || 'NONE');
     setMetaOdbId(onu.odb_id || 'NONE');
     setMetaOdbPort(onu.odb_port || 'NONE');
-    setMetaPppoeUser(onu.pppoe_username || onu.customer_name || onu.serial_number);
-    setMetaPppoePass(onu.pppoe_password || 'jetcyber');
+    setMetaPppoeUser(cleanPppoeUser);
+    setMetaPppoePass(cleanPppoePass);
     setMetaRebindAll(rebindDefault);
     setActiveEditDialog('METADATA');
   };
@@ -351,11 +357,20 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
         if (parsedWan.currentIp) {
           updatedFields.ip_address = parsedWan.currentIp;
         }
-        if (parsedWan.username) {
-          updatedFields.pppoe_username = parsedWan.username;
+        // Auto-repair if DB previously had corrupted Telnet banner strings ('zte' or '% The password...')
+        if (
+          !onu.pppoe_username ||
+          onu.pppoe_username.trim().toLowerCase() === 'zte' ||
+          onu.pppoe_username.includes('%')
+        ) {
+          updatedFields.pppoe_username = parsedWan.username || cleanPppoeUser;
         }
-        if (parsedWan.password && !parsedWan.password.includes('*')) {
-          updatedFields.pppoe_password = parsedWan.password;
+        if (
+          !onu.pppoe_password ||
+          onu.pppoe_password.includes('%') ||
+          onu.pppoe_password.toLowerCase().includes('not strong')
+        ) {
+          updatedFields.pppoe_password = parsedWan.password || cleanPppoePass;
         }
 
         void onExecuteAction(onu.id, 'POLL_SIGNAL', cliJoined, updatedFields);
@@ -1292,18 +1307,16 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               </div>
             </div>
 
-            {/* PPPoE username & password with direct inline Edit & Push to OLT */}
+            {/* PPPoE username & password matching SmartOLT UI */}
             {!editingInlinePppoe ? (
               <>
                 <div className="grid grid-cols-12 items-center py-2">
                   <div className="col-span-4 font-semibold text-slate-300">
                     PPPoE username
                   </div>
-                  <div className="col-span-8 flex items-center gap-2.5 font-mono text-white">
+                  <div className="col-span-8 flex items-center gap-2 font-mono text-white">
                     <span>
-                      {showPppoeUser
-                        ? onu.pppoe_username || onu.customer_name || onu.serial_number
-                        : '************'}
+                      {showPppoeUser ? cleanPppoeUser : '************'}
                     </span>
                     <button
                       type="button"
@@ -1316,19 +1329,6 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                         <Eye className="h-3.5 w-3.5" />
                       )}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setInlinePppoeUser(
-                          onu.pppoe_username || onu.customer_name || onu.serial_number
-                        );
-                        setInlinePppoePass(onu.pppoe_password || 'jetcyber');
-                        setEditingInlinePppoe(true);
-                      }}
-                      className="font-sans text-[11px] text-sky-400 hover:underline"
-                    >
-                      Edit / Push PPPoE
-                    </button>
                   </div>
                 </div>
 
@@ -1336,9 +1336,9 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                   <div className="col-span-4 font-semibold text-slate-300">
                     PPPoE password
                   </div>
-                  <div className="col-span-8 flex items-center gap-2.5 font-mono text-white">
+                  <div className="col-span-8 flex items-center gap-2 font-mono text-white">
                     <span>
-                      {showPppoePass ? onu.pppoe_password || 'jetcyber' : '********'}
+                      {showPppoePass ? cleanPppoePass : '********'}
                     </span>
                     <button
                       type="button"
@@ -1350,19 +1350,6 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                       ) : (
                         <Eye className="h-3.5 w-3.5" />
                       )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setInlinePppoeUser(
-                          onu.pppoe_username || onu.customer_name || onu.serial_number
-                        );
-                        setInlinePppoePass(onu.pppoe_password || 'jetcyber');
-                        setEditingInlinePppoe(true);
-                      }}
-                      className="font-sans text-[11px] text-sky-400 hover:underline"
-                    >
-                      Edit / Push PPPoE
                     </button>
                   </div>
                 </div>

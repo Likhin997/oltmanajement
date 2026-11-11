@@ -329,7 +329,16 @@ export function parseZteOnuDetailInfo(rawOutput: string): OnuDetailInfoParsed {
  * - `show gpon remote-onu wan-ip gpon-onu_1/x/y:z` (`Current IP: 10.x.x.x`, `Status:`, `Username:`)
  */
 export function parseZteWanIpOutput(rawOutput: string): WanIpParsed {
-  const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const cleanedFull = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+
+  // Isolate only the `show gpon remote-onu` output section if present,
+  // so OLT Telnet login banners (`Username: zte`, `Password:`, `% The password is not strong...`)
+  // are NEVER mistakenly parsed as PPPoE credentials!
+  const remoteOnuIdx = cleanedFull.search(
+    /show\s+gpon\s+remote-onu\s+(?:ip-host|pppoe|wan-ip)/i
+  );
+  const cleaned =
+    remoteOnuIdx >= 0 ? cleanedFull.slice(remoteOnuIdx) : cleanedFull;
 
   // Collect all candidate runtime IPs from CurIP / Cur IP / Current IP (ignoring `Identify: IP: 0.0.0.0`)
   const ipCandidates: string[] = [];
@@ -362,16 +371,42 @@ export function parseZteWanIpOutput(rawOutput: string): WanIpParsed {
   const dns2Match =
     cleaned.match(/Cur\s*(?:Sec|Secondary)\s*DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
     cleaned.match(/Current\s+secondary\s+DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
-  const statusMatch = cleaned.match(/^\s*Status\s*:\s*([^\r\n.]+)/im);
-  const userMatch = cleaned.match(
-    /^\s*(?:User\s*name|Username|User)\s*:\s*([^\r\n.]+)/im
+  const statusMatch = cleaned.match(/^[ \t]*Status[ \t]*:[ \t]*([^\r\n.]+)/im);
+
+  // IMPORTANT: Use `[ \t]+` (same-line horizontal whitespace only, NOT `\s*` which crosses newlines!)
+  // so `Password:\r\n% The password is not strong...` from Telnet login is NEVER matched!
+  const pppoeBlockIdx = cleaned.search(/show\s+gpon\s+remote-onu\s+(?:pppoe|wan-ip)/i);
+  const pppoeSection = pppoeBlockIdx >= 0 ? cleaned.slice(pppoeBlockIdx) : cleaned;
+
+  const userMatch = pppoeSection.match(
+    /^[ \t]*(?:User[ \t]*name|Username|User)[ \t]*:[ \t]+([A-Za-z0-9._@-]+)[ \t]*$/im
   );
-  const passMatch = cleaned.match(/^\s*Password\s*:\s*([^\r\n.]+)/im);
-  const cvlanMatch = cleaned.match(/^\s*CVLAN\s*:\s*(\d+)/im);
+  const passMatch = pppoeSection.match(
+    /^[ \t]*Password[ \t]*:[ \t]+([A-Za-z0-9._@!#$^&*+-]+)[ \t]*$/im
+  );
+  const cvlanMatch = cleaned.match(/^[ \t]*CVLAN[ \t]*:[ \t]*(\d+)/im);
   const macMatch = cleaned.match(
-    /^\s*MAC(?:\s+address)?\s*:\s*([0-9a-fA-F:.\-]+)/im
+    /^[ \t]*MAC(?:[ \t]+address)?[ \t]*:[ \t]*([0-9a-fA-F:.\-]+)/im
   );
-  const modeMatch = cleaned.match(/^\s*Mode\s*:\s*([^\r\n.]+)/im);
+  const modeMatch = cleaned.match(/^[ \t]*Mode[ \t]*:[ \t]*([^\r\n.]+)/im);
+
+  const rawUser = userMatch ? userMatch[1].trim() : '';
+  const rawPass = passMatch ? passMatch[1].trim() : '';
+
+  const isValidPppoeUser =
+    rawUser.length > 0 &&
+    rawUser.toLowerCase() !== 'n/a' &&
+    rawUser.toLowerCase() !== 'null' &&
+    rawUser.toLowerCase() !== 'none' &&
+    rawUser.toLowerCase() !== 'zte' &&
+    !rawUser.startsWith('%');
+
+  const isValidPppoePass =
+    rawPass.length > 0 &&
+    rawPass.toLowerCase() !== 'n/a' &&
+    rawPass.toLowerCase() !== 'null' &&
+    !rawPass.includes('%') &&
+    !rawPass.toLowerCase().includes('password');
 
   return {
     currentIp: validIp,
@@ -380,19 +415,8 @@ export function parseZteWanIpOutput(rawOutput: string): WanIpParsed {
     primaryDns: dns1Match ? dns1Match[1].trim() : null,
     secondaryDns: dns2Match ? dns2Match[1].trim() : null,
     status: statusMatch ? statusMatch[1].trim() : validIp ? 'connected' : null,
-    username:
-      userMatch &&
-      userMatch[1].trim() &&
-      userMatch[1].trim().toLowerCase() !== 'n/a' &&
-      userMatch[1].trim().toLowerCase() !== 'null'
-        ? userMatch[1].trim()
-        : null,
-    password:
-      passMatch &&
-      passMatch[1].trim() &&
-      passMatch[1].trim().toLowerCase() !== 'n/a'
-        ? passMatch[1].trim()
-        : null,
+    username: isValidPppoeUser ? rawUser : null,
+    password: isValidPppoePass ? rawPass : null,
     cvlan:
       cvlanMatch && parseInt(cvlanMatch[1], 10) > 0
         ? parseInt(cvlanMatch[1], 10)
