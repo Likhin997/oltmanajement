@@ -957,6 +957,20 @@ export function generateUpdateOnuModeCliScript(params: {
     );
   }
 
+  if (params.wifiSsid && params.wifiSsid.trim()) {
+    const cleanSsid = params.wifiSsid.trim().replace(/\s+/g, '_');
+    const cleanWifiPass = (params.wifiPassword || '').trim().replace(/\s+/g, '');
+    lines.push(
+      `  wifi enable`,
+      `  ssid ctrl wifi_0/1 name ${cleanSsid}`
+    );
+    if (cleanWifiPass) {
+      lines.push(
+        `  ssid auth wpa wifi_0/1 wpa2-psk encrypt aes key ${cleanWifiPass}`
+      );
+    }
+  }
+
   lines.push(
     ...buildWanRemoteAccessCliLines(
       params.wanRemoteAccess,

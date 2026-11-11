@@ -2478,7 +2478,25 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                   e.preventDefault();
                   const cleanSsid = wifiSsidInput.trim().replace(/\s+/g, '_');
                   const cleanPass = wifiPassInput.trim().replace(/\s+/g, '');
-                  const cli = `configure terminal\npon-onu-mng ${onuInterface}\n  wifi enable\n  wifi ssid 1 name ${cleanSsid} auth wpa2-psk password ${cleanPass}\nexit\nend\nwrite`;
+                  const cliLines = [
+                    'configure terminal',
+                    `pon-onu-mng ${onuInterface}`,
+                    '  wifi enable',
+                    `  ssid ctrl wifi_0/1 name ${cleanSsid}`,
+                  ];
+                  if (cleanPass && cleanPass.length >= 8) {
+                    cliLines.push(
+                      `  ssid auth wpa wifi_0/1 wpa2-psk encrypt aes key ${cleanPass}`
+                    );
+                  } else if (cleanPass) {
+                    cliLines.push(
+                      `  ssid auth wpa wifi_0/1 wpa2-psk encrypt aes key ${cleanPass}`
+                    );
+                  } else {
+                    cliLines.push(`  ssid auth wep wifi_0/1 open-system`);
+                  }
+                  cliLines.push('exit', 'end', 'write');
+                  const cli = cliLines.join('\n');
                   setActiveEditDialog(null);
                   void executeAndDisplayLivePush(
                     'TR069_PUSH',
