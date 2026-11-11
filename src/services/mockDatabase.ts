@@ -156,16 +156,29 @@ export interface ZoneRecord {
   description: string;
 }
 
+export interface SectorRecord {
+  id: number;
+  name: string;
+  code: string;
+  zone_id: number | null;
+  olt_id: number | null;
+  pon_port_id: number | null;
+  description: string;
+}
+
 export interface OdbRecord {
   id: number;
   zone_id: number;
+  sector_id?: number | null;
+  olt_id?: number | null;
   pon_port_id: number;
   name: string;
-  splitter_ratio: '1:4' | '1:8' | '1:16' | '1:32';
+  splitter_ratio: '1:2' | '1:4' | '1:8' | '1:16' | '1:32' | '1:64';
   total_ports: number;
   latitude: number;
   longitude: number;
   pole_number: string;
+  description?: string;
 }
 
 export interface TaskRecord {
@@ -197,6 +210,7 @@ export interface OnuRecord {
   contact?: string | null;
   external_id: string | null;
   zone_id: number | null;
+  sector_id?: number | null;
   odb_id: number | null;
   odb_port: number | null;
   vlan_id: number | null;
@@ -278,6 +292,7 @@ export interface SmartOltDatabaseState {
   speed_profiles: SpeedProfileRecord[];
   tr069_profiles: Tr069ProfileRecord[];
   zones: ZoneRecord[];
+  sectors?: SectorRecord[];
   odbs: OdbRecord[];
   tasks: TaskRecord[];
   onus: OnuRecord[];
@@ -371,6 +386,7 @@ export const INITIAL_DB_STATE: SmartOltDatabaseState = {
     },
   ],
   zones: [],
+  sectors: [],
   odbs: [],
   tasks: [],
   onus: [],

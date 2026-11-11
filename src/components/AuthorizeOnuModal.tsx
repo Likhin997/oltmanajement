@@ -2,6 +2,9 @@ import React, { useState, useMemo, useEffect } from 'react';
 import {
   SmartOltDatabaseState,
   OnuRecord,
+  ZoneRecord,
+  SectorRecord,
+  OdbRecord,
 } from '../services/mockDatabase';
 import {
   findNextAvailableOnuIndex,
@@ -19,6 +22,7 @@ import {
   Plus,
   Info,
   RefreshCw,
+  X,
 } from 'lucide-react';
 
 interface AuthorizeOnuModalProps {
@@ -31,6 +35,9 @@ interface AuthorizeOnuModalProps {
     generatedCli: string,
     allocatedOnuIndex: number
   ) => void;
+  onQuickAddZone?: (zone: Omit<ZoneRecord, 'id'>) => ZoneRecord;
+  onQuickAddSector?: (sector: Omit<SectorRecord, 'id'>) => SectorRecord;
+  onQuickAddSplitter?: (odb: Omit<OdbRecord, 'id'>) => OdbRecord;
 }
 
 export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
@@ -38,6 +45,9 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   db,
   onClose,
   onConfirmAuthorize,
+  onQuickAddZone,
+  onQuickAddSector,
+  onQuickAddSplitter,
 }) => {
   const [selectedOltId, setSelectedOltId] = useState<number>(
     onu.olt_id || db.olts[0]?.id || 1
@@ -174,11 +184,105 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
       db.vlans[0]?.id ||
       101
   );
-  const [zoneId, setZoneId] = useState<number>(
-    db.zones.find((z) => z.name.includes('DONGKAL'))?.id || db.zones[0]?.id || 1
+  const [zoneId, setZoneId] = useState<number | 'NONE'>(
+    onu.zone_id || db.zones[0]?.id || 'NONE'
   );
-  const [odbId, setOdbId] = useState<number | 'NONE'>('NONE');
-  const [odbPort, setOdbPort] = useState<number | 'NONE'>('NONE');
+  const [sectorId, setSectorId] = useState<number | 'NONE'>(
+    onu.sector_id || (db.sectors && db.sectors[0]?.id) || 'NONE'
+  );
+  const [odbId, setOdbId] = useState<number | 'NONE'>(onu.odb_id || 'NONE');
+  const [odbPort, setOdbPort] = useState<number | 'NONE'>(onu.odb_port || 'NONE');
+
+  // Inline Quick-Add states for Zone, Sector, and Splitter directly from Authorize ONU form
+  const [quickAddMode, setQuickAddMode] = useState<
+    'ZONE' | 'SECTOR' | 'SPLITTER' | null
+  >(null);
+  const [newZoneName, setNewZoneName] = useState('');
+  const [newZoneCode, setNewZoneCode] = useState('');
+  const [newZoneCity, setNewZoneCity] = useState('');
+  const [newSectorName, setNewSectorName] = useState('');
+  const [newSectorCode, setNewSectorCode] = useState('');
+  const [newSplitterName, setNewSplitterName] = useState('');
+  const [newSplitterRatio, setNewSplitterRatio] = useState<
+    '1:2' | '1:4' | '1:8' | '1:16' | '1:32' | '1:64'
+  >('1:8');
+  const [newSplitterPole, setNewSplitterPole] = useState('TIANG-01');
+
+  const sectorsList = db.sectors || [];
+
+  // Filter Sectors & Splitters synced with selected Zone / Sector
+  const availableSectors = useMemo(() => {
+    if (zoneId === 'NONE') return sectorsList;
+    const matched = sectorsList.filter(
+      (s) => s.zone_id === zoneId || s.zone_id === null
+    );
+    return matched.length > 0 ? matched : sectorsList;
+  }, [sectorsList, zoneId]);
+
+  const availableSplitters = useMemo(() => {
+    let list = db.odbs;
+    if (zoneId !== 'NONE') {
+      const byZone = list.filter((o) => o.zone_id === zoneId);
+      if (byZone.length > 0) list = byZone;
+    }
+    if (sectorId !== 'NONE') {
+      const bySector = list.filter(
+        (o) => !o.sector_id || o.sector_id === sectorId
+      );
+      if (bySector.length > 0) list = bySector;
+    }
+    return list;
+  }, [db.odbs, zoneId, sectorId]);
+
+  const selectedSplitter = useMemo(
+    () => (odbId === 'NONE' ? null : db.odbs.find((o) => o.id === odbId) || null),
+    [db.odbs, odbId]
+  );
+
+  // Compute occupied ports on the selected Splitter so user never collides on ODP port
+  const occupiedSplitterPorts = useMemo(() => {
+    const map = new Map<number, string>();
+    if (!selectedSplitter) return map;
+    for (const item of db.onus) {
+      if (
+        item.is_authorized &&
+        item.odb_id === selectedSplitter.id &&
+        item.odb_port !== null &&
+        item.id !== onu.id
+      ) {
+        map.set(
+          item.odb_port,
+          item.customer_name || item.serial_number
+        );
+      }
+    }
+    return map;
+  }, [db.onus, selectedSplitter, onu.id]);
+
+  // Auto-select first free port when a Splitter is selected
+  useEffect(() => {
+    if (!selectedSplitter) {
+      setOdbPort('NONE');
+      return;
+    }
+    const maxPorts = selectedSplitter.total_ports || 8;
+    if (
+      odbPort !== 'NONE' &&
+      odbPort >= 1 &&
+      odbPort <= maxPorts &&
+      !occupiedSplitterPorts.has(odbPort)
+    ) {
+      return;
+    }
+    for (let p = 1; p <= maxPorts; p++) {
+      if (!occupiedSplitterPorts.has(p)) {
+        setOdbPort(p);
+        return;
+      }
+    }
+    setOdbPort(1);
+  }, [selectedSplitter, occupiedSplitterPorts]);
+
   const [downSpeedId, setDownSpeedId] = useState<number>(db.speed_profiles[0]?.id || 1);
   const [upSpeedId, setUpSpeedId] = useState<number>(db.speed_profiles[0]?.id || 1);
   const [customerName, setCustomerName] = useState<string>('');
@@ -279,7 +383,8 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         customer_name: finalName.toUpperCase(),
         address: address.trim() || 'none',
         external_id: externalId || onu.serial_number,
-        zone_id: zoneId,
+        zone_id: zoneId === 'NONE' ? null : zoneId,
+        sector_id: sectorId === 'NONE' ? null : sectorId,
         odb_id: odbId === 'NONE' ? null : odbId,
         odb_port: odbPort === 'NONE' ? null : odbPort,
         vlan_id: selectedVlan?.id || vlanRecordId,
@@ -663,49 +768,365 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         </div>
 
         {/* Zone */}
-        <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-12">
-          <label className="font-semibold text-slate-200 sm:col-span-3 sm:text-right sm:pr-4">
+        <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-12">
+          <label className="pt-2 font-semibold text-slate-200 sm:col-span-3 sm:text-right sm:pr-4">
             Zone
           </label>
-          <div className="sm:col-span-8">
-            <select
-              value={zoneId}
-              onChange={(e) => setZoneId(Number(e.target.value))}
-              className="w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
-            >
-              {db.zones.length === 0 ? (
-                <option value={1}>Default Zone</option>
-              ) : (
-                db.zones.map((z) => (
+          <div className="space-y-2 sm:col-span-8">
+            <div className="flex items-center gap-2">
+              <select
+                value={zoneId}
+                onChange={(e) => {
+                  const val =
+                    e.target.value === 'NONE' ? 'NONE' : Number(e.target.value);
+                  setZoneId(val);
+                  if (val !== 'NONE') {
+                    const matchingSector = sectorsList.find(
+                      (s) => s.zone_id === val
+                    );
+                    if (matchingSector) setSectorId(matchingSector.id);
+                    const matchingOdb = db.odbs.find((o) => o.zone_id === val);
+                    if (matchingOdb) setOdbId(matchingOdb.id);
+                  }
+                }}
+                className="flex-1 rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+              >
+                <option value="NONE">
+                  {db.zones.length === 0
+                    ? 'None (Klik + untuk tambah Zone baru)'
+                    : 'None'}
+                </option>
+                {db.zones.map((z) => (
                   <option key={z.id} value={z.id}>
-                    {z.name}
+                    {z.name} {z.code ? `(${z.code})` : ''}
                   </option>
-                ))
-              )}
-            </select>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() =>
+                  setQuickAddMode(quickAddMode === 'ZONE' ? null : 'ZONE')
+                }
+                title="Tambah Zone baru (langsung sinkron ke Settings -> Zones)"
+                className="flex items-center gap-1 rounded border border-emerald-600/60 bg-emerald-950/70 px-2.5 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-900"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add Zone
+              </button>
+            </div>
+
+            {quickAddMode === 'ZONE' && (
+              <div className="rounded border border-emerald-600/50 bg-[#0a1829] p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-emerald-300">
+                    + Quick Add Zone (Sinkron ke Settings → Zones)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setQuickAddMode(null)}
+                    className="text-slate-400 hover:text-white"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  <input
+                    type="text"
+                    value={newZoneName}
+                    onChange={(e) => setNewZoneName(e.target.value)}
+                    placeholder="Zone Name (e.g. MUARA LEBAK - RK 01)"
+                    className="rounded border border-[#284870] bg-[#10233a] px-2.5 py-1.5 text-xs text-white"
+                  />
+                  <input
+                    type="text"
+                    value={newZoneCode}
+                    onChange={(e) => setNewZoneCode(e.target.value)}
+                    placeholder="Code (e.g. ZN-ML01)"
+                    className="rounded border border-[#284870] bg-[#10233a] px-2.5 py-1.5 font-mono text-xs text-white"
+                  />
+                  <input
+                    type="text"
+                    value={newZoneCity}
+                    onChange={(e) => setNewZoneCity(e.target.value)}
+                    placeholder="City / District (e.g. Lebak)"
+                    className="rounded border border-[#284870] bg-[#10233a] px-2.5 py-1.5 text-xs text-white"
+                  />
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!newZoneName.trim() || !onQuickAddZone) return;
+                      const created = onQuickAddZone({
+                        name: newZoneName.trim().toUpperCase(),
+                        code:
+                          newZoneCode.trim().toUpperCase() ||
+                          `ZN-${db.zones.length + 1}`,
+                        city_district: newZoneCity.trim() || 'Lebak',
+                        description: `Zone ${newZoneName.trim().toUpperCase()}`,
+                      });
+                      setZoneId(created.id);
+                      setNewZoneName('');
+                      setNewZoneCode('');
+                      setNewZoneCity('');
+                      setQuickAddMode(null);
+                    }}
+                    className="rounded bg-emerald-600 px-3 py-1 text-xs font-bold text-white hover:bg-emerald-500"
+                  >
+                    Save Zone
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Sector */}
+        <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-12">
+          <label className="pt-2 font-semibold text-slate-200 sm:col-span-3 sm:text-right sm:pr-4">
+            Sector
+          </label>
+          <div className="space-y-2 sm:col-span-8">
+            <div className="flex items-center gap-2">
+              <select
+                value={sectorId}
+                onChange={(e) =>
+                  setSectorId(
+                    e.target.value === 'NONE' ? 'NONE' : Number(e.target.value)
+                  )
+                }
+                className="flex-1 rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+              >
+                <option value="NONE">
+                  {availableSectors.length === 0
+                    ? 'None (Klik + untuk tambah Sector baru)'
+                    : 'None'}
+                </option>
+                {availableSectors.map((sec) => {
+                  const secZone = db.zones.find((z) => z.id === sec.zone_id);
+                  return (
+                    <option key={sec.id} value={sec.id}>
+                      {sec.name} {sec.code ? `(${sec.code})` : ''}{' '}
+                      {secZone ? `— Zone: ${secZone.name}` : ''}
+                    </option>
+                  );
+                })}
+              </select>
+              <button
+                type="button"
+                onClick={() =>
+                  setQuickAddMode(quickAddMode === 'SECTOR' ? null : 'SECTOR')
+                }
+                title="Tambah Sector baru (langsung sinkron ke Settings -> Sectors)"
+                className="flex items-center gap-1 rounded border border-sky-600/60 bg-sky-950/70 px-2.5 py-2 text-xs font-semibold text-sky-300 hover:bg-sky-900"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add Sector
+              </button>
+            </div>
+
+            {quickAddMode === 'SECTOR' && (
+              <div className="rounded border border-sky-600/50 bg-[#0a1829] p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-sky-300">
+                    + Quick Add Sector (Sinkron ke Settings → Sectors)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setQuickAddMode(null)}
+                    className="text-slate-400 hover:text-white"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <input
+                    type="text"
+                    value={newSectorName}
+                    onChange={(e) => setNewSectorName(e.target.value)}
+                    placeholder="Sector Name (e.g. SECTOR UTARA - PON 3)"
+                    className="rounded border border-[#284870] bg-[#10233a] px-2.5 py-1.5 text-xs text-white"
+                  />
+                  <input
+                    type="text"
+                    value={newSectorCode}
+                    onChange={(e) => setNewSectorCode(e.target.value)}
+                    placeholder="Sector Code (e.g. SEC-01)"
+                    className="rounded border border-[#284870] bg-[#10233a] px-2.5 py-1.5 font-mono text-xs text-white"
+                  />
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!newSectorName.trim() || !onQuickAddSector) return;
+                      const created = onQuickAddSector({
+                        name: newSectorName.trim().toUpperCase(),
+                        code:
+                          newSectorCode.trim().toUpperCase() ||
+                          `SEC-${sectorsList.length + 1}`,
+                        zone_id: zoneId === 'NONE' ? (db.zones[0]?.id ?? null) : zoneId,
+                        olt_id: selectedOltId,
+                        pon_port_id: ponPort?.id || portNum,
+                        description: `PON 1/${boardNum}/${portNum}`,
+                      });
+                      setSectorId(created.id);
+                      setNewSectorName('');
+                      setNewSectorCode('');
+                      setQuickAddMode(null);
+                    }}
+                    className="rounded bg-sky-600 px-3 py-1 text-xs font-bold text-white hover:bg-sky-500"
+                  >
+                    Save Sector
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
         {/* Splitter */}
-        <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-12">
-          <label className="font-semibold text-slate-200 sm:col-span-3 sm:text-right sm:pr-4">
+        <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-12">
+          <label className="pt-2 font-semibold text-slate-200 sm:col-span-3 sm:text-right sm:pr-4">
             Splitter
           </label>
-          <div className="sm:col-span-8">
-            <select
-              value={odbId}
-              onChange={(e) =>
-                setOdbId(e.target.value === 'NONE' ? 'NONE' : Number(e.target.value))
-              }
-              className="w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
-            >
-              <option value="NONE">None</option>
-              {db.odbs.map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.name} ({o.splitter_ratio})
+          <div className="space-y-2 sm:col-span-8">
+            <div className="flex items-center gap-2">
+              <select
+                value={odbId}
+                onChange={(e) => {
+                  const val =
+                    e.target.value === 'NONE' ? 'NONE' : Number(e.target.value);
+                  setOdbId(val);
+                  if (val !== 'NONE') {
+                    const chosen = db.odbs.find((o) => o.id === val);
+                    if (chosen) {
+                      if (chosen.zone_id) setZoneId(chosen.zone_id);
+                      if (chosen.sector_id) setSectorId(chosen.sector_id);
+                    }
+                  }
+                }}
+                className="flex-1 rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+              >
+                <option value="NONE">
+                  {availableSplitters.length === 0
+                    ? 'None (Klik + untuk tambah Splitter / ODP baru)'
+                    : 'None'}
                 </option>
-              ))}
-            </select>
+                {availableSplitters.map((o) => {
+                  const usedOnSplitter = db.onus.filter(
+                    (u) => u.is_authorized && u.odb_id === o.id
+                  ).length;
+                  const zObj = db.zones.find((z) => z.id === o.zone_id);
+                  return (
+                    <option key={o.id} value={o.id}>
+                      {o.name} ({o.splitter_ratio} · {usedOnSplitter}/
+                      {o.total_ports} ports used
+                      {zObj ? ` · ${zObj.name}` : ''})
+                    </option>
+                  );
+                })}
+              </select>
+              <button
+                type="button"
+                onClick={() =>
+                  setQuickAddMode(
+                    quickAddMode === 'SPLITTER' ? null : 'SPLITTER'
+                  )
+                }
+                title="Tambah Splitter / ODP baru (langsung sinkron ke Settings -> Splitters)"
+                className="flex items-center gap-1 rounded border border-amber-600/60 bg-amber-950/70 px-2.5 py-2 text-xs font-semibold text-amber-300 hover:bg-amber-900"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add Splitter
+              </button>
+            </div>
+
+            {quickAddMode === 'SPLITTER' && (
+              <div className="rounded border border-amber-600/50 bg-[#0a1829] p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-amber-300">
+                    + Quick Add Splitter / ODP (Sinkron ke Settings → Splitters)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setQuickAddMode(null)}
+                    className="text-slate-400 hover:text-white"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  <input
+                    type="text"
+                    value={newSplitterName}
+                    onChange={(e) => setNewSplitterName(e.target.value)}
+                    placeholder="Splitter/ODP Name (e.g. ODP-ML-01)"
+                    className="rounded border border-[#284870] bg-[#10233a] px-2.5 py-1.5 text-xs text-white"
+                  />
+                  <select
+                    value={newSplitterRatio}
+                    onChange={(e) =>
+                      setNewSplitterRatio(
+                        e.target.value as
+                          | '1:2'
+                          | '1:4'
+                          | '1:8'
+                          | '1:16'
+                          | '1:32'
+                          | '1:64'
+                      )
+                    }
+                    className="rounded border border-[#284870] bg-[#10233a] px-2.5 py-1.5 font-mono text-xs text-white"
+                  >
+                    <option value="1:2">Ratio 1:2 (2 Ports)</option>
+                    <option value="1:4">Ratio 1:4 (4 Ports)</option>
+                    <option value="1:8">Ratio 1:8 (8 Ports)</option>
+                    <option value="1:16">Ratio 1:16 (16 Ports)</option>
+                    <option value="1:32">Ratio 1:32 (32 Ports)</option>
+                    <option value="1:64">Ratio 1:64 (64 Ports)</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={newSplitterPole}
+                    onChange={(e) => setNewSplitterPole(e.target.value)}
+                    placeholder="Pole / Tiang (e.g. TIANG-01)"
+                    className="rounded border border-[#284870] bg-[#10233a] px-2.5 py-1.5 font-mono text-xs text-white"
+                  />
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!newSplitterName.trim() || !onQuickAddSplitter) return;
+                      const totalPorts =
+                        Number(newSplitterRatio.split(':')[1]) || 8;
+                      const targetZoneId =
+                        zoneId === 'NONE' ? db.zones[0]?.id || 1 : zoneId;
+                      const created = onQuickAddSplitter({
+                        name: newSplitterName.trim().toUpperCase(),
+                        zone_id: targetZoneId,
+                        sector_id: sectorId === 'NONE' ? null : sectorId,
+                        olt_id: selectedOltId,
+                        pon_port_id: ponPort?.id || portNum,
+                        splitter_ratio: newSplitterRatio,
+                        total_ports: totalPorts,
+                        pole_number: newSplitterPole.trim() || 'TIANG-01',
+                        latitude: -6.355,
+                        longitude: 106.251,
+                        description: `PON 1/${boardNum}/${portNum}`,
+                      });
+                      setOdbId(created.id);
+                      setNewSplitterName('');
+                      setQuickAddMode(null);
+                    }}
+                    className="rounded bg-amber-600 px-3 py-1 text-xs font-bold text-white hover:bg-amber-500"
+                  >
+                    Save Splitter (ODP)
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -723,11 +1144,18 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
               className="w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
             >
               <option value="NONE">None</option>
-              {Array.from({ length: 16 }, (_, i) => i + 1).map((p) => (
-                <option key={p} value={p}>
-                  Port {p}
-                </option>
-              ))}
+              {Array.from(
+                { length: selectedSplitter?.total_ports || 16 },
+                (_, i) => i + 1
+              ).map((p) => {
+                const occupiedBy = occupiedSplitterPorts.get(p);
+                return (
+                  <option key={p} value={p}>
+                    Port {p}{' '}
+                    {occupiedBy ? `(Terpakai — ${occupiedBy})` : '(Free)'}
+                  </option>
+                );
+              })}
             </select>
           </div>
         </div>

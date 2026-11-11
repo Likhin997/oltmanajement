@@ -11,6 +11,9 @@ import {
   OnuRecord,
   ProvisioningLogRecord,
   VlanRecord,
+  ZoneRecord,
+  SectorRecord,
+  OdbRecord,
 } from './services/mockDatabase';
 import {
   parseZteUncfgOutput,
@@ -62,6 +65,7 @@ type NavigationView =
   | 'OLT_DETAIL'
   | 'TASKS'
   | 'ZONES'
+  | 'SECTORS'
   | 'SPLITTERS'
   | 'SPEED_PROFILES'
   | 'VPN_TR069'
@@ -211,6 +215,84 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   const showToast = (msg: string) => {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(null), 4000);
+  };
+
+  // Interactive CRUD state for Settings -> Zones, Sectors, and Splitters
+  const [zoneSearch, setZoneSearch] = useState('');
+  const [showZoneModal, setShowZoneModal] = useState(false);
+  const [editingZone, setEditingZone] = useState<ZoneRecord | null>(null);
+  const [zoneFormName, setZoneFormName] = useState('');
+  const [zoneFormCode, setZoneFormCode] = useState('');
+  const [zoneFormCity, setZoneFormCity] = useState('');
+  const [zoneFormDesc, setZoneFormDesc] = useState('');
+
+  const [sectorSearch, setSectorSearch] = useState('');
+  const [showSectorModal, setShowSectorModal] = useState(false);
+  const [editingSector, setEditingSector] = useState<SectorRecord | null>(null);
+  const [sectorFormName, setSectorFormName] = useState('');
+  const [sectorFormCode, setSectorFormCode] = useState('');
+  const [sectorFormZoneId, setSectorFormZoneId] = useState<number | 'NONE'>('NONE');
+  const [sectorFormOltId, setSectorFormOltId] = useState<number | 'NONE'>('NONE');
+  const [sectorFormPortId, setSectorFormPortId] = useState<number | 'NONE'>('NONE');
+  const [sectorFormDesc, setSectorFormDesc] = useState('');
+
+  const [splitterSearch, setSplitterSearch] = useState('');
+  const [showSplitterModal, setShowSplitterModal] = useState(false);
+  const [editingSplitter, setEditingSplitter] = useState<OdbRecord | null>(null);
+  const [splitterFormName, setSplitterFormName] = useState('');
+  const [splitterFormZoneId, setSplitterFormZoneId] = useState<number>(1);
+  const [splitterFormSectorId, setSplitterFormSectorId] = useState<number | 'NONE'>('NONE');
+  const [splitterFormOltId, setSplitterFormOltId] = useState<number>(1);
+  const [splitterFormPortId, setSplitterFormPortId] = useState<number>(1);
+  const [splitterFormRatio, setSplitterFormRatio] = useState<
+    '1:2' | '1:4' | '1:8' | '1:16' | '1:32' | '1:64'
+  >('1:8');
+  const [splitterFormPole, setSplitterFormPole] = useState('TIANG-01');
+  const [splitterFormLat, setSplitterFormLat] = useState('-6.355');
+  const [splitterFormLng, setSplitterFormLng] = useState('106.251');
+  const [splitterFormDesc, setSplitterFormDesc] = useState('');
+
+  // Quick-add helpers shared between Settings -> Zones/Sectors/Splitters & AuthorizeOnuModal
+  const handleQuickAddZone = (zoneInput: Omit<ZoneRecord, 'id'>): ZoneRecord => {
+    const nextId = Math.max(0, ...db.zones.map((z) => z.id)) + 1;
+    const created: ZoneRecord = { ...zoneInput, id: nextId };
+    setDb((prev) => ({
+      ...prev,
+      zones: [...prev.zones, created],
+    }));
+    showToast(`✓ Zone "${created.name}" berhasil ditambahkan dan tersinkronisasi!`);
+    return created;
+  };
+
+  const handleQuickAddSector = (
+    sectorInput: Omit<SectorRecord, 'id'>
+  ): SectorRecord => {
+    const currentSectors = db.sectors || [];
+    const nextId = Math.max(0, ...currentSectors.map((s) => s.id)) + 1;
+    const created: SectorRecord = { ...sectorInput, id: nextId };
+    setDb((prev) => ({
+      ...prev,
+      sectors: [...(prev.sectors || []), created],
+    }));
+    showToast(
+      `✓ Sector "${created.name}" berhasil ditambahkan dan tersinkronisasi!`
+    );
+    return created;
+  };
+
+  const handleQuickAddSplitter = (
+    odbInput: Omit<OdbRecord, 'id'>
+  ): OdbRecord => {
+    const nextId = Math.max(0, ...db.odbs.map((o) => o.id)) + 1;
+    const created: OdbRecord = { ...odbInput, id: nextId };
+    setDb((prev) => ({
+      ...prev,
+      odbs: [...prev.odbs, created],
+    }));
+    showToast(
+      `✓ Splitter / ODP "${created.name}" (${created.splitter_ratio}) berhasil ditambahkan dan tersinkronisasi!`
+    );
+    return created;
   };
 
   const unconfiguredOnus = db.onus.filter((o) => !o.is_authorized);
@@ -843,7 +925,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 Map <ChevronDown className="h-3 w-3" />
               </button>
               {openDropdown === 'MAP' && (
-                <div className="absolute left-0 mt-1 w-40 rounded border border-slate-700 bg-[#111c2d] py-1.5 text-xs shadow-2xl">
+                <div className="absolute left-0 mt-1 w-44 rounded border border-slate-700 bg-[#111c2d] py-1.5 text-xs shadow-2xl">
                   <button
                     type="button"
                     onClick={() => {
@@ -853,6 +935,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     className="block w-full px-4 py-1.5 text-left text-slate-200 hover:bg-[#1b2e4b]"
                   >
                     Zones & ODB Map
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveView('SECTORS');
+                      setOpenDropdown(null);
+                    }}
+                    className="block w-full px-4 py-1.5 text-left text-slate-200 hover:bg-[#1b2e4b]"
+                  >
+                    Sectors
                   </button>
                   <button
                     type="button"
@@ -987,6 +1079,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 }
                 className={`flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${
                   openDropdown === 'SETTINGS' ||
+                  activeView === 'ZONES' ||
+                  activeView === 'SECTORS' ||
+                  activeView === 'SPLITTERS' ||
                   activeView === 'OLTS_LIST' ||
                   activeView === 'OLT_DETAIL'
                     ? 'bg-[#163052] text-white'
@@ -999,7 +1094,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 <div className="absolute left-0 mt-1 w-44 rounded border border-slate-700 bg-[#111c2d] py-1.5 text-xs shadow-2xl">
                   {[
                     { label: 'Zones', view: 'ZONES' as NavigationView },
-                    { label: 'Sectors', view: 'ZONES' as NavigationView },
+                    { label: 'Sectors', view: 'SECTORS' as NavigationView },
                     { label: 'Splitters', view: 'SPLITTERS' as NavigationView },
                     { label: 'ONU types', view: 'SPEED_PROFILES' as NavigationView },
                     {
@@ -1019,7 +1114,11 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         setActiveView(item.view);
                         setOpenDropdown(null);
                       }}
-                      className="block w-full px-4 py-1.5 text-left text-slate-200 hover:bg-[#1b2e4b] hover:text-white"
+                      className={`block w-full px-4 py-1.5 text-left hover:bg-[#1b2e4b] hover:text-white ${
+                        activeView === item.view
+                          ? 'bg-[#1b2e4b] font-bold text-sky-400'
+                          : 'text-slate-200'
+                      }`}
                     >
                       {item.label}
                     </button>
@@ -1636,6 +1735,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             db={db}
             onClose={() => setActiveView('UNCONFIGURED')}
             onConfirmAuthorize={handleConfirmAuthorize}
+            onQuickAddZone={handleQuickAddZone}
+            onQuickAddSector={handleQuickAddSector}
+            onQuickAddSplitter={handleQuickAddSplitter}
           />
         )}
 
@@ -1869,6 +1971,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 <tbody className="divide-y divide-[#1e3a5f]/60">
                   {filteredConfiguredOnus.map((o) => {
                     const z = db.zones.find((item) => item.id === o.zone_id);
+                    const sec = (db.sectors || []).find(
+                      (item) => item.id === o.sector_id
+                    );
                     const sp = db.odbs.find((item) => item.id === o.odb_id);
                     const vl = db.vlans.find((item) => item.id === o.vlan_id);
                     return (
@@ -1945,12 +2050,18 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           {o.port}
                         </td>
                         <td className="px-3 py-2.5 text-slate-200">
-                          {z?.name || 'MUARA LEBAK - RK O1'}
+                          <div>{z ? z.name : '-'}</div>
+                          {sec && (
+                            <div className="text-[10px] font-mono text-sky-400">
+                              Sector: {sec.name}
+                            </div>
+                          )}
                         </td>
                         <td className="px-3 py-2.5">
                           {sp ? (
                             <span className="rounded bg-[#28a745] px-2 py-0.5 font-mono text-[11px] font-bold text-white">
-                              {sp.name} ({o.odb_port || 1})
+                              {sp.name}
+                              {o.odb_port ? ` (${o.odb_port})` : ''}
                             </span>
                           ) : (
                             <span className="text-slate-500">-</span>
@@ -3088,83 +3199,1244 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         )}
 
         {/* ===================================================================
-            VIEW 10: ZONES, SPLITTERS, SPEED PROFILES, GRAPHS
+            VIEW 10: ZONES, SECTORS, SPLITTERS, SPEED PROFILES, GRAPHS
            =================================================================== */}
         {(activeView === 'ZONES' ||
+          activeView === 'SECTORS' ||
           activeView === 'SPLITTERS' ||
           activeView === 'SPEED_PROFILES' ||
           activeView === 'GRAPHS') && (
           <div className="space-y-4 text-xs">
-            <h2 className="text-lg font-bold text-white">
-              {activeView === 'ZONES' && 'Zones Management'}
-              {activeView === 'SPLITTERS' && 'Optical Splitters (ODBs / ODPs)'}
-              {activeView === 'SPEED_PROFILES' && 'GPON Speed & TCONT Profiles'}
-              {activeView === 'GRAPHS' && 'OLT Uplink & PON Optical Graphs'}
-            </h2>
+            {/* Synchronized Sub-Navigation Tabs for Settings -> Zones / Sectors / Splitters */}
+            {(activeView === 'ZONES' ||
+              activeView === 'SECTORS' ||
+              activeView === 'SPLITTERS') && (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-[#1e3a5f] bg-[#0c1c30]/95 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveView('ZONES')}
+                    className={`rounded px-3.5 py-2 text-xs font-bold transition ${
+                      activeView === 'ZONES'
+                        ? 'bg-[#0275d8] text-white shadow'
+                        : 'bg-[#132842] text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    Zones ({db.zones.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveView('SECTORS')}
+                    className={`rounded px-3.5 py-2 text-xs font-bold transition ${
+                      activeView === 'SECTORS'
+                        ? 'bg-[#0275d8] text-white shadow'
+                        : 'bg-[#132842] text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    Sectors ({(db.sectors || []).length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveView('SPLITTERS')}
+                    className={`rounded px-3.5 py-2 text-xs font-bold transition ${
+                      activeView === 'SPLITTERS'
+                        ? 'bg-[#0275d8] text-white shadow'
+                        : 'bg-[#132842] text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    Splitters / ODP ({db.odbs.length})
+                  </button>
+                </div>
 
-            {activeView === 'ZONES' && (
-              <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
-                <table className="w-full text-left text-xs">
-                  <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
-                    <tr>
-                      <th className="px-4 py-3">ID</th>
-                      <th className="px-4 py-3">Zone Name</th>
-                      <th className="px-4 py-3">Code</th>
-                      <th className="px-4 py-3">City / District</th>
-                      <th className="px-4 py-3">Description</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#1e3a5f]/70">
-                    {db.zones.map((z) => (
-                      <tr key={z.id}>
-                        <td className="px-4 py-3 font-mono">{z.id}</td>
-                        <td className="px-4 py-3 font-bold text-white">
-                          {z.name}
-                        </td>
-                        <td className="px-4 py-3 font-mono text-sky-400">
-                          {z.code}
-                        </td>
-                        <td className="px-4 py-3">{z.city_district}</td>
-                        <td className="px-4 py-3 text-slate-300">
-                          {z.description}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <div className="text-[11px] text-emerald-300">
+                  ✓ Otomatis tersinkronisasi ke Database SQL &amp; Menu Authorize (Add) ONU
+                </div>
               </div>
             )}
 
-            {activeView === 'SPLITTERS' && (
-              <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
-                <table className="w-full text-left text-xs">
-                  <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
-                    <tr>
-                      <th className="px-4 py-3">Splitter Name</th>
-                      <th className="px-4 py-3">Ratio</th>
-                      <th className="px-4 py-3">Ports</th>
-                      <th className="px-4 py-3">Pole Number</th>
-                      <th className="px-4 py-3">GPS Coordinates</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#1e3a5f]/70">
-                    {db.odbs.map((o) => (
-                      <tr key={o.id}>
-                        <td className="px-4 py-3 font-bold text-white">
-                          {o.name}
-                        </td>
-                        <td className="px-4 py-3 font-mono text-emerald-400">
-                          {o.splitter_ratio}
-                        </td>
-                        <td className="px-4 py-3 font-mono">{o.total_ports}</td>
-                        <td className="px-4 py-3 font-mono">{o.pole_number}</td>
-                        <td className="px-4 py-3 font-mono text-slate-300">
-                          {o.latitude}, {o.longitude}
-                        </td>
+            {/* ===============================================================
+                10A: ZONES MANAGEMENT (Settings -> Zones)
+               =============================================================== */}
+            {activeView === 'ZONES' && (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-bold text-white">Zones</h2>
+                    <p className="text-xs text-slate-300">
+                      Kelola area/wilayah jaringan (Zone). Setiap Zone otomatis tampil dan dapat dipilih saat Add/Authorize ONU.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      value={zoneSearch}
+                      onChange={(e) => setZoneSearch(e.target.value)}
+                      placeholder="Cari Zone, Code, Kota..."
+                      className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingZone(null);
+                        setZoneFormName('');
+                        setZoneFormCode(`ZN-0${db.zones.length + 1}`);
+                        setZoneFormCity('Lebak');
+                        setZoneFormDesc('');
+                        setShowZoneModal(true);
+                      }}
+                      className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Add Zone
+                    </button>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+                  <table className="w-full text-left text-xs">
+                    <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
+                      <tr>
+                        <th className="px-4 py-3">ID</th>
+                        <th className="px-4 py-3">Zone Name</th>
+                        <th className="px-4 py-3">Code</th>
+                        <th className="px-4 py-3">City / District</th>
+                        <th className="px-4 py-3">Sectors</th>
+                        <th className="px-4 py-3">Splitters (ODP)</th>
+                        <th className="px-4 py-3">ONUs</th>
+                        <th className="px-4 py-3">Description</th>
+                        <th className="px-4 py-3 text-right">Actions</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-[#1e3a5f]/70">
+                      {db.zones.filter((z) => {
+                        if (!zoneSearch.trim()) return true;
+                        const q = zoneSearch.toLowerCase();
+                        return (
+                          z.name.toLowerCase().includes(q) ||
+                          z.code.toLowerCase().includes(q) ||
+                          z.city_district.toLowerCase().includes(q)
+                        );
+                      }).length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={9}
+                            className="px-4 py-8 text-center text-slate-400"
+                          >
+                            Belum ada Zone terdaftar. Klik tombol{' '}
+                            <strong className="text-emerald-400">+ Add Zone</strong>{' '}
+                            untuk membuat Zone pertama Anda.
+                          </td>
+                        </tr>
+                      ) : (
+                        db.zones
+                          .filter((z) => {
+                            if (!zoneSearch.trim()) return true;
+                            const q = zoneSearch.toLowerCase();
+                            return (
+                              z.name.toLowerCase().includes(q) ||
+                              z.code.toLowerCase().includes(q) ||
+                              z.city_district.toLowerCase().includes(q)
+                            );
+                          })
+                          .map((z) => {
+                            const secCount = (db.sectors || []).filter(
+                              (s) => s.zone_id === z.id
+                            ).length;
+                            const spCount = db.odbs.filter(
+                              (o) => o.zone_id === z.id
+                            ).length;
+                            const onuCount = db.onus.filter(
+                              (u) => u.is_authorized && u.zone_id === z.id
+                            ).length;
+                            return (
+                              <tr key={z.id} className="hover:bg-[#132842]/60">
+                                <td className="px-4 py-3 font-mono text-white">
+                                  {z.id}
+                                </td>
+                                <td className="px-4 py-3 font-bold text-white">
+                                  {z.name}
+                                </td>
+                                <td className="px-4 py-3 font-mono text-sky-400">
+                                  {z.code}
+                                </td>
+                                <td className="px-4 py-3 text-slate-200">
+                                  {z.city_district}
+                                </td>
+                                <td className="px-4 py-3 font-mono">
+                                  <span className="rounded bg-sky-950/90 border border-sky-600/40 px-2 py-0.5 text-sky-300">
+                                    {secCount} Sectors
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3 font-mono">
+                                  <span className="rounded bg-amber-950/90 border border-amber-600/40 px-2 py-0.5 text-amber-300">
+                                    {spCount} ODP
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3 font-mono">
+                                  <span className="rounded bg-emerald-950/90 border border-emerald-600/40 px-2 py-0.5 text-emerald-300">
+                                    {onuCount} ONUs
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3 text-slate-300">
+                                  {z.description || '-'}
+                                </td>
+                                <td className="px-4 py-3 text-right">
+                                  <div className="inline-flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingSector(null);
+                                        setSectorFormName('');
+                                        setSectorFormCode(
+                                          `SEC-0${(db.sectors || []).length + 1}`
+                                        );
+                                        setSectorFormZoneId(z.id);
+                                        setSectorFormOltId(
+                                          db.olts[0]?.id || 'NONE'
+                                        );
+                                        setSectorFormPortId(
+                                          db.pon_ports[0]?.id || 'NONE'
+                                        );
+                                        setSectorFormDesc('');
+                                        setActiveView('SECTORS');
+                                        setShowSectorModal(true);
+                                      }}
+                                      className="rounded bg-sky-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-sky-600"
+                                    >
+                                      + Sector
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingSplitter(null);
+                                        setSplitterFormName('');
+                                        setSplitterFormZoneId(z.id);
+                                        setSplitterFormSectorId('NONE');
+                                        setSplitterFormOltId(db.olts[0]?.id || 1);
+                                        setSplitterFormPortId(
+                                          db.pon_ports[0]?.id || 1
+                                        );
+                                        setSplitterFormRatio('1:8');
+                                        setSplitterFormPole('TIANG-01');
+                                        setActiveView('SPLITTERS');
+                                        setShowSplitterModal(true);
+                                      }}
+                                      className="rounded bg-amber-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-600"
+                                    >
+                                      + ODP
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingZone(z);
+                                        setZoneFormName(z.name);
+                                        setZoneFormCode(z.code);
+                                        setZoneFormCity(z.city_district);
+                                        setZoneFormDesc(z.description);
+                                        setShowZoneModal(true);
+                                      }}
+                                      className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#025aa5]"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setDb((prev) => ({
+                                          ...prev,
+                                          zones: prev.zones.filter(
+                                            (item) => item.id !== z.id
+                                          ),
+                                        }));
+                                        showToast(`Zone "${z.name}" dihapus.`);
+                                      }}
+                                      className="rounded bg-[#d9534f] p-1 text-white hover:bg-[#c9302c]"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Add / Edit Zone Modal */}
+                {showZoneModal && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
+                    <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+                      <div className="mb-4 flex items-center justify-between border-b border-slate-700 pb-3">
+                        <h3 className="text-base font-bold text-white">
+                          {editingZone ? `Edit Zone — ${editingZone.name}` : 'Add New Zone'}
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setShowZoneModal(false)}
+                          className="text-slate-400 hover:text-white"
+                        >
+                          <X className="h-5 w-5" />
+                        </button>
+                      </div>
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          if (!zoneFormName.trim()) return;
+                          if (editingZone) {
+                            setDb((prev) => ({
+                              ...prev,
+                              zones: prev.zones.map((z) =>
+                                z.id === editingZone.id
+                                  ? {
+                                      ...z,
+                                      name: zoneFormName.trim().toUpperCase(),
+                                      code: zoneFormCode.trim().toUpperCase(),
+                                      city_district: zoneFormCity.trim(),
+                                      description: zoneFormDesc.trim(),
+                                    }
+                                  : z
+                              ),
+                            }));
+                            showToast(`✓ Zone "${zoneFormName.toUpperCase()}" diperbarui!`);
+                          } else {
+                            handleQuickAddZone({
+                              name: zoneFormName.trim().toUpperCase(),
+                              code:
+                                zoneFormCode.trim().toUpperCase() ||
+                                `ZN-0${db.zones.length + 1}`,
+                              city_district: zoneFormCity.trim() || 'Lebak',
+                              description: zoneFormDesc.trim() || `Zone ${zoneFormName.trim().toUpperCase()}`,
+                            });
+                          }
+                          setShowZoneModal(false);
+                        }}
+                        className="space-y-3"
+                      >
+                        <div>
+                          <label className="block font-bold text-slate-200">
+                            Zone Name *
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={zoneFormName}
+                            onChange={(e) => setZoneFormName(e.target.value)}
+                            placeholder="Contoh: MUARA LEBAK - RK 01"
+                            className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Zone Code
+                            </label>
+                            <input
+                              type="text"
+                              value={zoneFormCode}
+                              onChange={(e) => setZoneFormCode(e.target.value)}
+                              placeholder="Contoh: ZN-ML01"
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              City / District
+                            </label>
+                            <input
+                              type="text"
+                              value={zoneFormCity}
+                              onChange={(e) => setZoneFormCity(e.target.value)}
+                              placeholder="Contoh: Rangkasbitung / Lebak"
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-200">
+                            Description
+                          </label>
+                          <input
+                            type="text"
+                            value={zoneFormDesc}
+                            onChange={(e) => setZoneFormDesc(e.target.value)}
+                            placeholder="Keterangan area distribusi fiber"
+                            className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                          />
+                        </div>
+                        <div className="flex justify-end gap-2 border-t border-slate-700 pt-3">
+                          <button
+                            type="button"
+                            onClick={() => setShowZoneModal(false)}
+                            className="px-3 py-1.5 text-slate-300 hover:text-white"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            className="rounded bg-[#5cb85c] px-4 py-1.5 font-bold text-white hover:bg-[#4cae4c]"
+                          >
+                            Save Zone
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ===============================================================
+                10B: SECTORS MANAGEMENT (Settings -> Sectors)
+               =============================================================== */}
+            {activeView === 'SECTORS' && (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-bold text-white">Sectors</h2>
+                    <p className="text-xs text-slate-300">
+                      Kelola Sector distribusi ODC/PON yang terhubung dengan Zone, OLT, dan Splitter (ODP).
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      value={sectorSearch}
+                      onChange={(e) => setSectorSearch(e.target.value)}
+                      placeholder="Cari Sector, Code, Zone..."
+                      className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingSector(null);
+                        setSectorFormName('');
+                        setSectorFormCode(
+                          `SEC-0${(db.sectors || []).length + 1}`
+                        );
+                        setSectorFormZoneId(db.zones[0]?.id || 'NONE');
+                        setSectorFormOltId(db.olts[0]?.id || 'NONE');
+                        setSectorFormPortId(db.pon_ports[0]?.id || 'NONE');
+                        setSectorFormDesc('');
+                        setShowSectorModal(true);
+                      }}
+                      className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Add Sector
+                    </button>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+                  <table className="w-full text-left text-xs">
+                    <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
+                      <tr>
+                        <th className="px-4 py-3">ID</th>
+                        <th className="px-4 py-3">Sector Name</th>
+                        <th className="px-4 py-3">Code</th>
+                        <th className="px-4 py-3">Zone</th>
+                        <th className="px-4 py-3">OLT &amp; PON Port</th>
+                        <th className="px-4 py-3">Splitters (ODP)</th>
+                        <th className="px-4 py-3">ONUs</th>
+                        <th className="px-4 py-3">Description</th>
+                        <th className="px-4 py-3 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#1e3a5f]/70">
+                      {(db.sectors || []).filter((s) => {
+                        if (!sectorSearch.trim()) return true;
+                        const q = sectorSearch.toLowerCase();
+                        return (
+                          s.name.toLowerCase().includes(q) ||
+                          s.code.toLowerCase().includes(q)
+                        );
+                      }).length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={9}
+                            className="px-4 py-8 text-center text-slate-400"
+                          >
+                            Belum ada Sector terdaftar. Klik tombol{' '}
+                            <strong className="text-emerald-400">+ Add Sector</strong>{' '}
+                            untuk membuat Sector baru.
+                          </td>
+                        </tr>
+                      ) : (
+                        (db.sectors || [])
+                          .filter((s) => {
+                            if (!sectorSearch.trim()) return true;
+                            const q = sectorSearch.toLowerCase();
+                            return (
+                              s.name.toLowerCase().includes(q) ||
+                              s.code.toLowerCase().includes(q)
+                            );
+                          })
+                          .map((s) => {
+                            const zObj = db.zones.find((z) => z.id === s.zone_id);
+                            const oObj = db.olts.find((o) => o.id === s.olt_id);
+                            const pObj = db.pon_ports.find(
+                              (p) => p.id === s.pon_port_id
+                            );
+                            const spCount = db.odbs.filter(
+                              (o) => o.sector_id === s.id
+                            ).length;
+                            const onuCount = db.onus.filter(
+                              (u) => u.is_authorized && u.sector_id === s.id
+                            ).length;
+                            return (
+                              <tr key={s.id} className="hover:bg-[#132842]/60">
+                                <td className="px-4 py-3 font-mono text-white">
+                                  {s.id}
+                                </td>
+                                <td className="px-4 py-3 font-bold text-white">
+                                  {s.name}
+                                </td>
+                                <td className="px-4 py-3 font-mono text-sky-400">
+                                  {s.code}
+                                </td>
+                                <td className="px-4 py-3 text-slate-200">
+                                  {zObj ? zObj.name : '-'}
+                                </td>
+                                <td className="px-4 py-3 font-mono text-slate-200">
+                                  {oObj ? oObj.name : 'All OLT'}{' '}
+                                  {pObj ? `· ${pObj.interface_name}` : ''}
+                                </td>
+                                <td className="px-4 py-3 font-mono">
+                                  <span className="rounded bg-amber-950/90 border border-amber-600/40 px-2 py-0.5 text-amber-300">
+                                    {spCount} ODP
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3 font-mono">
+                                  <span className="rounded bg-emerald-950/90 border border-emerald-600/40 px-2 py-0.5 text-emerald-300">
+                                    {onuCount} ONUs
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3 text-slate-300">
+                                  {s.description || '-'}
+                                </td>
+                                <td className="px-4 py-3 text-right">
+                                  <div className="inline-flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingSplitter(null);
+                                        setSplitterFormName('');
+                                        setSplitterFormZoneId(
+                                          s.zone_id || db.zones[0]?.id || 1
+                                        );
+                                        setSplitterFormSectorId(s.id);
+                                        setSplitterFormOltId(
+                                          s.olt_id || db.olts[0]?.id || 1
+                                        );
+                                        setSplitterFormPortId(
+                                          s.pon_port_id ||
+                                            db.pon_ports[0]?.id ||
+                                            1
+                                        );
+                                        setSplitterFormRatio('1:8');
+                                        setSplitterFormPole('TIANG-01');
+                                        setActiveView('SPLITTERS');
+                                        setShowSplitterModal(true);
+                                      }}
+                                      className="rounded bg-amber-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-600"
+                                    >
+                                      + ODP
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingSector(s);
+                                        setSectorFormName(s.name);
+                                        setSectorFormCode(s.code);
+                                        setSectorFormZoneId(s.zone_id ?? 'NONE');
+                                        setSectorFormOltId(s.olt_id ?? 'NONE');
+                                        setSectorFormPortId(
+                                          s.pon_port_id ?? 'NONE'
+                                        );
+                                        setSectorFormDesc(s.description);
+                                        setShowSectorModal(true);
+                                      }}
+                                      className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#025aa5]"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setDb((prev) => ({
+                                          ...prev,
+                                          sectors: (prev.sectors || []).filter(
+                                            (item) => item.id !== s.id
+                                          ),
+                                        }));
+                                        showToast(`Sector "${s.name}" dihapus.`);
+                                      }}
+                                      className="rounded bg-[#d9534f] p-1 text-white hover:bg-[#c9302c]"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Add / Edit Sector Modal */}
+                {showSectorModal && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
+                    <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+                      <div className="mb-4 flex items-center justify-between border-b border-slate-700 pb-3">
+                        <h3 className="text-base font-bold text-white">
+                          {editingSector
+                            ? `Edit Sector — ${editingSector.name}`
+                            : 'Add New Sector'}
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setShowSectorModal(false)}
+                          className="text-slate-400 hover:text-white"
+                        >
+                          <X className="h-5 w-5" />
+                        </button>
+                      </div>
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          if (!sectorFormName.trim()) return;
+                          if (editingSector) {
+                            setDb((prev) => ({
+                              ...prev,
+                              sectors: (prev.sectors || []).map((s) =>
+                                s.id === editingSector.id
+                                  ? {
+                                      ...s,
+                                      name: sectorFormName.trim().toUpperCase(),
+                                      code: sectorFormCode.trim().toUpperCase(),
+                                      zone_id:
+                                        sectorFormZoneId === 'NONE'
+                                          ? null
+                                          : sectorFormZoneId,
+                                      olt_id:
+                                        sectorFormOltId === 'NONE'
+                                          ? null
+                                          : sectorFormOltId,
+                                      pon_port_id:
+                                        sectorFormPortId === 'NONE'
+                                          ? null
+                                          : sectorFormPortId,
+                                      description: sectorFormDesc.trim(),
+                                    }
+                                  : s
+                              ),
+                            }));
+                            showToast(
+                              `✓ Sector "${sectorFormName.toUpperCase()}" diperbarui!`
+                            );
+                          } else {
+                            handleQuickAddSector({
+                              name: sectorFormName.trim().toUpperCase(),
+                              code:
+                                sectorFormCode.trim().toUpperCase() ||
+                                `SEC-0${(db.sectors || []).length + 1}`,
+                              zone_id:
+                                sectorFormZoneId === 'NONE'
+                                  ? null
+                                  : sectorFormZoneId,
+                              olt_id:
+                                sectorFormOltId === 'NONE'
+                                  ? null
+                                  : sectorFormOltId,
+                              pon_port_id:
+                                sectorFormPortId === 'NONE'
+                                  ? null
+                                  : sectorFormPortId,
+                              description: sectorFormDesc.trim(),
+                            });
+                          }
+                          setShowSectorModal(false);
+                        }}
+                        className="space-y-3"
+                      >
+                        <div>
+                          <label className="block font-bold text-slate-200">
+                            Sector Name *
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={sectorFormName}
+                            onChange={(e) => setSectorFormName(e.target.value)}
+                            placeholder="Contoh: SECTOR UTARA - ODC 01"
+                            className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Sector Code
+                            </label>
+                            <input
+                              type="text"
+                              value={sectorFormCode}
+                              onChange={(e) => setSectorFormCode(e.target.value)}
+                              placeholder="SEC-01"
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Linked Zone
+                            </label>
+                            <select
+                              value={sectorFormZoneId}
+                              onChange={(e) =>
+                                setSectorFormZoneId(
+                                  e.target.value === 'NONE'
+                                    ? 'NONE'
+                                    : Number(e.target.value)
+                                )
+                              }
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                            >
+                              <option value="NONE">None / All Zones</option>
+                              {db.zones.map((z) => (
+                                <option key={z.id} value={z.id}>
+                                  {z.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              OLT
+                            </label>
+                            <select
+                              value={sectorFormOltId}
+                              onChange={(e) =>
+                                setSectorFormOltId(
+                                  e.target.value === 'NONE'
+                                    ? 'NONE'
+                                    : Number(e.target.value)
+                                )
+                              }
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                            >
+                              <option value="NONE">Any OLT</option>
+                              {db.olts.map((o) => (
+                                <option key={o.id} value={o.id}>
+                                  {o.id} - {o.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              PON Port
+                            </label>
+                            <select
+                              value={sectorFormPortId}
+                              onChange={(e) =>
+                                setSectorFormPortId(
+                                  e.target.value === 'NONE'
+                                    ? 'NONE'
+                                    : Number(e.target.value)
+                                )
+                              }
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                            >
+                              <option value="NONE">Any PON Port</option>
+                              {db.pon_ports.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.interface_name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-200">
+                            Description
+                          </label>
+                          <input
+                            type="text"
+                            value={sectorFormDesc}
+                            onChange={(e) => setSectorFormDesc(e.target.value)}
+                            placeholder="Keterangan jalur feeder/distribusi sector"
+                            className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                          />
+                        </div>
+                        <div className="flex justify-end gap-2 border-t border-slate-700 pt-3">
+                          <button
+                            type="button"
+                            onClick={() => setShowSectorModal(false)}
+                            className="px-3 py-1.5 text-slate-300 hover:text-white"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            className="rounded bg-[#5cb85c] px-4 py-1.5 font-bold text-white hover:bg-[#4cae4c]"
+                          >
+                            Save Sector
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ===============================================================
+                10C: SPLITTERS / ODP / ODB MANAGEMENT (Settings -> Splitters)
+               =============================================================== */}
+            {activeView === 'SPLITTERS' && (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-bold text-white">
+                      Optical Splitters (ODP / ODB)
+                    </h2>
+                    <p className="text-xs text-slate-300">
+                      Kelola titik distribusi optik (Splitter / ODP) beserta rasio port (1:2 s/d 1:64), Zone, Sector, dan kapasitas port ONU.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      value={splitterSearch}
+                      onChange={(e) => setSplitterSearch(e.target.value)}
+                      placeholder="Cari Nama ODP/Splitter, Tiang..."
+                      className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingSplitter(null);
+                        setSplitterFormName('');
+                        setSplitterFormZoneId(db.zones[0]?.id || 1);
+                        setSplitterFormSectorId(
+                          (db.sectors && db.sectors[0]?.id) || 'NONE'
+                        );
+                        setSplitterFormOltId(db.olts[0]?.id || 1);
+                        setSplitterFormPortId(db.pon_ports[0]?.id || 1);
+                        setSplitterFormRatio('1:8');
+                        setSplitterFormPole(`TIANG-0${db.odbs.length + 1}`);
+                        setSplitterFormLat('-6.355');
+                        setSplitterFormLng('106.251');
+                        setSplitterFormDesc('');
+                        setShowSplitterModal(true);
+                      }}
+                      className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Add Splitter (ODP)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+                  <table className="w-full text-left text-xs">
+                    <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
+                      <tr>
+                        <th className="px-4 py-3">ID</th>
+                        <th className="px-4 py-3">Splitter / ODP Name</th>
+                        <th className="px-4 py-3">Ratio</th>
+                        <th className="px-4 py-3">Port Usage</th>
+                        <th className="px-4 py-3">Zone</th>
+                        <th className="px-4 py-3">Sector</th>
+                        <th className="px-4 py-3">Pole / Tiang</th>
+                        <th className="px-4 py-3">GPS Coordinates</th>
+                        <th className="px-4 py-3 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#1e3a5f]/70">
+                      {db.odbs.filter((o) => {
+                        if (!splitterSearch.trim()) return true;
+                        const q = splitterSearch.toLowerCase();
+                        return (
+                          o.name.toLowerCase().includes(q) ||
+                          o.pole_number.toLowerCase().includes(q)
+                        );
+                      }).length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={9}
+                            className="px-4 py-8 text-center text-slate-400"
+                          >
+                            Belum ada Splitter (ODP/ODB) terdaftar. Klik tombol{' '}
+                            <strong className="text-emerald-400">
+                              + Add Splitter (ODP)
+                            </strong>{' '}
+                            untuk menambahkan ODP baru.
+                          </td>
+                        </tr>
+                      ) : (
+                        db.odbs
+                          .filter((o) => {
+                            if (!splitterSearch.trim()) return true;
+                            const q = splitterSearch.toLowerCase();
+                            return (
+                              o.name.toLowerCase().includes(q) ||
+                              o.pole_number.toLowerCase().includes(q)
+                            );
+                          })
+                          .map((o) => {
+                            const zObj = db.zones.find(
+                              (z) => z.id === o.zone_id
+                            );
+                            const secObj = (db.sectors || []).find(
+                              (s) => s.id === o.sector_id
+                            );
+                            const attachedOnus = db.onus.filter(
+                              (u) => u.is_authorized && u.odb_id === o.id
+                            );
+                            const usedPorts = attachedOnus.length;
+                            const pct = Math.min(
+                              100,
+                              Math.round((usedPorts / (o.total_ports || 8)) * 100)
+                            );
+                            return (
+                              <tr key={o.id} className="hover:bg-[#132842]/60">
+                                <td className="px-4 py-3 font-mono text-white">
+                                  {o.id}
+                                </td>
+                                <td className="px-4 py-3 font-bold text-white">
+                                  {o.name}
+                                </td>
+                                <td className="px-4 py-3 font-mono text-emerald-400">
+                                  {o.splitter_ratio}
+                                </td>
+                                <td className="px-4 py-3">
+                                  <div className="flex items-center gap-2 font-mono">
+                                    <div className="h-2 w-20 overflow-hidden rounded-full bg-slate-700">
+                                      <div
+                                        className={`h-full ${
+                                          pct >= 90
+                                            ? 'bg-red-500'
+                                            : pct >= 70
+                                              ? 'bg-amber-500'
+                                              : 'bg-emerald-500'
+                                        }`}
+                                        style={{ width: `${Math.max(6, pct)}%` }}
+                                      />
+                                    </div>
+                                    <span className="font-bold text-white">
+                                      {usedPorts} / {o.total_ports}
+                                    </span>
+                                    <span className="text-[10px] text-slate-400">
+                                      ({Math.max(0, o.total_ports - usedPorts)} free)
+                                    </span>
+                                  </div>
+                                </td>
+                                <td className="px-4 py-3 text-slate-200">
+                                  {zObj ? zObj.name : '-'}
+                                </td>
+                                <td className="px-4 py-3 text-sky-300">
+                                  {secObj ? secObj.name : '-'}
+                                </td>
+                                <td className="px-4 py-3 font-mono text-slate-200">
+                                  {o.pole_number}
+                                </td>
+                                <td className="px-4 py-3 font-mono text-slate-300">
+                                  {o.latitude}, {o.longitude}
+                                </td>
+                                <td className="px-4 py-3 text-right">
+                                  <div className="inline-flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingSplitter(o);
+                                        setSplitterFormName(o.name);
+                                        setSplitterFormZoneId(
+                                          o.zone_id || db.zones[0]?.id || 1
+                                        );
+                                        setSplitterFormSectorId(
+                                          o.sector_id ?? 'NONE'
+                                        );
+                                        setSplitterFormOltId(
+                                          o.olt_id || db.olts[0]?.id || 1
+                                        );
+                                        setSplitterFormPortId(
+                                          o.pon_port_id || 1
+                                        );
+                                        setSplitterFormRatio(o.splitter_ratio);
+                                        setSplitterFormPole(o.pole_number);
+                                        setSplitterFormLat(String(o.latitude));
+                                        setSplitterFormLng(String(o.longitude));
+                                        setSplitterFormDesc(o.description || '');
+                                        setShowSplitterModal(true);
+                                      }}
+                                      className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#025aa5]"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setDb((prev) => ({
+                                          ...prev,
+                                          odbs: prev.odbs.filter(
+                                            (item) => item.id !== o.id
+                                          ),
+                                        }));
+                                        showToast(
+                                          `Splitter "${o.name}" dihapus.`
+                                        );
+                                      }}
+                                      className="rounded bg-[#d9534f] p-1 text-white hover:bg-[#c9302c]"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Add / Edit Splitter Modal */}
+                {showSplitterModal && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
+                    <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+                      <div className="mb-4 flex items-center justify-between border-b border-slate-700 pb-3">
+                        <h3 className="text-base font-bold text-white">
+                          {editingSplitter
+                            ? `Edit Splitter (ODP) — ${editingSplitter.name}`
+                            : 'Add New Optical Splitter (ODP / ODB)'}
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setShowSplitterModal(false)}
+                          className="text-slate-400 hover:text-white"
+                        >
+                          <X className="h-5 w-5" />
+                        </button>
+                      </div>
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          if (!splitterFormName.trim()) return;
+                          const totalPorts =
+                            Number(splitterFormRatio.split(':')[1]) || 8;
+                          if (editingSplitter) {
+                            setDb((prev) => ({
+                              ...prev,
+                              odbs: prev.odbs.map((o) =>
+                                o.id === editingSplitter.id
+                                  ? {
+                                      ...o,
+                                      name: splitterFormName
+                                        .trim()
+                                        .toUpperCase(),
+                                      zone_id: splitterFormZoneId,
+                                      sector_id:
+                                        splitterFormSectorId === 'NONE'
+                                          ? null
+                                          : splitterFormSectorId,
+                                      olt_id: splitterFormOltId,
+                                      pon_port_id: splitterFormPortId,
+                                      splitter_ratio: splitterFormRatio,
+                                      total_ports: totalPorts,
+                                      pole_number: splitterFormPole.trim(),
+                                      latitude:
+                                        parseFloat(splitterFormLat) || -6.355,
+                                      longitude:
+                                        parseFloat(splitterFormLng) || 106.251,
+                                      description: splitterFormDesc.trim(),
+                                    }
+                                  : o
+                              ),
+                            }));
+                            showToast(
+                              `✓ Splitter "${splitterFormName.toUpperCase()}" diperbarui!`
+                            );
+                          } else {
+                            handleQuickAddSplitter({
+                              name: splitterFormName.trim().toUpperCase(),
+                              zone_id: splitterFormZoneId,
+                              sector_id:
+                                splitterFormSectorId === 'NONE'
+                                  ? null
+                                  : splitterFormSectorId,
+                              olt_id: splitterFormOltId,
+                              pon_port_id: splitterFormPortId,
+                              splitter_ratio: splitterFormRatio,
+                              total_ports: totalPorts,
+                              pole_number:
+                                splitterFormPole.trim() || 'TIANG-01',
+                              latitude: parseFloat(splitterFormLat) || -6.355,
+                              longitude: parseFloat(splitterFormLng) || 106.251,
+                              description: splitterFormDesc.trim(),
+                            });
+                          }
+                          setShowSplitterModal(false);
+                        }}
+                        className="space-y-3"
+                      >
+                        <div>
+                          <label className="block font-bold text-slate-200">
+                            Splitter / ODP Name *
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={splitterFormName}
+                            onChange={(e) =>
+                              setSplitterFormName(e.target.value)
+                            }
+                            placeholder="Contoh: ODP-ML-01 atau 01-010111"
+                            className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Splitter Ratio
+                            </label>
+                            <select
+                              value={splitterFormRatio}
+                              onChange={(e) =>
+                                setSplitterFormRatio(
+                                  e.target.value as
+                                    | '1:2'
+                                    | '1:4'
+                                    | '1:8'
+                                    | '1:16'
+                                    | '1:32'
+                                    | '1:64'
+                                )
+                              }
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                            >
+                              <option value="1:2">1:2 (2 Ports)</option>
+                              <option value="1:4">1:4 (4 Ports)</option>
+                              <option value="1:8">1:8 (8 Ports)</option>
+                              <option value="1:16">1:16 (16 Ports)</option>
+                              <option value="1:32">1:32 (32 Ports)</option>
+                              <option value="1:64">1:64 (64 Ports)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Pole / Tiang Number
+                            </label>
+                            <input
+                              type="text"
+                              value={splitterFormPole}
+                              onChange={(e) =>
+                                setSplitterFormPole(e.target.value)
+                              }
+                              placeholder="TIANG-01"
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Zone
+                            </label>
+                            <select
+                              value={splitterFormZoneId}
+                              onChange={(e) =>
+                                setSplitterFormZoneId(Number(e.target.value))
+                              }
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                            >
+                              {db.zones.length === 0 ? (
+                                <option value={1}>Default Zone (1)</option>
+                              ) : (
+                                db.zones.map((z) => (
+                                  <option key={z.id} value={z.id}>
+                                    {z.name}
+                                  </option>
+                                ))
+                              )}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Sector
+                            </label>
+                            <select
+                              value={splitterFormSectorId}
+                              onChange={(e) =>
+                                setSplitterFormSectorId(
+                                  e.target.value === 'NONE'
+                                    ? 'NONE'
+                                    : Number(e.target.value)
+                                )
+                              }
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                            >
+                              <option value="NONE">None</option>
+                              {(db.sectors || []).map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Latitude
+                            </label>
+                            <input
+                              type="text"
+                              value={splitterFormLat}
+                              onChange={(e) =>
+                                setSplitterFormLat(e.target.value)
+                              }
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Longitude
+                            </label>
+                            <input
+                              type="text"
+                              value={splitterFormLng}
+                              onChange={(e) =>
+                                setSplitterFormLng(e.target.value)
+                              }
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex justify-end gap-2 border-t border-slate-700 pt-3">
+                          <button
+                            type="button"
+                            onClick={() => setShowSplitterModal(false)}
+                            className="px-3 py-1.5 text-slate-300 hover:text-white"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            className="rounded bg-[#5cb85c] px-4 py-1.5 font-bold text-white hover:bg-[#4cae4c]"
+                          >
+                            Save Splitter (ODP)
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

@@ -103,6 +103,7 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     db.tcont_profiles.find((t) => t.id === onu.tcont_profile_id) ||
     db.tcont_profiles[0];
   const zone = db.zones.find((z) => z.id === onu.zone_id);
+  const sector = (db.sectors || []).find((s) => s.id === onu.sector_id);
   const odb = db.odbs.find((o) => o.id === onu.odb_id);
   const tr069Profile =
     db.tr069_profiles.find((p) => p.id === onu.tr069_profile_id) ||
@@ -155,9 +156,18 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const [metaExtId, setMetaExtId] = useState(
     onu.external_id || onu.serial_number
   );
-  const [metaZoneId, setMetaZoneId] = useState(onu.zone_id || 1);
-  const [metaOdbId, setMetaOdbId] = useState<number>(onu.odb_id || 1);
-  const [metaOdbPort, setMetaOdbPort] = useState<number>(onu.odb_port || 3);
+  const [metaZoneId, setMetaZoneId] = useState<number | 'NONE'>(
+    onu.zone_id || 'NONE'
+  );
+  const [metaSectorId, setMetaSectorId] = useState<number | 'NONE'>(
+    onu.sector_id || 'NONE'
+  );
+  const [metaOdbId, setMetaOdbId] = useState<number | 'NONE'>(
+    onu.odb_id || 'NONE'
+  );
+  const [metaOdbPort, setMetaOdbPort] = useState<number | 'NONE'>(
+    onu.odb_port || 'NONE'
+  );
   const [metaPppoeUser, setMetaPppoeUser] = useState(
     onu.pppoe_username || onu.customer_name || onu.serial_number
   );
@@ -175,9 +185,10 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     setMetaAddress(onu.address || 'none');
     setMetaContact(onu.contact || 'None');
     setMetaExtId(onu.external_id || onu.serial_number);
-    setMetaZoneId(onu.zone_id || 1);
-    setMetaOdbId(onu.odb_id || 1);
-    setMetaOdbPort(onu.odb_port || 3);
+    setMetaZoneId(onu.zone_id || 'NONE');
+    setMetaSectorId(onu.sector_id || 'NONE');
+    setMetaOdbId(onu.odb_id || 'NONE');
+    setMetaOdbPort(onu.odb_port || 'NONE');
     setMetaPppoeUser(onu.pppoe_username || onu.customer_name || onu.serial_number);
     setMetaPppoePass(onu.pppoe_password || 'jetcyber');
   }, [onu]);
@@ -188,9 +199,10 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     setMetaAddress(onu.address || 'none');
     setMetaContact(onu.contact || 'None');
     setMetaExtId(onu.external_id || onu.serial_number);
-    setMetaZoneId(onu.zone_id || 1);
-    setMetaOdbId(onu.odb_id || 1);
-    setMetaOdbPort(onu.odb_port || 3);
+    setMetaZoneId(onu.zone_id || 'NONE');
+    setMetaSectorId(onu.sector_id || 'NONE');
+    setMetaOdbId(onu.odb_id || 'NONE');
+    setMetaOdbPort(onu.odb_port || 'NONE');
     setMetaPppoeUser(onu.pppoe_username || onu.customer_name || onu.serial_number);
     setMetaPppoePass(onu.pppoe_password || 'jetcyber');
     setMetaRebindAll(rebindDefault);
@@ -790,7 +802,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           <div className="grid grid-cols-12 items-center py-2">
             <div className="col-span-4 font-semibold text-slate-300">Zone</div>
             <div className="col-span-8 flex items-center gap-3 text-white">
-              <span>{zone?.name || 'MUARA LEBAK - RK O1'}</span>
+              <span>{zone ? zone.name : 'None'}</span>
               <button
                 type="button"
                 onClick={() => openMetadataDialog(false)}
@@ -808,7 +820,9 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             </div>
             <div className="col-span-8 flex items-center gap-3 text-white">
               <span>
-                {odb ? `${odb.name} Port ${onu.odb_port || 3}` : '01- 010111 Port 3'}
+                {odb
+                  ? `${odb.name}${onu.odb_port ? ` Port ${onu.odb_port}` : ''}`
+                  : 'None'}
               </span>
               <button
                 type="button"
@@ -824,7 +838,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           <div className="grid grid-cols-12 items-center py-2">
             <div className="col-span-4 font-semibold text-slate-300">Sector</div>
             <div className="col-span-8 flex items-center gap-3 text-white">
-              <span>None</span>
+              <span>{sector ? sector.name : 'None'}</span>
               <button
                 type="button"
                 onClick={() => openMetadataDialog(false)}
@@ -2154,9 +2168,10 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                       address: metaAddress,
                       contact: metaContact,
                       external_id: metaExtId || cleanSn,
-                      zone_id: metaZoneId,
-                      odb_id: metaOdbId,
-                      odb_port: metaOdbPort,
+                      zone_id: metaZoneId === 'NONE' ? null : metaZoneId,
+                      sector_id: metaSectorId === 'NONE' ? null : metaSectorId,
+                      odb_id: metaOdbId === 'NONE' ? null : metaOdbId,
+                      odb_port: metaOdbPort === 'NONE' ? null : metaOdbPort,
                     },
                     `Save & Push ONU Config (${cleanName}) — ${onuInterface}`
                   );
@@ -2209,24 +2224,19 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block font-bold">Re-register type ALL</label>
-                    <label className="mt-1.5 flex items-center gap-2 text-xs text-slate-200">
-                      <input
-                        type="checkbox"
-                        checked={metaRebindAll}
-                        onChange={(e) => setMetaRebindAll(e.target.checked)}
-                        className="h-3.5 w-3.5 rounded"
-                      />
-                      <span>Re-bind ONU as type ALL</span>
-                    </label>
-                  </div>
-                  <div>
                     <label className="block font-bold">Zone</label>
                     <select
                       value={metaZoneId}
-                      onChange={(e) => setMetaZoneId(Number(e.target.value))}
+                      onChange={(e) =>
+                        setMetaZoneId(
+                          e.target.value === 'NONE'
+                            ? 'NONE'
+                            : Number(e.target.value)
+                        )
+                      }
                       className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 text-white"
                     >
+                      <option value="NONE">None</option>
                       {db.zones.map((z) => (
                         <option key={z.id} value={z.id}>
                           {z.name}
@@ -2234,31 +2244,89 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                       ))}
                     </select>
                   </div>
+                  <div>
+                    <label className="block font-bold">Sector</label>
+                    <select
+                      value={metaSectorId}
+                      onChange={(e) =>
+                        setMetaSectorId(
+                          e.target.value === 'NONE'
+                            ? 'NONE'
+                            : Number(e.target.value)
+                        )
+                      }
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 text-white"
+                    >
+                      <option value="NONE">None</option>
+                      {(db.sectors || []).map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block font-bold">Splitter (ODB)</label>
+                    <label className="block font-bold">Splitter (ODB/ODP)</label>
                     <select
                       value={metaOdbId}
-                      onChange={(e) => setMetaOdbId(Number(e.target.value))}
+                      onChange={(e) =>
+                        setMetaOdbId(
+                          e.target.value === 'NONE'
+                            ? 'NONE'
+                            : Number(e.target.value)
+                        )
+                      }
                       className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 text-white"
                     >
+                      <option value="NONE">None</option>
                       {db.odbs.map((o) => (
                         <option key={o.id} value={o.id}>
-                          {o.name}
+                          {o.name} ({o.splitter_ratio})
                         </option>
                       ))}
                     </select>
                   </div>
                   <div>
                     <label className="block font-bold">Splitter Port</label>
-                    <input
-                      type="number"
+                    <select
                       value={metaOdbPort}
-                      onChange={(e) => setMetaOdbPort(Number(e.target.value))}
+                      onChange={(e) =>
+                        setMetaOdbPort(
+                          e.target.value === 'NONE'
+                            ? 'NONE'
+                            : Number(e.target.value)
+                        )
+                      }
                       className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 font-mono text-white"
-                    />
+                    >
+                      <option value="NONE">None</option>
+                      {Array.from(
+                        {
+                          length:
+                            db.odbs.find((o) => o.id === metaOdbId)?.total_ports ||
+                            16,
+                        },
+                        (_, idx) => idx + 1
+                      ).map((p) => (
+                        <option key={p} value={p}>
+                          Port {p}
+                        </option>
+                      ))}
+                    </select>
                   </div>
+                </div>
+                <div>
+                  <label className="flex items-center gap-2 text-xs text-slate-200">
+                    <input
+                      type="checkbox"
+                      checked={metaRebindAll}
+                      onChange={(e) => setMetaRebindAll(e.target.checked)}
+                      className="h-3.5 w-3.5 rounded"
+                    />
+                    <span>Re-register ONU as type ALL on OLT</span>
+                  </label>
                 </div>
                 <div>
                   <label className="block font-bold">Address or comment</label>
