@@ -388,6 +388,31 @@ export default function App() {
   const [filterSplitter, setFilterSplitter] = useState<string>('ANY');
   const [filterVlan, setFilterVlan] = useState<string>('ANY');
   const [filterSignalLevel, setFilterSignalLevel] = useState<'ALL' | 'GOOD' | 'WARNING' | 'CRITICAL'>('ALL');
+  const [configuredOnusPerPage, setConfiguredOnusPerPage] = useState<50 | 100 | 1000>(() => {
+    try {
+      const saved = Number(
+        localStorage.getItem('smartolt_configured_onus_per_page')
+      );
+      if (saved === 50 || saved === 100 || saved === 1000) {
+        return saved;
+      }
+    } catch {
+      // ignore storage error
+    }
+    return 50;
+  });
+  const [configuredOnusPage, setConfiguredOnusPage] = useState<number>(1);
+
+  const handleSelectConfiguredPerPage = (size: 50 | 100 | 1000) => {
+    setConfiguredOnusPerPage(size);
+    setConfiguredOnusPage(1);
+    try {
+      localStorage.setItem('smartolt_configured_onus_per_page', String(size));
+    } catch {
+      // ignore storage error
+    }
+  };
+
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   // CLI Regex Parser Tester State (in Diag tab)
@@ -563,6 +588,42 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     }
     return true;
   });
+
+  const totalConfiguredPages = Math.max(
+    1,
+    Math.ceil(filteredConfiguredOnus.length / configuredOnusPerPage)
+  );
+  const activeConfiguredPage = Math.min(
+    Math.max(1, configuredOnusPage),
+    totalConfiguredPages
+  );
+  const paginatedConfiguredOnus = filteredConfiguredOnus.slice(
+    (activeConfiguredPage - 1) * configuredOnusPerPage,
+    activeConfiguredPage * configuredOnusPerPage
+  );
+
+  const buildVisiblePageNumbers = (
+    current: number,
+    total: number
+  ): Array<number | '...'> => {
+    if (total <= 7) {
+      return Array.from({ length: total }, (_, idx) => idx + 1);
+    }
+    const pages: Array<number | '...'> = [1];
+    if (current > 3) {
+      pages.push('...');
+    }
+    const start = Math.max(2, current - 1);
+    const end = Math.min(total - 1, current + 1);
+    for (let p = start; p <= end; p++) {
+      pages.push(p);
+    }
+    if (current < total - 2) {
+      pages.push('...');
+    }
+    pages.push(total);
+    return pages;
+  };
 
   // Central Live OLT Full Synchronization — connects via Telnet to the target OLT,
   // pulls `show card`, `show gpon onu uncfg`, `show gpon onu state`, and `show running-config`,
@@ -2144,24 +2205,79 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             </div>
 
             {/* Pagination Info Row */}
-            <div className="flex flex-wrap items-center justify-between text-xs text-slate-300">
-              <div className="flex items-center gap-1">
-                <span className="rounded bg-[#0275d8] px-2.5 py-1 font-bold text-white">
-                  1
-                </span>
-                <span className="rounded bg-[#10233a] px-2.5 py-1 text-sky-400">
-                  2
-                </span>
-                <span className="rounded bg-[#10233a] px-2.5 py-1 text-sky-400">
-                  3
-                </span>
-                <span className="px-1">...</span>
-                <span className="rounded bg-[#10233a] px-2.5 py-1 text-sky-400">
-                  26
-                </span>
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-300">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-1">
+                  {activeConfiguredPage > 1 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setConfiguredOnusPage((p) => Math.max(1, p - 1))
+                      }
+                      className="rounded bg-[#10233a] px-2.5 py-1 text-sky-400 hover:bg-[#163050] hover:text-white"
+                    >
+                      ‹
+                    </button>
+                  )}
+                  {buildVisiblePageNumbers(
+                    activeConfiguredPage,
+                    totalConfiguredPages
+                  ).map((item, idx) =>
+                    item === '...' ? (
+                      <span key={`ellipsis-${idx}`} className="px-1 text-slate-400">
+                        ...
+                      </span>
+                    ) : (
+                      <button
+                        key={item}
+                        type="button"
+                        onClick={() => setConfiguredOnusPage(item)}
+                        className={`rounded px-2.5 py-1 transition ${
+                          activeConfiguredPage === item
+                            ? 'bg-[#0275d8] font-bold text-white'
+                            : 'bg-[#10233a] text-sky-400 hover:bg-[#163050] hover:text-white'
+                        }`}
+                      >
+                        {item}
+                      </button>
+                    )
+                  )}
+                  {activeConfiguredPage < totalConfiguredPages && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setConfiguredOnusPage((p) =>
+                          Math.min(totalConfiguredPages, p + 1)
+                        )
+                      }
+                      className="rounded bg-[#10233a] px-2.5 py-1 text-sky-400 hover:bg-[#163050] hover:text-white"
+                    >
+                      ›
+                    </button>
+                  )}
+                </div>
+
+                {/* Per-page selector (Default 50, options 50 | 100 | 1000, persistent) */}
+                <div className="flex items-center gap-1.5 border-l border-[#1e3a5f] pl-3">
+                  <span className="text-slate-400">Show:</span>
+                  {([50, 100, 1000] as const).map((size) => (
+                    <button
+                      key={size}
+                      type="button"
+                      onClick={() => handleSelectConfiguredPerPage(size)}
+                      className={`rounded px-2.5 py-1 font-mono transition ${
+                        configuredOnusPerPage === size
+                          ? 'bg-[#0275d8] font-bold text-white'
+                          : 'bg-[#10233a] text-sky-400 hover:bg-[#163050] hover:text-white'
+                      }`}
+                    >
+                      {size}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div>
-                {filteredConfiguredOnus.length} of {configuredOnus.length} ONUs displayed.
+                {paginatedConfiguredOnus.length} of {filteredConfiguredOnus.length} ONUs displayed.
               </div>
             </div>
 
@@ -2188,7 +2304,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#1e3a5f]/60">
-                  {filteredConfiguredOnus.map((o) => {
+                  {paginatedConfiguredOnus.map((o) => {
                     const z = db.zones.find((item) => item.id === o.zone_id);
                     const sec = (db.sectors || []).find(
                       (item) => item.id === o.sector_id
