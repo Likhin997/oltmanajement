@@ -150,18 +150,95 @@ export function parseZteUncfgOutput(rawOutput: string): UncfgOnuParsed[] {
   return results;
 }
 
+export interface WanIpParsed {
+  currentIp: string | null;
+  currentMask: string | null;
+  gateway: string | null;
+  primaryDns: string | null;
+  secondaryDns: string | null;
+  status: string | null;
+  username: string | null;
+  password: string | null;
+  cvlan: number | null;
+  macAddress: string | null;
+  mode: string | null;
+}
+
+export interface OnuDetailInfoParsed {
+  adminState: 'ENABLED' | 'DISABLED' | null;
+  phaseState: OnuStateParsed['phaseState'] | null;
+  serialNumber: string | null;
+  name: string | null;
+  distanceM: number | null;
+  onlineDuration: string | null;
+  lastOfflineReason: string | null;
+  lastAuthTime: string | null;
+  lastOfflineTime: string | null;
+}
+
+export function normalizeZtePhaseState(
+  phaseRaw: string,
+  offlineCauseRaw?: string | null
+): OnuStateParsed['phaseState'] {
+  const clean = (phaseRaw || '').trim().toLowerCase();
+  const cause = (offlineCauseRaw || '').trim().toLowerCase();
+
+  if (clean === 'working' || clean === 'online' || clean === 'up') {
+    return 'working';
+  }
+  if (
+    clean === 'los' ||
+    clean === 'losi' ||
+    clean === 'lofi' ||
+    clean === 'lof' ||
+    clean === 'loami'
+  ) {
+    return 'LOS';
+  }
+  if (
+    clean === 'dyinggasp' ||
+    clean === 'dying-gasp' ||
+    clean === 'dying_gasp' ||
+    clean === 'poweroff' ||
+    clean === 'power-off' ||
+    clean === 'pwrfail'
+  ) {
+    return 'DyingGasp';
+  }
+  if (clean === 'syncmib' || clean === 'sync-mib') {
+    return 'syncMib';
+  }
+  if (clean === 'authfailed' || clean === 'auth-failed') {
+    return 'AuthFailed';
+  }
+
+  // On ZTE C300, when an ONU is down in `logging` or `OffLine` state, check its last offline cause
+  if (cause.includes('dyinggasp') || cause.includes('dying-gasp') || cause.includes('power')) {
+    return 'DyingGasp';
+  }
+  if (cause.includes('los') || cause.includes('lof')) {
+    return 'LOS';
+  }
+
+  return 'OffLine';
+}
+
 /**
- * 2. ALGORITMA REGEX PARSER: `show gpon onu state gpon-olt_1/x/y`
+ * 2. ALGORITMA REGEX PARSER: `show gpon onu state [gpon-olt_1/x/y]`
  */
 export function parseZteOnuStateOutput(rawOutput: string): OnuStateParsed[] {
   const results: OnuStateParsed[] = [];
-  const lines = rawOutput.split(/\r?\n/);
+  const cleaned = rawOutput
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  const lines = cleaned.split(/[\r\n]+/);
 
   const stateRegex =
-    /(?:gpon-onu_)?(\d+)\/(\d+)\/(\d+):(\d+)\s+(enable|disable)\s+(enable|disable)\s+(working|LOS|DyingGasp|OffLine|syncMib|AuthFailed)\s+(\S+)/i;
+    /(?:gpon-onu_)?(\d+)\/(\d+)\/(\d+):(\d+)\s+(enable|disable|unlock|lock)\s+(enable|disable)\s+([A-Za-z0-9_\-]+)(?:\s+(\S+))?/i;
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
+    if (!line || line.startsWith('---') || /^onuindex/i.test(line)) continue;
     const match = line.match(stateRegex);
     if (!match) continue;
 
@@ -173,25 +250,178 @@ export function parseZteOnuStateOutput(rawOutput: string): OnuStateParsed[] {
     const omccRaw = match[6].toLowerCase();
     const phaseRaw = match[7];
 
-    let normalizedPhase: OnuStateParsed['phaseState'] = 'OffLine';
-    if (/^working$/i.test(phaseRaw)) normalizedPhase = 'working';
-    else if (/^los$/i.test(phaseRaw)) normalizedPhase = 'LOS';
-    else if (/^dyinggasp$/i.test(phaseRaw)) normalizedPhase = 'DyingGasp';
-    else if (/^syncmib$/i.test(phaseRaw)) normalizedPhase = 'syncMib';
-    else if (/^authfailed$/i.test(phaseRaw)) normalizedPhase = 'AuthFailed';
+    const normalizedPhase = normalizeZtePhaseState(phaseRaw);
 
     results.push({
       ponInterface: `gpon-olt_${rack}/${slot}/${port}`,
       onuIndex,
       fullInterface: `gpon-onu_${rack}/${slot}/${port}:${onuIndex}`,
-      adminState: adminRaw === 'enable' ? 'ENABLED' : 'DISABLED',
+      adminState:
+        adminRaw === 'enable' || adminRaw === 'unlock' ? 'ENABLED' : 'DISABLED',
       omccState: omccRaw === 'enable' ? 'ENABLED' : 'DISABLED',
       phaseState: normalizedPhase,
-      channel: match[8],
+      channel: match[8] || '1(GPON)',
     });
   }
 
   return results;
+}
+
+/**
+ * 2b. ALGORITMA REGEX PARSER: `show gpon onu detail-info gpon-onu_1/x/y:z`
+ * Membaca Phase state, Online Duration, Distance, serta riwayat Authpass/Offline Cause (DyingGasp / LOS)
+ */
+export function parseZteOnuDetailInfo(rawOutput: string): OnuDetailInfoParsed {
+  const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const adminMatch = cleaned.match(/Admin\s+state\s*:\s*(\S+)/i);
+  const phaseMatch = cleaned.match(/Phase\s+state\s*:\s*(\S+)/i);
+  const snMatch = cleaned.match(/Serial\s+number\s*:\s*([A-Z0-9]{8,16})/i);
+  const nameMatch = cleaned.match(/^\s*Name\s*:\s*([^\r\n]+)/im);
+  const distMatch = cleaned.match(/ONU\s+Distance\s*:\s*(\d+)\s*m/i);
+  const durMatch = cleaned.match(/Online\s+Duration\s*:\s*([^\r\n]+)/i);
+
+  // Parse the last entry of the ZTE Authpass/OfflineTime/Cause table:
+  //   1   2026-11-10 14:20:11    2026-11-10 16:45:02     DyingGasp
+  const historyRegex =
+    /^\s*\d+\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}|N\/A|0000-00-00\s+00:00:00)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}|N\/A|0000-00-00\s+00:00:00)\s+([A-Za-z0-9_\-]+)/gim;
+  let hm: RegExpExecArray | null;
+  let lastAuthTime: string | null = null;
+  let lastOfflineTime: string | null = null;
+  let lastCause: string | null = null;
+
+  while ((hm = historyRegex.exec(cleaned)) !== null) {
+    if (hm[1] && hm[1] !== 'N/A' && !hm[1].startsWith('0000')) {
+      lastAuthTime = hm[1].trim();
+    }
+    if (hm[2] && hm[2] !== 'N/A' && !hm[2].startsWith('0000')) {
+      lastOfflineTime = hm[2].trim();
+    }
+    if (hm[3]) {
+      lastCause = hm[3].trim();
+    }
+  }
+
+  const rawPhase = phaseMatch ? phaseMatch[1].trim() : null;
+  const phaseState = rawPhase ? normalizeZtePhaseState(rawPhase, lastCause) : null;
+
+  return {
+    adminState: adminMatch
+      ? /enable|unlock/i.test(adminMatch[1])
+        ? 'ENABLED'
+        : 'DISABLED'
+      : null,
+    phaseState,
+    serialNumber: snMatch ? snMatch[1].trim().toUpperCase() : null,
+    name: nameMatch ? nameMatch[1].trim() : null,
+    distanceM: distMatch ? parseInt(distMatch[1], 10) : null,
+    onlineDuration: durMatch ? durMatch[1].trim() : null,
+    lastOfflineReason: lastCause,
+    lastAuthTime,
+    lastOfflineTime,
+  };
+}
+
+/**
+ * 2c. ALGORITMA REGEX PARSER: `show gpon remote-onu wan-ip gpon-onu_1/x/y:z`
+ * Membaca IP PPPoE / DHCP nyata yang didapat ONU dari MikroTik / BNG melalui OMCI OLT!
+ */
+export function parseZteWanIpOutput(rawOutput: string): WanIpParsed {
+  const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+
+  const ipMatch =
+    cleaned.match(/Current\s+IP\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
+    cleaned.match(/IP\s+address\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
+  const maskMatch =
+    cleaned.match(/Current\s+mask\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
+    cleaned.match(/Subnet\s+mask\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
+  const gwMatch =
+    cleaned.match(/Current\s+gateway\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i) ||
+    cleaned.match(/Default\s+gateway\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
+  const dns1Match = cleaned.match(
+    /Current\s+primary\s+DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i
+  );
+  const dns2Match = cleaned.match(
+    /Current\s+secondary\s+DNS\s*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i
+  );
+  const statusMatch = cleaned.match(/^\s*Status\s*:\s*([^\r\n]+)/im);
+  const userMatch = cleaned.match(/^\s*Username\s*:\s*([^\r\n]+)/im);
+  const passMatch = cleaned.match(/^\s*Password\s*:\s*([^\r\n]+)/im);
+  const cvlanMatch = cleaned.match(/^\s*CVLAN\s*:\s*(\d+)/im);
+  const macMatch = cleaned.match(/^\s*MAC\s+address\s*:\s*([0-9a-fA-F:.\-]+)/im);
+  const modeMatch = cleaned.match(/^\s*Mode\s*:\s*([^\r\n]+)/im);
+
+  const rawIp = ipMatch ? ipMatch[1].trim() : null;
+  const validIp =
+    rawIp && rawIp !== '0.0.0.0' && rawIp !== '255.255.255.255' ? rawIp : rawIp;
+
+  return {
+    currentIp: validIp,
+    currentMask: maskMatch ? maskMatch[1].trim() : null,
+    gateway: gwMatch ? gwMatch[1].trim() : null,
+    primaryDns: dns1Match ? dns1Match[1].trim() : null,
+    secondaryDns: dns2Match ? dns2Match[1].trim() : null,
+    status: statusMatch ? statusMatch[1].trim() : null,
+    username:
+      userMatch && userMatch[1].trim() && userMatch[1].trim().toLowerCase() !== 'n/a'
+        ? userMatch[1].trim()
+        : null,
+    password:
+      passMatch && passMatch[1].trim() && passMatch[1].trim().toLowerCase() !== 'n/a'
+        ? passMatch[1].trim()
+        : null,
+    cvlan:
+      cvlanMatch && parseInt(cvlanMatch[1], 10) > 0
+        ? parseInt(cvlanMatch[1], 10)
+        : null,
+    macAddress: macMatch ? macMatch[1].trim() : null,
+    mode: modeMatch ? modeMatch[1].trim() : null,
+  };
+}
+
+/**
+ * 2d. Multi-ONU WAN IP Parser untuk batch `show gpon remote-onu wan-ip gpon-onu_1/B/P:I`
+ */
+export function parseZteMultiWanIpOutput(
+  rawOutput: string
+): Map<string, WanIpParsed> {
+  const map = new Map<string, WanIpParsed>();
+  const regex =
+    /show\s+gpon\s+remote-onu\s+wan-ip\s+(gpon-onu_\d+\/\d+\/\d+:\d+)([\s\S]*?)(?=show\s+gpon\s+remote-onu\s+wan-ip|show\s+pon\s+power|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(rawOutput)) !== null) {
+    const key = m[1].trim().toLowerCase();
+    const parsed = parseZteWanIpOutput(m[2]);
+    map.set(key, parsed);
+  }
+  return map;
+}
+
+/**
+ * 2e. Parser Tabel Redaman Optik per Port PON:
+ * `show pon power onu-rx gpon-olt_1/3/2` atau `show pon power olt-rx gpon-olt_1/3/2`
+ */
+export function parseZtePonPowerRxTable(
+  rawOutput: string
+): Map<string, number | null> {
+  const map = new Map<string, number | null>();
+  const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const lines = cleaned.split(/[\r\n]+/);
+  const rowRegex =
+    /^\s*(gpon-onu_\d+\/\d+\/\d+:\d+)\s+([+-]?\d+(?:\.\d+)?(?=\s*\(dbm\))|N\/A|no\s+signal)/i;
+
+  for (const line of lines) {
+    const m = line.match(rowRegex);
+    if (!m) continue;
+    const key = m[1].trim().toLowerCase();
+    const valStr = m[2].trim().toLowerCase();
+    if (valStr === 'n/a' || valStr.includes('no signal')) {
+      map.set(key, null);
+    } else {
+      const num = parseFloat(valStr);
+      map.set(key, isNaN(num) ? null : num);
+    }
+  }
+  return map;
 }
 
 /**
@@ -208,22 +438,26 @@ export function parseZteOpticalAttenuation(rawOutput: string): OpticalPowerParse
   };
 
   const upRegex =
-    /up\s+Rx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*\(dbm\)\s+Tx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*\(dbm\)\s+([+-]?\d+(?:\.\d+)?|N\/A)\s*\(db\)/i;
+    /up\s+Rx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A|no\s+signal)\s*(?:\(dbm\))?\s+Tx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*(?:\(dbm\))?\s+([+-]?\d+(?:\.\d+)?|N\/A)/i;
 
   const downRegex =
-    /down\s+Tx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*\(dbm\)\s+Rx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*\(dbm\)\s+([+-]?\d+(?:\.\d+)?|N\/A)\s*\(db\)/i;
+    /down\s+Tx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*(?:\(dbm\))?\s+Rx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A|no\s+signal)\s*(?:\(dbm\))?\s+([+-]?\d+(?:\.\d+)?|N\/A)/i;
 
   const upMatch = rawOutput.match(upRegex);
   if (upMatch) {
-    result.oltRxDbm = upMatch[1] !== 'N/A' ? parseFloat(upMatch[1]) : -40.0;
-    result.onuTxDbm = upMatch[2] !== 'N/A' ? parseFloat(upMatch[2]) : 0.0;
+    const val = upMatch[1].trim().toLowerCase();
+    result.oltRxDbm =
+      val !== 'n/a' && !val.includes('no signal') ? parseFloat(upMatch[1]) : null;
+    result.onuTxDbm = upMatch[2] !== 'N/A' ? parseFloat(upMatch[2]) : null;
     result.upAttenuationDb = upMatch[3] !== 'N/A' ? parseFloat(upMatch[3]) : null;
   }
 
   const downMatch = rawOutput.match(downRegex);
   if (downMatch) {
-    result.oltTxDbm = downMatch[1] !== 'N/A' ? parseFloat(downMatch[1]) : 5.2;
-    result.onuRxDbm = downMatch[2] !== 'N/A' ? parseFloat(downMatch[2]) : -40.0;
+    result.oltTxDbm = downMatch[1] !== 'N/A' ? parseFloat(downMatch[1]) : null;
+    const val = downMatch[2].trim().toLowerCase();
+    result.onuRxDbm =
+      val !== 'n/a' && !val.includes('no signal') ? parseFloat(downMatch[2]) : null;
     result.downAttenuationDb = downMatch[3] !== 'N/A' ? parseFloat(downMatch[3]) : null;
   }
 
@@ -1217,13 +1451,14 @@ export function parseZteRunningConfig(rawConfig: string): ParsedRunningConfigSum
   }
 
   // 3. Parse `interface gpon-olt_1/x/y` for ONU registrations
-  const oltBlockRegex = /interface gpon-olt_(\d+)\/(\d+)\/(\d+)([\s\S]*?)!/g;
+  const oltBlockRegex =
+    /interface gpon-olt_(\d+)\/(\d+)\/(\d+)([\s\S]*?)(?=!|\bend\b|interface\s+|pon-onu-mng\s+|$)/gi;
   let ob: RegExpExecArray | null;
   while ((ob = oltBlockRegex.exec(rawConfig)) !== null) {
     const board = parseInt(ob[2], 10);
     const port = parseInt(ob[3], 10);
     const body = ob[4];
-    const onuLineRegex = /onu\s+(\d+)\s+type\s+(\S+)\s+sn\s+(\S+)/g;
+    const onuLineRegex = /onu\s+(\d+)\s+type\s+(\S+)\s+sn\s+(\S+)/gi;
     let ol: RegExpExecArray | null;
     while ((ol = onuLineRegex.exec(body)) !== null) {
       const onuIndex = parseInt(ol[1], 10);
@@ -1233,8 +1468,8 @@ export function parseZteRunningConfig(rawConfig: string): ParsedRunningConfigSum
         port,
         onuIndex,
         onuType: ol[2].trim(),
-        serialNumber: ol[3].trim(),
-        name: `ONU-${ol[3].trim()}`,
+        serialNumber: ol[3].trim().toUpperCase(),
+        name: `ONU-${ol[3].trim().toUpperCase()}`,
         description: 'none',
         tcontProfile: 'SMARTOLT-1G-UP',
         trafficProfile: 'SMARTOLT-1G-DOWN',
@@ -1249,13 +1484,37 @@ export function parseZteRunningConfig(rawConfig: string): ParsedRunningConfigSum
     }
   }
 
-  // 4. Parse `interface gpon-onu_1/x/y:z`
-  const onuIfRegex = /interface gpon-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)!/g;
+  // 4. Parse `interface gpon-onu_1/x/y:z` (also auto-create entry if oltBlock was not in snippet)
+  const onuIfRegex =
+    /interface gpon-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)(?=!|\bend\b|interface\s+|pon-onu-mng\s+|$)/gi;
   let oib: RegExpExecArray | null;
   while ((oib = onuIfRegex.exec(rawConfig)) !== null) {
-    const key = `${oib[1]}/${oib[2]}/${oib[3]}:${oib[4]}`;
-    const existing = onuMap.get(key);
-    if (!existing) continue;
+    const board = parseInt(oib[2], 10);
+    const port = parseInt(oib[3], 10);
+    const onuIndex = parseInt(oib[4], 10);
+    const key = `${oib[1]}/${board}/${port}:${onuIndex}`;
+    let existing = onuMap.get(key);
+    if (!existing) {
+      existing = {
+        board,
+        port,
+        onuIndex,
+        onuType: 'ALL',
+        serialNumber: `ONU-${board}-${port}-${onuIndex}`,
+        name: `ONU-${board}-${port}-${onuIndex}`,
+        description: 'none',
+        tcontProfile: 'SMARTOLT-1G-UP',
+        trafficProfile: 'SMARTOLT-1G-DOWN',
+        vlanId: 101,
+        extraFlowVlans: [],
+        pppoeUsername: null,
+        pppoePassword: null,
+        tr069Enabled: false,
+        tr069AcsUrl: null,
+        wanRemoteRestrictedIp: null,
+      };
+      onuMap.set(key, existing);
+    }
     const body = oib[5];
     const nameMatch = body.match(/^\s*name\s+([^\r\n]+)/m);
     if (nameMatch) existing.name = nameMatch[1].trim();
@@ -1276,12 +1535,36 @@ export function parseZteRunningConfig(rawConfig: string): ParsedRunningConfigSum
   }
 
   // 5. Parse `pon-onu-mng gpon-onu_1/x/y:z`
-  const mngRegex = /pon-onu-mng gpon-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)!/g;
+  const mngRegex =
+    /pon-onu-mng gpon-onu_(\d+)\/(\d+)\/(\d+):(\d+)([\s\S]*?)(?=!|\bend\b|interface\s+|pon-onu-mng\s+|$)/gi;
   let mb: RegExpExecArray | null;
   while ((mb = mngRegex.exec(rawConfig)) !== null) {
-    const key = `${mb[1]}/${mb[2]}/${mb[3]}:${mb[4]}`;
-    const existing = onuMap.get(key);
-    if (!existing) continue;
+    const board = parseInt(mb[2], 10);
+    const port = parseInt(mb[3], 10);
+    const onuIndex = parseInt(mb[4], 10);
+    const key = `${mb[1]}/${board}/${port}:${onuIndex}`;
+    let existing = onuMap.get(key);
+    if (!existing) {
+      existing = {
+        board,
+        port,
+        onuIndex,
+        onuType: 'ALL',
+        serialNumber: `ONU-${board}-${port}-${onuIndex}`,
+        name: `ONU-${board}-${port}-${onuIndex}`,
+        description: 'none',
+        tcontProfile: 'SMARTOLT-1G-UP',
+        trafficProfile: 'SMARTOLT-1G-DOWN',
+        vlanId: 101,
+        extraFlowVlans: [],
+        pppoeUsername: null,
+        pppoePassword: null,
+        tr069Enabled: false,
+        tr069AcsUrl: null,
+        wanRemoteRestrictedIp: null,
+      };
+      onuMap.set(key, existing);
+    }
     const body = mb[5];
     const pppoeMatch = body.match(/pppoe\s+1\s+nat\s+enable\s+user\s+(\S+)\s+password\s+(\S+)/);
     if (pppoeMatch) {

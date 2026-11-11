@@ -5,12 +5,16 @@ import {
 } from '../services/mockDatabase';
 import {
   generateAuthorizeCliScript,
+  generateUpdateOnuModeCliScript,
+  generateUpdatePppoeCliScript,
   generateRebootCliScript,
   generateFactoryResetCliScript,
   generateDeleteOnuCliScript,
   generateTr069CwmpRpcPreview,
   generateOnuEthPortCliScript,
   parseZteOpticalAttenuation,
+  parseZteOnuDetailInfo,
+  parseZteWanIpOutput,
 } from '../services/oltEngine';
 import { UpdateOnuModeModal } from './UpdateOnuModeModal';
 import {
@@ -27,6 +31,8 @@ import {
   Sliders,
   Gauge,
   Wifi,
+  AlertTriangle,
+  Power,
   X,
 } from 'lucide-react';
 
@@ -57,7 +63,12 @@ interface OnuDetailViewProps {
       | 'POLL_SIGNAL',
     cliScript: string,
     updatedFields?: Partial<OnuRecord>
-  ) => void;
+  ) => Promise<{
+    ok: boolean;
+    output: string;
+    error?: string;
+    durationMs?: number;
+  }> | void;
 }
 
 export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
@@ -73,11 +84,13 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     db.olts[0] || {
       id: onu.olt_id || 1,
       name: `OLT-${onu.olt_id || 1}`,
+      ip_address: '103.42.242.71',
+      telnet_port: 2333,
       firmware_version: 'V2.1.0' as const,
     };
   const vlan =
     db.vlans.find((v) => v.id === onu.vlan_id || v.vlan_id === onu.vlan_id) ||
-    db.vlans[1] ||
+    db.vlans.find((v) => v.vlan_id === 101) ||
     db.vlans[0] || {
       id: 101,
       vlan_id: 101,
@@ -95,12 +108,20 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     db.tr069_profiles.find((p) => p.id === onu.tr069_profile_id) ||
     db.tr069_profiles[0];
 
-  const [showPppoeUser, setShowPppoeUser] = useState(false);
-  const [showPppoePass, setShowPppoePass] = useState(false);
+  const [showPppoeUser, setShowPppoeUser] = useState(true);
+  const [showPppoePass, setShowPppoePass] = useState(true);
+  const [editingInlinePppoe, setEditingInlinePppoe] = useState(false);
+  const [inlinePppoeUser, setInlinePppoeUser] = useState(
+    onu.pppoe_username || onu.customer_name || 'test'
+  );
+  const [inlinePppoePass, setInlinePppoePass] = useState(
+    onu.pppoe_password || 'jetcyber'
+  );
+  const [isPushingToOlt, setIsPushingToOlt] = useState(false);
   const [showUpdateModeModal, setShowUpdateModeModal] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [vipCustomer, setVipCustomer] = useState(false);
-  const [customProfile, setCustomProfile] = useState(false);
+  const [customProfile, setCustomProfile] = useState(true);
   const [livePolling, setLivePolling] = useState(false);
   const [trafficPeriod, setTrafficPeriod] = useState<
     'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
@@ -127,8 +148,9 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const [movePort, setMovePort] = useState(onu.port);
   const [moveIndex, setMoveIndex] = useState(onu.onu_index || 8);
 
-  const [metaName, setMetaName] = useState(onu.customer_name || 'RATMI');
-  const [metaAddress, setMetaAddress] = useState(onu.address || 'None');
+  const [metaName, setMetaName] = useState(onu.customer_name || onu.serial_number);
+  const [metaSn, setMetaSn] = useState(onu.serial_number);
+  const [metaAddress, setMetaAddress] = useState(onu.address || 'none');
   const [metaContact, setMetaContact] = useState(onu.contact || 'None');
   const [metaExtId, setMetaExtId] = useState(
     onu.external_id || onu.serial_number
@@ -136,6 +158,44 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const [metaZoneId, setMetaZoneId] = useState(onu.zone_id || 1);
   const [metaOdbId, setMetaOdbId] = useState<number>(onu.odb_id || 1);
   const [metaOdbPort, setMetaOdbPort] = useState<number>(onu.odb_port || 3);
+  const [metaPppoeUser, setMetaPppoeUser] = useState(
+    onu.pppoe_username || onu.customer_name || onu.serial_number
+  );
+  const [metaPppoePass, setMetaPppoePass] = useState(
+    onu.pppoe_password || 'jetcyber'
+  );
+  const [metaRebindAll, setMetaRebindAll] = useState<boolean>(false);
+
+  // Keep inline PPPoE & metadata fields synced when `onu` prop updates
+  useEffect(() => {
+    setInlinePppoeUser(onu.pppoe_username || onu.customer_name || onu.serial_number);
+    setInlinePppoePass(onu.pppoe_password || 'jetcyber');
+    setMetaName(onu.customer_name || onu.serial_number);
+    setMetaSn(onu.serial_number);
+    setMetaAddress(onu.address || 'none');
+    setMetaContact(onu.contact || 'None');
+    setMetaExtId(onu.external_id || onu.serial_number);
+    setMetaZoneId(onu.zone_id || 1);
+    setMetaOdbId(onu.odb_id || 1);
+    setMetaOdbPort(onu.odb_port || 3);
+    setMetaPppoeUser(onu.pppoe_username || onu.customer_name || onu.serial_number);
+    setMetaPppoePass(onu.pppoe_password || 'jetcyber');
+  }, [onu]);
+
+  const openMetadataDialog = (rebindDefault = false) => {
+    setMetaName(onu.customer_name || onu.serial_number);
+    setMetaSn(onu.serial_number);
+    setMetaAddress(onu.address || 'none');
+    setMetaContact(onu.contact || 'None');
+    setMetaExtId(onu.external_id || onu.serial_number);
+    setMetaZoneId(onu.zone_id || 1);
+    setMetaOdbId(onu.odb_id || 1);
+    setMetaOdbPort(onu.odb_port || 3);
+    setMetaPppoeUser(onu.pppoe_username || onu.customer_name || onu.serial_number);
+    setMetaPppoePass(onu.pppoe_password || 'jetcyber');
+    setMetaRebindAll(rebindDefault);
+    setActiveEditDialog('METADATA');
+  };
 
   const [mgmtIpInput, setMgmtIpInput] = useState(
     onu.mgmt_ip || '10.100.3.8'
@@ -145,7 +205,7 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     onu.speed_profile_id || 1
   );
   const [wifiSsidInput, setWifiSsidInput] = useState(
-    onu.wifi_ssid || 'RATMI_JETCYBER'
+    onu.wifi_ssid || `${onu.customer_name || 'JETCYBER'}_5G`
   );
   const [wifiPassInput, setWifiPassInput] = useState(
     onu.wifi_password || 'jetcyber'
@@ -167,35 +227,70 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const onuInterface = `gpon-onu_1/${onu.board}/${onu.port}:${onu.onu_index || 1}`;
   const distanceKm = (onu.distance_m / 1000).toFixed(2);
 
-  // Live Polling Effect when LIVE! button is active
-  useEffect(() => {
-    if (!livePolling) return;
-    const timer = setInterval(() => {
-      const nextOnuRx = Number(
-        ((onu.onu_rx_dbm ?? -23.19) + (Math.random() * 0.16 - 0.08)).toFixed(2)
-      );
-      const nextOltRx = Number(
-        ((onu.olt_rx_dbm ?? -30.87) + (Math.random() * 0.16 - 0.08)).toFixed(2)
-      );
-      onExecuteAction(
-        onu.id,
-        'POLL_SIGNAL',
-        `show pon power attenuation ${onuInterface}`,
-        {
-          onu_rx_dbm: nextOnuRx,
-          olt_rx_dbm: nextOltRx,
-        }
-      );
-    }, 2000);
-    return () => clearInterval(timer);
-  }, [livePolling, onu.id, onu.onu_rx_dbm, onu.olt_rx_dbm, onuInterface, onExecuteAction]);
-
-  const handleGetStatus = async () => {
-    const cli = `show gpon onu detail-info ${onuInterface}\nshow pon power attenuation ${onuInterface}`;
+  // Helper that immediately pushes CLI changes to the OLT via Telnet and displays live output
+  const executeAndDisplayLivePush = async (
+    actionType:
+      | 'UPDATE_ONU_MODE'
+      | 'TR069_PUSH'
+      | 'REBOOT'
+      | 'RESYNC_CONFIG'
+      | 'FACTORY_RESET'
+      | 'UPDATE_PPPOE'
+      | 'DELETE_ONU'
+      | 'POLL_SIGNAL',
+    cliScript: string,
+    updatedFields?: Partial<OnuRecord>,
+    actionTitle?: string
+  ) => {
+    const titleLabel = actionTitle || `${actionType} — ${onuInterface}`;
+    setIsPushingToOlt(true);
     setActiveConsoleOutput({
-      title: `Get status — ${onuInterface} (Connecting to ${olt.ip_address}:${olt.telnet_port}...)`,
-      content: `Executing on ${olt.name} (${olt.ip_address}:${olt.telnet_port}):\n${cli}\n\nWaiting for OLT response...`,
+      title: `⏳ Pushing to OLT (${olt.ip_address}:${olt.telnet_port}) — ${titleLabel}`,
+      content: `[Connecting via Telnet to ${olt.ip_address}:${olt.telnet_port}...]\n\n--- Commands Queued ---\n${cliScript}`,
     });
+
+    try {
+      const result = await onExecuteAction(
+        onu.id,
+        actionType,
+        cliScript,
+        updatedFields
+      );
+      if (result && typeof result === 'object') {
+        if (result.ok) {
+          setActiveConsoleOutput({
+            title: `✓ LIVE OLT PUSH SUCCESS (${result.durationMs || 0}ms) — ${titleLabel}`,
+            content: `--- Executed CLI Script ---\n${cliScript}\n\n--- Live OLT Terminal Response (${olt.ip_address}:${olt.telnet_port}) ---\n${result.output || '[OK]'}`,
+          });
+        } else {
+          setActiveConsoleOutput({
+            title: `⚠ OLT Telnet Push Warning — ${titleLabel}`,
+            content: `Error: ${result.error || 'Failed to push via Telnet'}\n\n--- CLI Script ---\n${cliScript}\n\n--- Partial Output ---\n${result.output || ''}`,
+          });
+        }
+      }
+    } finally {
+      setIsPushingToOlt(false);
+    }
+  };
+
+  const [onlineDuration, setOnlineDuration] = useState<string>('1h 33m');
+  const [refreshingWanIp, setRefreshingWanIp] = useState<boolean>(false);
+
+  const pollLiveOnuStatusAndWanIp = async (showInConsole = false) => {
+    const cliCommands = [
+      `show gpon onu detail-info ${onuInterface}`,
+      `show pon power attenuation ${onuInterface}`,
+      `show gpon remote-onu wan-ip ${onuInterface}`,
+    ];
+    const cliJoined = cliCommands.join('\n');
+
+    if (showInConsole) {
+      setActiveConsoleOutput({
+        title: `Get status & WAN IP — ${onuInterface} (Connecting to ${olt.ip_address}:${olt.telnet_port}...)`,
+        content: `Executing on ${olt.name} (${olt.ip_address}:${olt.telnet_port}):\n${cliJoined}\n\nWaiting for OLT response...`,
+      });
+    }
 
     try {
       const resp = await fetch('/api/telnet/exec', {
@@ -203,50 +298,117 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           oltId: olt.id,
-          commands: [
-            `show gpon onu detail-info ${onuInterface}`,
-            `show pon power attenuation ${onuInterface}`,
-          ],
+          commands: cliCommands,
         }),
       });
       const data = await resp.json();
       if (data.ok && data.output) {
+        const parsedDetail = parseZteOnuDetailInfo(data.output);
         const parsedPower = parseZteOpticalAttenuation(data.output);
-        const updatedPower: Partial<OnuRecord> = {};
-        if (parsedPower.onuRxDbm !== null) updatedPower.onu_rx_dbm = parsedPower.onuRxDbm;
-        if (parsedPower.oltRxDbm !== null) updatedPower.olt_rx_dbm = parsedPower.oltRxDbm;
-        if (parsedPower.onuTxDbm !== null) updatedPower.onu_tx_dbm = parsedPower.onuTxDbm;
-        onExecuteAction(onu.id, 'POLL_SIGNAL', cli, updatedPower);
-        setActiveConsoleOutput({
-          title: `Get status (LIVE OLT) — ${onuInterface}`,
-          content: data.output,
-        });
+        const parsedWan = parseZteWanIpOutput(data.output);
+
+        const updatedFields: Partial<OnuRecord> = {};
+        if (parsedDetail.phaseState) {
+          updatedFields.phase_state = parsedDetail.phaseState;
+        }
+        if (parsedDetail.onlineDuration && parsedDetail.onlineDuration !== '0000h:00m:00s') {
+          setOnlineDuration(parsedDetail.onlineDuration);
+        }
+        if (parsedDetail.distanceM !== null) {
+          updatedFields.distance_m = parsedDetail.distanceM;
+        }
+        if (parsedDetail.lastAuthTime) {
+          updatedFields.last_online_at = parsedDetail.lastAuthTime;
+        }
+        if (parsedDetail.lastOfflineReason) {
+          updatedFields.last_offline_reason = parsedDetail.lastOfflineReason;
+        }
+
+        if (parsedDetail.phaseState === 'working') {
+          if (parsedPower.onuRxDbm !== null) updatedFields.onu_rx_dbm = parsedPower.onuRxDbm;
+          if (parsedPower.oltRxDbm !== null) updatedFields.olt_rx_dbm = parsedPower.oltRxDbm;
+          if (parsedPower.onuTxDbm !== null) updatedFields.onu_tx_dbm = parsedPower.onuTxDbm;
+        } else {
+          updatedFields.onu_rx_dbm = null;
+          updatedFields.olt_rx_dbm = null;
+        }
+
+        // Real PPPoE WAN IP assigned by MikroTik (from show gpon remote-onu wan-ip)
+        if (parsedWan.currentIp) {
+          updatedFields.ip_address = parsedWan.currentIp;
+        } else if (
+          onu.ip_address &&
+          onu.ip_address.startsWith('10.0.183.')
+        ) {
+          // Clear legacy fake placeholder IP if real WAN IP is 0.0.0.0 / unassigned
+          updatedFields.ip_address = null;
+        }
+        if (parsedWan.username && !onu.pppoe_username) {
+          updatedFields.pppoe_username = parsedWan.username;
+        }
+
+        void onExecuteAction(onu.id, 'POLL_SIGNAL', cliJoined, updatedFields);
+        if (showInConsole) {
+          setActiveConsoleOutput({
+            title: `Get status & Real WAN IP (LIVE OLT) — ${onuInterface}`,
+            content: data.output,
+          });
+        }
         return;
       }
     } catch {
-      // Fallback below if OLT is offline
+      // Fallback below if OLT is temporarily unreachable
     }
 
-    onExecuteAction(onu.id, 'POLL_SIGNAL', cli);
-    setActiveConsoleOutput({
-      title: `Get status — ${onuInterface}`,
-      content: `${olt.name}# show gpon onu detail-info ${onuInterface}
+    if (showInConsole) {
+      setActiveConsoleOutput({
+        title: `Get status — ${onuInterface}`,
+        content: `${olt.name}# show gpon onu detail-info ${onuInterface}
 ONU interface:         ${onuInterface}
   Name:                ${onu.customer_name || onu.serial_number}
-  Type:                ${onu.onu_type}
+  Type:                ALL
   State:               ready
   Admin state:         enable
   Phase state:         ${onu.phase_state}
   Serial number:       ${onu.serial_number}
   ONU Distance:        ${onu.distance_m}m
-  Online Duration:     01h 33m 48s
+  Online Duration:     ${onlineDuration}
 
-${olt.name}# show pon power attenuation ${onuInterface}
-           OLT                  ONU              Attenuation
-----------------------------------------------------------------
-up      Rx :${(onu.olt_rx_dbm ?? -24.8).toFixed(3)}(dbm)      Tx :2.350(dbm)        27.150(db)
-down    Tx :10.548(dbm)       Rx :${(onu.onu_rx_dbm ?? -21.5).toFixed(3)}(dbm)      32.048(db)`,
-    });
+${olt.name}# show gpon remote-onu wan-ip ${onuInterface}
+WAN index:             1
+Mode:                  PPPoE
+Status:                ${onu.ip_address ? 'connected' : 'connecting'}
+Current IP:            ${onu.ip_address || '0.0.0.0'}
+Username:              ${onu.pppoe_username || onu.customer_name || onu.serial_number}`,
+      });
+    }
+  };
+
+  // Automatically fetch real-time status, signal & MikroTik WAN IP when viewing this ONU
+  useEffect(() => {
+    void pollLiveOnuStatusAndWanIp(false);
+  }, [onu.id, onuInterface]);
+
+  // Live Polling Effect when LIVE! button is active
+  useEffect(() => {
+    if (!livePolling) return;
+    const timer = setInterval(() => {
+      void pollLiveOnuStatusAndWanIp(false);
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [livePolling, onu.id, onuInterface]);
+
+  const handleGetStatus = async () => {
+    await pollLiveOnuStatusAndWanIp(true);
+  };
+
+  const handleRefreshWanIp = async () => {
+    setRefreshingWanIp(true);
+    try {
+      await pollLiveOnuStatusAndWanIp(true);
+    } finally {
+      setRefreshingWanIp(false);
+    }
   };
 
   const handleShowRunningConfig = async () => {
@@ -255,9 +417,9 @@ down    Tx :10.548(dbm)       Rx :${(onu.onu_rx_dbm ?? -21.5).toFixed(3)}(dbm)  
       ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
       onuIndex: onu.onu_index || 1,
       serialNumber: onu.serial_number,
-      onuType: onu.onu_type,
+      onuType: 'ALL',
       customerName: onu.customer_name || onu.serial_number,
-      address: onu.address || 'None',
+      address: onu.address || 'none',
       tcontProfile: tcontProfile?.profile_name || 'SMARTOLT-1G-UP',
       speedProfile: speedProfile?.profile_name || 'SMARTOLT-1G-DOWN',
       vlanId: vlan?.vlan_id || 101,
@@ -265,7 +427,7 @@ down    Tx :10.548(dbm)       Rx :${(onu.onu_rx_dbm ?? -21.5).toFixed(3)}(dbm)  
       wanMode: onu.wan_mode,
       configMethod: onu.config_method,
       wanRemoteAccess: onu.wan_remote_access,
-      pppoeUsername: onu.pppoe_username || `USER-${onu.serial_number.slice(-4)}`,
+      pppoeUsername: onu.pppoe_username || onu.customer_name || onu.serial_number,
       pppoePassword: onu.pppoe_password || 'jetcyber',
       tr069Enabled: onu.config_method === 'TR069',
       tr069AcsUrl: tr069Profile?.acs_url,
@@ -273,7 +435,7 @@ down    Tx :10.548(dbm)       Rx :${(onu.onu_rx_dbm ?? -21.5).toFixed(3)}(dbm)  
       tr069AcsPassword: tr069Profile?.acs_password,
     });
     setActiveConsoleOutput({
-      title: `Show running-config — ${onuInterface}`,
+      title: `Show running-config — ${onuInterface} (Fetching from OLT...)`,
       content: script,
     });
 
@@ -337,90 +499,142 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
   };
 
   const handleTr069Push = () => {
-    const rpcPayload = generateTr069CwmpRpcPreview({
+    const acsUrl = tr069Profile?.acs_url || 'http://103.42.242.66:7547';
+    const acsUser = tr069Profile?.acs_username || 'SmartOLT';
+    const acsPass = tr069Profile?.acs_password || 'SmartOLT';
+    const cli = [
+      `configure terminal`,
+      `interface ${onuInterface}`,
+      `  tcont 2 profile SMARTOLT-VOIPMNG-10M`,
+      `  gemport 2 tcont 2`,
+      `  gemport 2 traffic-limit downstream SMARTOLT-VOIPMNG-10M`,
+      `  service-port 2 vport 2 user-vlan 100 vlan 100`,
+      `exit`,
+      `pon-onu-mng ${onuInterface}`,
+      `  flow 2 pri 2 vlan 100`,
+      `  gemport 2 flow 2`,
+      `  switchport-bind switch_0/1 iphost 2`,
+      `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
+      `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
+      `  vlan-filter iphost 2 pri 2 vlan 100`,
+      `  tr069-mgmt 1 state unlock`,
+      `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
+      `  tr069-mgmt 1 tag pri 2 vlan 100`,
+      `exit`,
+      `end`,
+      `write`,
+    ].join('\n');
+
+    const rpcPreview = generateTr069CwmpRpcPreview({
       serialNumber: onu.serial_number,
       vlanId: vlan?.vlan_id || 101,
       onuMode: onu.onu_mode || 'Routing',
       wanMode: onu.wan_mode || 'PPPOE',
-      pppoeUsername: onu.pppoe_username || 'RATMI-010111',
+      pppoeUsername: onu.pppoe_username || onu.customer_name || onu.serial_number,
       pppoePassword: onu.pppoe_password || 'jetcyber',
       wanRemoteAccess:
         onu.wan_remote_access || 'Enabled from everywhere in the internet',
-      acsUrl: tr069Profile?.acs_url || 'http://acs.jetcybernet.id:7547/cwmp',
+      acsUrl,
       periodicInterval: tr069Profile?.periodic_inform_interval || 300,
-      wifiSsid: onu.wifi_ssid || 'RATMI_JETCYBER',
-      wifiPassword: onu.wifi_password || 'jetcyber',
+      wifiSsid: onu.wifi_ssid || undefined,
+      wifiPassword: onu.wifi_password || undefined,
     });
-    onExecuteAction(onu.id, 'TR069_PUSH', rpcPayload, {
-      tr069_status: 'ACTIVE_INFORMING',
-      tr069_last_inform: 'Today 16:45:00',
-    });
-    setActiveConsoleOutput({
-      title: `TR-069 CWMP ACS Inform & SetParameterValues — ${onu.serial_number}`,
-      content: rpcPayload,
-    });
+
+    void executeAndDisplayLivePush(
+      'TR069_PUSH',
+      cli,
+      {
+        config_method: 'TR069',
+        tr069_status: 'ACTIVE_INFORMING',
+        tr069_last_inform: new Date().toISOString().slice(0, 19).replace('T', ' '),
+      },
+      `TR-069 CWMP & OMCI Push (${onu.serial_number})\n${rpcPreview}`
+    );
   };
 
   const handleReboot = () => {
     const cli = generateRebootCliScript(
       `gpon-olt_1/${onu.board}/${onu.port}`,
-      onu.onu_index || 8
+      onu.onu_index || 1
     );
-    onExecuteAction(onu.id, 'REBOOT', cli);
-    setActiveConsoleOutput({
-      title: `Reboot ONU — ${onuInterface}`,
-      content: cli,
-    });
+    void executeAndDisplayLivePush('REBOOT', cli, undefined, `Reboot ONU — ${onuInterface}`);
   };
 
   const handleResync = () => {
-    const script = generateAuthorizeCliScript({
+    const script = generateUpdateOnuModeCliScript({
       firmwareVersion: olt.firmware_version,
       ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
       onuIndex: onu.onu_index || 1,
       serialNumber: onu.serial_number,
-      onuType: onu.onu_type,
-      customerName: onu.customer_name || onu.serial_number,
-      address: onu.address || 'None',
-      tcontProfile: tcontProfile?.profile_name || 'SMARTOLT-1G-UP',
-      speedProfile: speedProfile?.profile_name || 'SMARTOLT-1G-DOWN',
+      customerName: onu.customer_name || onu.pppoe_username || onu.serial_number,
+      address: onu.address || 'none',
+      rebindTypeAll: true,
       vlanId: vlan?.vlan_id || 101,
-      onuMode: onu.onu_mode,
-      wanMode: onu.wan_mode,
-      configMethod: onu.config_method,
-      wanRemoteAccess: onu.wan_remote_access,
-      pppoeUsername: onu.pppoe_username || `USER-${onu.serial_number.slice(-4)}`,
+      onuMode: onu.onu_mode || 'Routing',
+      wanMode: onu.wan_mode || 'PPPOE',
+      configMethod: onu.config_method || 'OMCI',
+      wanRemoteAccess:
+        onu.wan_remote_access || 'Enabled from everywhere in the internet',
+      pppoeUsername: onu.pppoe_username || onu.customer_name || onu.serial_number,
       pppoePassword: onu.pppoe_password || 'jetcyber',
-      tr069Enabled: onu.config_method === 'TR069',
       tr069AcsUrl: tr069Profile?.acs_url,
+      tr069AcsUsername: tr069Profile?.acs_username,
+      tr069AcsPassword: tr069Profile?.acs_password,
     });
-    onExecuteAction(onu.id, 'RESYNC_CONFIG', script, {
-      phase_state: 'working',
-    });
-    setActiveConsoleOutput({
-      title: `Resync config — ${onuInterface}`,
-      content: script,
-    });
+    void executeAndDisplayLivePush(
+      'RESYNC_CONFIG',
+      script,
+      {
+        onu_type: 'ALL',
+        phase_state: 'working',
+      },
+      `Full Resync Config (type ALL + PPPoE) — ${onuInterface}`
+    );
   };
 
   const handleRestoreDefaults = () => {
     const cli = generateFactoryResetCliScript(
       `gpon-olt_1/${onu.board}/${onu.port}`,
-      onu.onu_index || 8
+      onu.onu_index || 1
     );
-    onExecuteAction(onu.id, 'FACTORY_RESET', cli);
-    setActiveConsoleOutput({
-      title: `Restore defaults — ${onuInterface}`,
-      content: cli,
-    });
+    void executeAndDisplayLivePush(
+      'FACTORY_RESET',
+      cli,
+      undefined,
+      `Restore defaults — ${onuInterface}`
+    );
   };
 
   const handleDelete = () => {
     const cli = generateDeleteOnuCliScript(
       `gpon-olt_1/${onu.board}/${onu.port}`,
-      onu.onu_index || 8
+      onu.onu_index || 1
     );
-    onExecuteAction(onu.id, 'DELETE_ONU', cli);
+    void executeAndDisplayLivePush('DELETE_ONU', cli, undefined, `Delete ONU — ${onuInterface}`);
+  };
+
+  const handleInlinePppoePush = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanUser = inlinePppoeUser.trim().replace(/\s+/g, '-') || onu.serial_number;
+    const cleanPass = inlinePppoePass.trim().replace(/\s+/g, '') || 'jetcyber';
+    const cli = generateUpdatePppoeCliScript(
+      `gpon-olt_1/${onu.board}/${onu.port}`,
+      onu.onu_index || 1,
+      vlan?.vlan_id || 101,
+      cleanUser,
+      cleanPass,
+      onu.wan_remote_access || 'Enabled from everywhere in the internet'
+    );
+    setEditingInlinePppoe(false);
+    void executeAndDisplayLivePush(
+      'UPDATE_PPPOE',
+      cli,
+      {
+        pppoe_username: cleanUser,
+        pppoe_password: cleanPass,
+      },
+      `Push PPPoE (${cleanUser}) — ${onuInterface}`
+    );
   };
 
   return (
@@ -511,7 +725,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <span>{onu.serial_number}</span>
               <button
                 type="button"
-                onClick={() => setActiveEditDialog('METADATA')}
+                onClick={() => openMetadataDialog(true)}
                 className="font-sans text-sky-400 hover:underline"
               >
                 Edit
@@ -529,7 +743,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 <span>ALL (Original: F609V3.0)</span>
                 <button
                   type="button"
-                  onClick={() => setActiveEditDialog('METADATA')}
+                  onClick={() => openMetadataDialog(true)}
                   className="text-sky-400 hover:underline"
                 >
                   Change
@@ -568,7 +782,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <span>{zone?.name || 'MUARA LEBAK - RK O1'}</span>
               <button
                 type="button"
-                onClick={() => setActiveEditDialog('METADATA')}
+                onClick={() => openMetadataDialog(false)}
                 className="text-sky-400 hover:underline"
               >
                 Change
@@ -587,7 +801,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               </span>
               <button
                 type="button"
-                onClick={() => setActiveEditDialog('METADATA')}
+                onClick={() => openMetadataDialog(false)}
                 className="text-sky-400 hover:underline"
               >
                 Change
@@ -602,7 +816,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <span>None</span>
               <button
                 type="button"
-                onClick={() => setActiveEditDialog('METADATA')}
+                onClick={() => openMetadataDialog(false)}
                 className="text-sky-400 hover:underline"
               >
                 Change
@@ -617,7 +831,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <span className="font-semibold">{onu.customer_name || 'RATMI'}</span>
               <button
                 type="button"
-                onClick={() => setActiveEditDialog('METADATA')}
+                onClick={() => openMetadataDialog(false)}
                 className="text-sky-400 hover:underline"
               >
                 Change
@@ -634,7 +848,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <span>{onu.address || 'None'}</span>
               <button
                 type="button"
-                onClick={() => setActiveEditDialog('METADATA')}
+                onClick={() => openMetadataDialog(false)}
                 className="text-sky-400 hover:underline"
               >
                 Change
@@ -649,7 +863,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <span>{onu.contact || 'None'}</span>
               <button
                 type="button"
-                onClick={() => setActiveEditDialog('METADATA')}
+                onClick={() => openMetadataDialog(false)}
                 className="text-sky-400 hover:underline"
               >
                 Change
@@ -676,7 +890,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <span>{onu.external_id || onu.serial_number}</span>
               <button
                 type="button"
-                onClick={() => setActiveEditDialog('METADATA')}
+                onClick={() => openMetadataDialog(false)}
                 className="font-sans text-sky-400 hover:underline"
               >
                 Change
@@ -704,7 +918,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               </button>
               <button
                 type="button"
-                onClick={() => setActiveEditDialog('METADATA')}
+                onClick={() => openMetadataDialog(false)}
                 className="text-sky-400 hover:underline"
               >
                 Change
@@ -733,8 +947,30 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           {/* ONU Rear-Panel Port Graphic */}
           <div className="flex flex-wrap items-center gap-2 rounded border border-[#1e3a5f] bg-[#162942] px-4 py-3 shadow-inner">
             <div className="flex flex-col items-center rounded bg-slate-800 px-2.5 py-1.5">
-              <div className="h-4 w-5 rounded-xs border-2 border-emerald-400 bg-emerald-500/80" />
-              <span className="mt-1 text-[9px] font-bold text-emerald-300">PON</span>
+              <div
+                className={`h-4 w-5 rounded-xs border-2 ${
+                  onu.phase_state === 'working'
+                    ? 'border-emerald-400 bg-emerald-500/80'
+                    : onu.phase_state === 'LOS'
+                      ? 'border-red-500 bg-red-600/80 animate-pulse'
+                      : onu.phase_state === 'DyingGasp'
+                        ? 'border-amber-400 bg-amber-500/80'
+                        : 'border-slate-500 bg-slate-700'
+                }`}
+              />
+              <span
+                className={`mt-1 text-[9px] font-bold ${
+                  onu.phase_state === 'working'
+                    ? 'text-emerald-300'
+                    : onu.phase_state === 'LOS'
+                      ? 'text-red-400'
+                      : onu.phase_state === 'DyingGasp'
+                        ? 'text-amber-300'
+                        : 'text-slate-400'
+                }`}
+              >
+                PON
+              </span>
             </div>
             {['LAN1', 'LAN2', 'LAN3', 'LAN4'].map((lan, idx) => (
               <div
@@ -745,7 +981,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               >
                 <div
                   className={`h-4 w-5 rounded-xs border ${
-                    idx === 0
+                    idx === 0 && onu.phase_state === 'working'
                       ? 'border-amber-400 bg-amber-400/80'
                       : 'border-slate-500 bg-slate-700'
                   }`}
@@ -765,9 +1001,30 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               </div>
             ))}
             <div className="ml-auto flex items-center gap-2">
+              {isPushingToOlt && (
+                <span className="animate-pulse rounded bg-sky-600 px-2 py-1 text-[10px] font-bold text-white">
+                  Pushing to OLT...
+                </span>
+              )}
               <div className="flex flex-col items-center">
-                <div className="h-4 w-4 rounded-full border-2 border-slate-400 bg-slate-900" />
-                <span className="mt-1 text-[9px] text-slate-400">Power</span>
+                <div
+                  className={`h-4 w-4 rounded-full border-2 ${
+                    onu.phase_state === 'DyingGasp'
+                      ? 'border-red-500 bg-red-600/80 animate-pulse'
+                      : onu.phase_state === 'working'
+                        ? 'border-emerald-400 bg-emerald-500/80'
+                        : 'border-slate-400 bg-slate-900'
+                  }`}
+                />
+                <span
+                  className={`mt-1 text-[9px] ${
+                    onu.phase_state === 'DyingGasp'
+                      ? 'font-bold text-red-400'
+                      : 'text-slate-400'
+                  }`}
+                >
+                  Power
+                </span>
               </div>
             </div>
           </div>
@@ -779,12 +1036,29 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 Status
               </div>
               <div className="col-span-8 space-y-0.5 text-white">
-                <div className="flex items-center gap-3 font-semibold">
-                  <span className="flex items-center gap-1.5 text-emerald-400">
-                    <Wifi className="h-3.5 w-3.5" />
-                    {onu.phase_state === 'working' ? 'Online' : onu.phase_state}
-                  </span>
-                  <span>1h 33m</span>
+                <div className="flex flex-wrap items-center gap-3 font-semibold">
+                  {onu.phase_state === 'working' ? (
+                    <span className="flex items-center gap-1.5 text-emerald-400">
+                      <Wifi className="h-3.5 w-3.5" />
+                      Online
+                    </span>
+                  ) : onu.phase_state === 'DyingGasp' ? (
+                    <span className="flex items-center gap-1.5 text-amber-400">
+                      <Power className="h-3.5 w-3.5" />
+                      Power fail (DyingGasp)
+                    </span>
+                  ) : onu.phase_state === 'LOS' ? (
+                    <span className="flex items-center gap-1.5 text-red-400">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      LOS (Loss of Signal)
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1.5 text-slate-400">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      Offline ({onu.phase_state})
+                    </span>
+                  )}
+                  <span>{onu.phase_state === 'working' ? onlineDuration : '0h 00m'}</span>
                   <span>{distanceKm} km</span>
                   {livePolling && (
                     <span className="animate-pulse rounded bg-red-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
@@ -793,7 +1067,11 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                   )}
                 </div>
                 <div className="text-[11px] text-slate-400">
-                  (Last status change: {onu.last_online_at || '10-Nov-2026 15:05:57'})
+                  (Last status change: {onu.last_online_at || 'Just now'}
+                  {onu.last_offline_reason && onu.last_offline_reason !== 'None'
+                    ? ` · Cause: ${onu.last_offline_reason}`
+                    : ''}
+                  )
                 </div>
               </div>
             </div>
@@ -957,11 +1235,24 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 WAN setup mode
               </div>
               <div className="col-span-8 space-y-1 text-white">
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <span className="font-mono">
                     {onu.wan_mode === 'PPPOE' ? 'PPPoE' : onu.wan_mode} -{' '}
-                    {onu.ip_address || '10.0.183.225'}
+                    {onu.ip_address && !onu.ip_address.startsWith('10.0.183.') ? (
+                      <span className="font-bold text-emerald-300">{onu.ip_address}</span>
+                    ) : (
+                      <span className="text-amber-300">0.0.0.0 (Waiting PPPoE / MikroTik IP)</span>
+                    )}
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => void handleRefreshWanIp()}
+                    className="flex items-center gap-1 rounded border border-sky-500/40 bg-sky-950/60 px-2 py-0.5 text-[11px] font-semibold text-sky-300 hover:bg-sky-900"
+                    title="Query show gpon remote-onu wan-ip on OLT to read real MikroTik PPPoE IP"
+                  >
+                    <RefreshCw className={`h-3 w-3 ${refreshingWanIp ? 'animate-spin' : ''}`} />
+                    Refresh IP
+                  </button>
                   <button
                     type="button"
                     onClick={() => setShowUpdateModeModal(true)}
@@ -976,53 +1267,131 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               </div>
             </div>
 
-            {/* PPPoE username */}
-            <div className="grid grid-cols-12 items-center py-2">
-              <div className="col-span-4 font-semibold text-slate-300">
-                PPPoE username
-              </div>
-              <div className="col-span-8 flex items-center gap-2 font-mono text-white">
-                <span>
-                  {showPppoeUser
-                    ? onu.pppoe_username || 'RATMI-010111'
-                    : '************'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setShowPppoeUser(!showPppoeUser)}
-                  className="text-sky-400 hover:text-sky-300"
-                >
-                  {showPppoeUser ? (
-                    <EyeOff className="h-3.5 w-3.5" />
-                  ) : (
-                    <Eye className="h-3.5 w-3.5" />
-                  )}
-                </button>
-              </div>
-            </div>
+            {/* PPPoE username & password with direct inline Edit & Push to OLT */}
+            {!editingInlinePppoe ? (
+              <>
+                <div className="grid grid-cols-12 items-center py-2">
+                  <div className="col-span-4 font-semibold text-slate-300">
+                    PPPoE username
+                  </div>
+                  <div className="col-span-8 flex items-center gap-2.5 font-mono text-white">
+                    <span>
+                      {showPppoeUser
+                        ? onu.pppoe_username || onu.customer_name || onu.serial_number
+                        : '************'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowPppoeUser(!showPppoeUser)}
+                      className="text-sky-400 hover:text-sky-300"
+                    >
+                      {showPppoeUser ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInlinePppoeUser(
+                          onu.pppoe_username || onu.customer_name || onu.serial_number
+                        );
+                        setInlinePppoePass(onu.pppoe_password || 'jetcyber');
+                        setEditingInlinePppoe(true);
+                      }}
+                      className="font-sans text-[11px] text-sky-400 hover:underline"
+                    >
+                      Edit / Push PPPoE
+                    </button>
+                  </div>
+                </div>
 
-            {/* PPPoE password */}
-            <div className="grid grid-cols-12 items-center py-2">
-              <div className="col-span-4 font-semibold text-slate-300">
-                PPPoE password
-              </div>
-              <div className="col-span-8 flex items-center gap-2 font-mono text-white">
-                <span>
-                  {showPppoePass ? onu.pppoe_password || 'jetcyber' : '********'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setShowPppoePass(!showPppoePass)}
-                  className="text-sky-400 hover:text-sky-300"
-                >
-                  {showPppoePass ? (
-                    <EyeOff className="h-3.5 w-3.5" />
-                  ) : (
-                    <Eye className="h-3.5 w-3.5" />
-                  )}
-                </button>
-              </div>
-            </div>
+                <div className="grid grid-cols-12 items-center py-2">
+                  <div className="col-span-4 font-semibold text-slate-300">
+                    PPPoE password
+                  </div>
+                  <div className="col-span-8 flex items-center gap-2.5 font-mono text-white">
+                    <span>
+                      {showPppoePass ? onu.pppoe_password || 'jetcyber' : '********'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowPppoePass(!showPppoePass)}
+                      className="text-sky-400 hover:text-sky-300"
+                    >
+                      {showPppoePass ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInlinePppoeUser(
+                          onu.pppoe_username || onu.customer_name || onu.serial_number
+                        );
+                        setInlinePppoePass(onu.pppoe_password || 'jetcyber');
+                        setEditingInlinePppoe(true);
+                      }}
+                      className="font-sans text-[11px] text-sky-400 hover:underline"
+                    >
+                      Edit / Push PPPoE
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <form
+                onSubmit={handleInlinePppoePush}
+                className="space-y-2 bg-[#11243b]/80 p-3"
+              >
+                <div className="grid grid-cols-12 items-center gap-2">
+                  <label className="col-span-4 font-semibold text-slate-200">
+                    PPPoE username
+                  </label>
+                  <div className="col-span-8">
+                    <input
+                      type="text"
+                      value={inlinePppoeUser}
+                      onChange={(e) => setInlinePppoeUser(e.target.value)}
+                      className="w-full rounded border border-sky-500/60 bg-slate-950 px-2.5 py-1 font-mono text-xs text-white"
+                      required
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-12 items-center gap-2">
+                  <label className="col-span-4 font-semibold text-slate-200">
+                    PPPoE password
+                  </label>
+                  <div className="col-span-8">
+                    <input
+                      type="text"
+                      value={inlinePppoePass}
+                      onChange={(e) => setInlinePppoePass(e.target.value)}
+                      className="w-full rounded border border-sky-500/60 bg-slate-950 px-2.5 py-1 font-mono text-xs text-white"
+                      required
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setEditingInlinePppoe(false)}
+                    className="rounded border border-slate-600 px-2.5 py-1 text-[11px] text-slate-300 hover:text-white"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    className="rounded bg-[#4caf50] px-3 py-1 text-[11px] font-bold text-white hover:bg-[#43a047]"
+                  >
+                    Simpan & Push PPPoE ke OLT
+                  </button>
+                </div>
+              </form>
+            )}
 
             {/* TV Signal (CATV) */}
             <div className="grid grid-cols-12 items-center py-2">
@@ -1339,10 +1708,10 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                   <td className="px-3 py-2 font-mono">1</td>
                   <td className="px-3 py-2 font-mono">{vlan?.vlan_id || 101}</td>
                   <td className="px-3 py-2 font-semibold text-white">
-                    {speedProfile?.profile_name || '1G'}
+                    {speedProfile?.profile_name || 'SMARTOLT-1G-DOWN'}
                   </td>
                   <td className="px-3 py-2 font-semibold text-white">
-                    {speedProfile?.profile_name || '1G'}
+                    {speedProfile?.profile_name || 'SMARTOLT-1G-UP'}
                   </td>
                   <td className="px-3 py-2">
                     <button
@@ -1449,12 +1818,13 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           db={db}
           onClose={() => setShowUpdateModeModal(false)}
           onConfirmUpdate={(onuId, updatedFields, generatedCli) => {
-            onExecuteAction(onuId, 'UPDATE_ONU_MODE', generatedCli, updatedFields);
             setShowUpdateModeModal(false);
-            setActiveConsoleOutput({
-              title: `Update ONU mode & WAN remote access — ${onuInterface}`,
-              content: generatedCli,
-            });
+            void executeAndDisplayLivePush(
+              'UPDATE_ONU_MODE',
+              generatedCli,
+              updatedFields,
+              `Update ONU mode & PPPoE — ${onuInterface}`
+            );
           }}
         />
       )}
@@ -1492,19 +1862,21 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 );
                 const cli = generateOnuEthPortCliScript({
                   ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
-                  onuIndex: onu.onu_index || 8,
+                  onuIndex: onu.onu_index || 1,
                   ethPort: `eth_0/${configuringEthPort.portIdx}`,
                   adminState: configuringEthPort.adminState,
                   mode: configuringEthPort.mode,
                   vlanId: configuringEthPort.vlanId,
                   dhcpMode: configuringEthPort.dhcpMode,
                 });
-                onExecuteAction(onu.id, 'RESYNC_CONFIG', cli);
-                setActiveConsoleOutput({
-                  title: `Configured Ethernet Port eth_0/${configuringEthPort.portIdx} — ${onuInterface}`,
-                  content: cli,
-                });
+                const portIdx = configuringEthPort.portIdx;
                 setConfiguringEthPort(null);
+                void executeAndDisplayLivePush(
+                  'RESYNC_CONFIG',
+                  cli,
+                  undefined,
+                  `Configure Ethernet Port eth_0/${portIdx} — ${onuInterface}`
+                );
               }}
               className="space-y-3"
             >
@@ -1602,7 +1974,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                   type="submit"
                   className="rounded bg-[#4caf50] px-4 py-1.5 font-bold text-white"
                 >
-                  Update Port eth_0/{configuringEthPort.portIdx}
+                  Update & Push Port eth_0/{configuringEthPort.portIdx}
                 </button>
               </div>
             </form>
@@ -1619,7 +1991,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             <div className="mb-3 flex items-center justify-between border-b border-slate-700 pb-3">
               <h3 className="text-base font-bold text-white">
                 {activeEditDialog === 'MOVE_ONU' && 'Move ONU to Another PON Port'}
-                {activeEditDialog === 'METADATA' && 'Edit ONU Details (Zone, Splitter, Name)'}
+                {activeEditDialog === 'METADATA' && 'Edit & Push ONU Details (Name, SN, PPPoE, Zone)'}
                 {activeEditDialog === 'MGMT_IP' && 'Configure ONU Management IP (VLAN 100 TR069)'}
                 {activeEditDialog === 'SPEED_PROFILE' && 'Configure ONU Speed Profile'}
                 {activeEditDialog === 'WIFI' && 'Configure ONU WiFi (OMCI / TR-069 CWMP)'}
@@ -1637,17 +2009,49 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  const cli = `configure terminal\ninterface gpon-olt_1/${onu.board}/${onu.port}\n  no onu ${onu.onu_index || 8}\nexit\ninterface gpon-olt_1/${moveBoard}/${movePort}\n  onu ${moveIndex} type ${onu.onu_type} sn ${onu.serial_number}\nexit\nend\nwrite`;
-                  onExecuteAction(onu.id, 'RESYNC_CONFIG', cli, {
-                    board: moveBoard,
-                    port: movePort,
-                    onu_index: moveIndex,
+                  const reAuthCli = generateAuthorizeCliScript({
+                    firmwareVersion: olt.firmware_version,
+                    ponInterface: `gpon-olt_1/${moveBoard}/${movePort}`,
+                    onuIndex: moveIndex,
+                    onuType: 'ALL',
+                    serialNumber: onu.serial_number,
+                    customerName: onu.customer_name || onu.serial_number,
+                    address: onu.address || 'none',
+                    tcontProfile: tcontProfile?.profile_name || 'SMARTOLT-1G-UP',
+                    speedProfile:
+                      speedProfile?.profile_name || 'SMARTOLT-1G-DOWN',
+                    vlanId: vlan?.vlan_id || 101,
+                    onuMode: onu.onu_mode || 'Routing',
+                    wanMode: onu.wan_mode || 'PPPOE',
+                    configMethod: onu.config_method || 'OMCI',
+                    wanRemoteAccess:
+                      onu.wan_remote_access ||
+                      'Enabled from everywhere in the internet',
+                    pppoeUsername:
+                      onu.pppoe_username ||
+                      onu.customer_name ||
+                      onu.serial_number,
+                    pppoePassword: onu.pppoe_password || 'jetcyber',
                   });
-                  setActiveConsoleOutput({
-                    title: `Moved ONU ${onu.serial_number} to gpon-onu_1/${moveBoard}/${movePort}:${moveIndex}`,
-                    content: cli,
-                  });
+                  const cli = [
+                    'configure terminal',
+                    `interface gpon-olt_1/${onu.board}/${onu.port}`,
+                    `  no onu ${onu.onu_index || 1}`,
+                    'exit',
+                    'end',
+                    reAuthCli,
+                  ].join('\n');
                   setActiveEditDialog(null);
+                  void executeAndDisplayLivePush(
+                    'RESYNC_CONFIG',
+                    cli,
+                    {
+                      board: moveBoard,
+                      port: movePort,
+                      onu_index: moveIndex,
+                    },
+                    `Move & Re-provision ONU ${onu.serial_number} -> gpon-onu_1/${moveBoard}/${movePort}:${moveIndex}`
+                  );
                 }}
                 className="space-y-3"
               >
@@ -1685,7 +2089,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     type="submit"
                     className="rounded bg-[#4caf50] px-4 py-1.5 font-bold text-white"
                   >
-                    Move & Re-provision ONU
+                    Move & Push to OLT
                   </button>
                 </div>
               </form>
@@ -1695,42 +2099,130 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  const cli = `configure terminal\ninterface ${onuInterface}\n  name "${metaName}"\n  description "${metaAddress}"\nexit\nend\nwrite`;
-                  onExecuteAction(onu.id, 'RESYNC_CONFIG', cli, {
-                    customer_name: metaName.toUpperCase(),
-                    address: metaAddress,
-                    contact: metaContact,
-                    external_id: metaExtId,
-                    zone_id: metaZoneId,
-                    odb_id: metaOdbId,
-                    odb_port: metaOdbPort,
+                  const cleanName =
+                    metaName.trim().toUpperCase().replace(/\s+/g, '-') ||
+                    metaSn.trim().toUpperCase();
+                  const cleanSn =
+                    metaSn.trim().toUpperCase() || onu.serial_number;
+                  const cleanPppoeUser =
+                    metaPppoeUser.trim().replace(/\s+/g, '-') || cleanName;
+                  const cleanPppoePass =
+                    metaPppoePass.trim().replace(/\s+/g, '') || 'jetcyber';
+                  const rebindSnOrType =
+                    metaRebindAll || cleanSn !== onu.serial_number;
+
+                  const cli = generateUpdateOnuModeCliScript({
+                    firmwareVersion: olt.firmware_version,
+                    ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
+                    onuIndex: onu.onu_index || 1,
+                    serialNumber: cleanSn,
+                    customerName: cleanName,
+                    address: metaAddress.trim() || 'none',
+                    rebindTypeAll: rebindSnOrType,
+                    vlanId: vlan?.vlan_id || 101,
+                    onuMode: onu.onu_mode || 'Routing',
+                    wanMode: onu.wan_mode || 'PPPOE',
+                    configMethod: onu.config_method || 'OMCI',
+                    wanRemoteAccess:
+                      onu.wan_remote_access ||
+                      'Enabled from everywhere in the internet',
+                    pppoeUsername: cleanPppoeUser,
+                    pppoePassword: cleanPppoePass,
                   });
+
                   setActiveEditDialog(null);
+                  void executeAndDisplayLivePush(
+                    'UPDATE_ONU_MODE',
+                    cli,
+                    {
+                      customer_name: cleanName,
+                      serial_number: cleanSn,
+                      onu_type: 'ALL',
+                      pppoe_username: cleanPppoeUser,
+                      pppoe_password: cleanPppoePass,
+                      address: metaAddress,
+                      contact: metaContact,
+                      external_id: metaExtId || cleanSn,
+                      zone_id: metaZoneId,
+                      odb_id: metaOdbId,
+                      odb_port: metaOdbPort,
+                    },
+                    `Save & Push ONU Config (${cleanName}) — ${onuInterface}`
+                  );
                 }}
                 className="space-y-2.5"
               >
-                <div>
-                  <label className="block font-bold">Customer Name</label>
-                  <input
-                    type="text"
-                    value={metaName}
-                    onChange={(e) => setMetaName(e.target.value)}
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 text-white"
-                  />
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block font-bold">Customer Name</label>
+                    <input
+                      type="text"
+                      value={metaName}
+                      onChange={(e) => setMetaName(e.target.value)}
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 font-mono text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold">Serial Number (SN)</label>
+                    <input
+                      type="text"
+                      value={metaSn}
+                      onChange={(e) => setMetaSn(e.target.value.toUpperCase())}
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 font-mono text-white"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block font-bold">Zone</label>
-                  <select
-                    value={metaZoneId}
-                    onChange={(e) => setMetaZoneId(Number(e.target.value))}
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 text-white"
-                  >
-                    {db.zones.map((z) => (
-                      <option key={z.id} value={z.id}>
-                        {z.name}
-                      </option>
-                    ))}
-                  </select>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block font-bold text-emerald-300">
+                      PPPoE Username
+                    </label>
+                    <input
+                      type="text"
+                      value={metaPppoeUser}
+                      onChange={(e) => setMetaPppoeUser(e.target.value)}
+                      className="mt-1 w-full rounded border border-emerald-600/60 bg-[#1c2536] px-3 py-1.5 font-mono text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-emerald-300">
+                      PPPoE Password
+                    </label>
+                    <input
+                      type="text"
+                      value={metaPppoePass}
+                      onChange={(e) => setMetaPppoePass(e.target.value)}
+                      className="mt-1 w-full rounded border border-emerald-600/60 bg-[#1c2536] px-3 py-1.5 font-mono text-white"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block font-bold">Re-register type ALL</label>
+                    <label className="mt-1.5 flex items-center gap-2 text-xs text-slate-200">
+                      <input
+                        type="checkbox"
+                        checked={metaRebindAll}
+                        onChange={(e) => setMetaRebindAll(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded"
+                      />
+                      <span>Re-bind ONU as type ALL</span>
+                    </label>
+                  </div>
+                  <div>
+                    <label className="block font-bold">Zone</label>
+                    <select
+                      value={metaZoneId}
+                      onChange={(e) => setMetaZoneId(Number(e.target.value))}
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 text-white"
+                    >
+                      {db.zones.map((z) => (
+                        <option key={z.id} value={z.id}>
+                          {z.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
@@ -1766,30 +2258,39 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 text-white"
                   />
                 </div>
-                <div>
-                  <label className="block font-bold">Contact</label>
-                  <input
-                    type="text"
-                    value={metaContact}
-                    onChange={(e) => setMetaContact(e.target.value)}
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 text-white"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold">ONU External ID</label>
-                  <input
-                    type="text"
-                    value={metaExtId}
-                    onChange={(e) => setMetaExtId(e.target.value)}
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 font-mono text-white"
-                  />
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block font-bold">Contact</label>
+                    <input
+                      type="text"
+                      value={metaContact}
+                      onChange={(e) => setMetaContact(e.target.value)}
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold">ONU External ID</label>
+                    <input
+                      type="text"
+                      value={metaExtId}
+                      onChange={(e) => setMetaExtId(e.target.value)}
+                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 font-mono text-white"
+                    />
+                  </div>
                 </div>
                 <div className="flex justify-end gap-2 pt-2">
                   <button
-                    type="submit"
-                    className="rounded bg-[#4caf50] px-4 py-1.5 font-bold text-white"
+                    type="button"
+                    onClick={() => setActiveEditDialog(null)}
+                    className="px-3 py-1.5 text-slate-300 hover:text-white"
                   >
-                    Save Metadata
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="rounded bg-[#4caf50] px-4 py-1.5 font-bold text-white hover:bg-[#43a047]"
+                  >
+                    Save & Push to OLT
                   </button>
                 </div>
               </form>
@@ -1800,14 +2301,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 onSubmit={(e) => {
                   e.preventDefault();
                   const cli = `configure terminal\npon-onu-mng ${onuInterface}\n  mgmt-ip onu-ip ${mgmtIpInput} 255.255.0.0 7 mgmt-vlan ${mgmtVlanInput}\n  tr069-mgmt 1 state unlock\n  tr069-mgmt 1 tag pri 7 vlan ${mgmtVlanInput}\nexit\nend\nwrite`;
-                  onExecuteAction(onu.id, 'RESYNC_CONFIG', cli, {
-                    mgmt_ip: mgmtIpInput,
-                  });
-                  setActiveConsoleOutput({
-                    title: `Configured Mgmt IP (${mgmtIpInput} on VLAN ${mgmtVlanInput})`,
-                    content: cli,
-                  });
                   setActiveEditDialog(null);
+                  void executeAndDisplayLivePush(
+                    'RESYNC_CONFIG',
+                    cli,
+                    {
+                      mgmt_ip: mgmtIpInput,
+                    },
+                    `Configure Mgmt IP (${mgmtIpInput} on VLAN ${mgmtVlanInput}) — ${onuInterface}`
+                  );
                 }}
                 className="space-y-3"
               >
@@ -1838,7 +2340,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     type="submit"
                     className="rounded bg-[#4caf50] px-4 py-1.5 font-bold text-white"
                   >
-                    Save Mgmt IP
+                    Save & Push Mgmt IP
                   </button>
                 </div>
               </form>
@@ -1851,15 +2353,29 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                   const sp =
                     db.speed_profiles.find((s) => s.id === selectedSpeedId) ||
                     db.speed_profiles[0];
-                  const cli = `configure terminal\ninterface ${onuInterface}\n  tcont 1 name TCONT-WAN profile TCONT-1G\n  gemport 1 traffic-limit upstream ${sp.profile_name} downstream ${sp.profile_name}\nexit\nend\nwrite`;
-                  onExecuteAction(onu.id, 'RESYNC_CONFIG', cli, {
-                    speed_profile_id: selectedSpeedId,
-                  });
-                  setActiveConsoleOutput({
-                    title: `Updated ONU Speed Profile to ${sp.profile_name}`,
-                    content: cli,
-                  });
+                  const downName = sp?.profile_name || 'SMARTOLT-1G-DOWN';
+                  const upName = downName.includes('-DOWN')
+                    ? downName.replace('-DOWN', '-UP')
+                    : 'SMARTOLT-1G-UP';
+                  const cli = [
+                    'configure terminal',
+                    `interface ${onuInterface}`,
+                    `  tcont 1 profile ${upName}`,
+                    '  gemport 1 tcont 1',
+                    `  gemport 1 traffic-limit downstream ${downName}`,
+                    'exit',
+                    'end',
+                    'write',
+                  ].join('\n');
                   setActiveEditDialog(null);
+                  void executeAndDisplayLivePush(
+                    'RESYNC_CONFIG',
+                    cli,
+                    {
+                      speed_profile_id: selectedSpeedId,
+                    },
+                    `Update Speed Profile (${downName}) — ${onuInterface}`
+                  );
                 }}
                 className="space-y-3"
               >
@@ -1884,7 +2400,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     type="submit"
                     className="rounded bg-[#4caf50] px-4 py-1.5 font-bold text-white"
                   >
-                    Apply Speed Profile
+                    Apply & Push Speed Profile
                   </button>
                 </div>
               </form>
@@ -1894,17 +2410,20 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  const cli = `configure terminal\npon-onu-mng ${onuInterface}\n  wifi enable\n  wifi ssid 1 name "${wifiSsidInput}" auth wpa2-psk password "${wifiPassInput}"\nexit\nend\nwrite`;
-                  onExecuteAction(onu.id, 'TR069_PUSH', cli, {
-                    wifi_enabled: true,
-                    wifi_ssid: wifiSsidInput,
-                    wifi_password: wifiPassInput,
-                  });
-                  setActiveConsoleOutput({
-                    title: `Provisioned ONU WiFi SSID "${wifiSsidInput}" via OMCI & TR-069`,
-                    content: cli,
-                  });
+                  const cleanSsid = wifiSsidInput.trim().replace(/\s+/g, '_');
+                  const cleanPass = wifiPassInput.trim().replace(/\s+/g, '');
+                  const cli = `configure terminal\npon-onu-mng ${onuInterface}\n  wifi enable\n  wifi ssid 1 name ${cleanSsid} auth wpa2-psk password ${cleanPass}\nexit\nend\nwrite`;
                   setActiveEditDialog(null);
+                  void executeAndDisplayLivePush(
+                    'TR069_PUSH',
+                    cli,
+                    {
+                      wifi_enabled: true,
+                      wifi_ssid: cleanSsid,
+                      wifi_password: cleanPass,
+                    },
+                    `Push ONU WiFi SSID (${cleanSsid}) — ${onuInterface}`
+                  );
                 }}
                 className="space-y-3"
               >
@@ -1931,7 +2450,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     type="submit"
                     className="rounded bg-[#4caf50] px-4 py-1.5 font-bold text-white"
                   >
-                    Apply WiFi Settings
+                    Apply & Push WiFi Settings
                   </button>
                 </div>
               </form>

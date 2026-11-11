@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   SmartOltDatabaseState,
   OnuRecord,
@@ -18,6 +18,7 @@ import {
   Check,
   Plus,
   Info,
+  RefreshCw,
 } from 'lucide-react';
 
 interface AuthorizeOnuModalProps {
@@ -43,6 +44,10 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   );
   const [boardNum, setBoardNum] = useState<number>(onu.board || 3);
   const [portNum, setPortNum] = useState<number>(onu.port || 3);
+  const [liveUsedIndices, setLiveUsedIndices] = useState<number[]>([]);
+  const [liveExistingSnIndex, setLiveExistingSnIndex] = useState<number | null>(null);
+  const [checkingPonLive, setCheckingPonLive] = useState<boolean>(false);
+  const [manualOnuIndex, setManualOnuIndex] = useState<number | null>(null);
 
   const olt =
     db.olts.find((o) => o.id === selectedOltId) ||
@@ -55,36 +60,103 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   const ponPort =
     db.pon_ports.find(
       (p) =>
-        p.id === onu.pon_port_id ||
-        (p.olt_id === selectedOltId && p.port_number === portNum)
-    ) || db.pon_ports[0];
+        p.olt_id === selectedOltId &&
+        (p.slot || 3) === boardNum &&
+        p.port_number === portNum
+    ) ||
+    db.pon_ports.find(
+      (p) => p.olt_id === selectedOltId && p.port_number === portNum
+    ) ||
+    db.pon_ports[0];
 
   const maxCapacity = ponPort?.max_onu_capacity || 128;
 
-  const allocatedOnuIndex = useMemo(() => {
-    const usedIndices = db.onus
+  // Query live OLT PON port via Telnet to know every occupied ONU index on gpon-olt_1/board/port
+  const checkLivePonPortIndices = async () => {
+    setCheckingPonLive(true);
+    try {
+      const resp = await fetch(`/api/olts/${selectedOltId}/check-pon-indices`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          board: boardNum,
+          port: portNum,
+          serialNumber: onu.serial_number,
+        }),
+      });
+      const data = await resp.json();
+      if (data && Array.isArray(data.usedIndices)) {
+        setLiveUsedIndices(data.usedIndices);
+        setLiveExistingSnIndex(
+          typeof data.existingSnIndex === 'number' ? data.existingSnIndex : null
+        );
+      }
+    } catch {
+      // Fallback to local DB indices if offline
+    } finally {
+      setCheckingPonLive(false);
+    }
+  };
+
+  useEffect(() => {
+    setManualOnuIndex(null);
+    void checkLivePonPortIndices();
+  }, [selectedOltId, boardNum, portNum, onu.serial_number]);
+
+  const combinedUsedIndices = useMemo(() => {
+    const dbIndices = db.onus
       .filter(
         (item) =>
           item.is_authorized &&
           item.onu_index !== null &&
-          ((ponPort && item.pon_port_id === ponPort.id) ||
-            (item.olt_id === selectedOltId &&
-              item.board === boardNum &&
-              item.port === portNum))
+          item.serial_number.toUpperCase() !== onu.serial_number.toUpperCase() &&
+          item.olt_id === selectedOltId &&
+          item.board === boardNum &&
+          item.port === portNum
       )
       .map((item) => item.onu_index as number);
-    return findNextAvailableOnuIndex(usedIndices, maxCapacity);
-  }, [db.onus, ponPort, selectedOltId, boardNum, portNum, maxCapacity]);
+    return Array.from(
+      new Set(
+        [...dbIndices, ...liveUsedIndices].filter(
+          (idx) => idx !== liveExistingSnIndex
+        )
+      )
+    ).sort((a, b) => a - b);
+  }, [
+    db.onus,
+    liveUsedIndices,
+    liveExistingSnIndex,
+    onu.serial_number,
+    selectedOltId,
+    boardNum,
+    portNum,
+  ]);
 
-  const usedCount =
-    ponPort?.total_onus ??
+  const autoAllocatedOnuIndex = useMemo(() => {
+    if (liveExistingSnIndex !== null && liveExistingSnIndex > 0) {
+      return liveExistingSnIndex;
+    }
+    return findNextAvailableOnuIndex(combinedUsedIndices, maxCapacity);
+  }, [liveExistingSnIndex, combinedUsedIndices, maxCapacity]);
+
+  const allocatedOnuIndex =
+    manualOnuIndex !== null &&
+    manualOnuIndex >= 1 &&
+    manualOnuIndex <= maxCapacity &&
+    !combinedUsedIndices.includes(manualOnuIndex)
+      ? manualOnuIndex
+      : autoAllocatedOnuIndex;
+
+  const usedCount = Math.max(
+    combinedUsedIndices.length,
     db.onus.filter(
       (item) =>
         item.is_authorized &&
         item.olt_id === selectedOltId &&
         item.board === boardNum &&
         item.port === portNum
-    ).length;
+    ).length
+  );
   const freeCount = Math.max(0, maxCapacity - usedCount);
   const usagePct = Math.round((usedCount / maxCapacity) * 100);
 
@@ -194,6 +266,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
       customerName.trim().replace(/\s+/g, '-') ||
       effectivePppoeUser ||
       onu.serial_number;
+    const nowTime = new Date().toLocaleTimeString('en-GB', { hour12: false });
     onConfirmAuthorize(
       onu.id,
       {
@@ -219,20 +292,20 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         wan_remote_allowed_subnet: '0.0.0.0/0',
         tr069_profile_id: 1,
         tr069_status: 'ACTIVE_INFORMING',
-        tr069_last_inform: 'Today 16:40:00',
-        mgmt_ip: `10.100.${portNum}.${allocatedOnuIndex}`,
+        tr069_last_inform: `Today ${nowTime}`,
+        mgmt_ip: null,
         wifi_enabled: true,
         pppoe_username: onuMode === 'Routing' ? effectivePppoeUser : null,
         pppoe_password: onuMode === 'Routing' ? pppoePassword : null,
         phase_state: 'working',
-        onu_rx_dbm: onu.onu_rx_dbm || -22.45,
-        olt_rx_dbm: onu.olt_rx_dbm || -26.1,
+        onu_rx_dbm: onu.onu_rx_dbm,
+        olt_rx_dbm: onu.olt_rx_dbm,
         ip_address:
           onuMode === 'Routing'
-            ? `10.0.183.${allocatedOnuIndex + 100}`
+            ? null
             : `Bridge-VLAN${selectedVlan?.vlan_id || 101}`,
-        auth_date_label: 'Today 16:40:12',
-        last_online_at: '10-Nov-2026 16:40:12',
+        auth_date_label: `Today ${nowTime}`,
+        last_online_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
         last_offline_reason: 'None',
       },
       generatedCli,
@@ -249,6 +322,17 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
           </h2>
           <p className="text-xs text-slate-400">
             Target Interface: <span className="font-mono text-emerald-400">gpon-onu_1/{boardNum}/{portNum}:{allocatedOnuIndex}</span> (Original catalog model: {onu.onu_type})
+            {checkingPonLive ? (
+              <span className="ml-2 text-amber-300">· Checking live OLT port indices...</span>
+            ) : (
+              <span className="ml-2 text-sky-300">
+                · Free ONU Index #{allocatedOnuIndex} (Occupied on 1/{boardNum}/{portNum}:{' '}
+                {combinedUsedIndices.length > 0
+                  ? combinedUsedIndices.map((idx) => `#${idx}`).join(', ')
+                  : 'None'}
+                )
+              </span>
+            )}
           </p>
         </div>
         <button
@@ -427,7 +511,38 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
               <span className="font-mono font-bold text-white">
                 {usedCount} / 128 ({usagePct}%)
               </span>
+              <button
+                type="button"
+                onClick={() => void checkLivePonPortIndices()}
+                className="flex items-center gap-1 rounded border border-sky-600/60 bg-sky-950/60 px-2 py-0.5 text-[10px] font-semibold text-sky-300 hover:bg-sky-900"
+              >
+                <RefreshCw className={`h-3 w-3 ${checkingPonLive ? 'animate-spin' : ''}`} />
+                {checkingPonLive ? 'Checking OLT...' : 'Check Live PON Index'}
+              </button>
               <Info className="h-3.5 w-3.5 text-slate-400" />
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-300">
+              <span>Allocated ONU Index on OLT:</span>
+              <span className="rounded bg-emerald-950/90 border border-emerald-500/50 px-2 py-0.5 font-mono font-bold text-emerald-300">
+                onu {allocatedOnuIndex} (gpon-onu_1/{boardNum}/{portNum}:{allocatedOnuIndex})
+              </span>
+              <input
+                type="number"
+                min={1}
+                max={128}
+                value={manualOnuIndex ?? ''}
+                onChange={(e) => {
+                  const val = e.target.value ? Number(e.target.value) : null;
+                  setManualOnuIndex(val);
+                }}
+                placeholder={`Auto: ${autoAllocatedOnuIndex}`}
+                className="w-24 rounded border border-[#284870] bg-[#10233a] px-2 py-0.5 font-mono text-[11px] text-white"
+              />
+              {manualOnuIndex !== null && combinedUsedIndices.includes(manualOnuIndex) && (
+                <span className="text-red-400 font-semibold">
+                  ⚠ Index #{manualOnuIndex} sudah terpakai di OLT! Otomatis dialihkan ke #{autoAllocatedOnuIndex}
+                </span>
+              )}
             </div>
           </div>
         </div>

@@ -323,6 +323,49 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     }
   }, [dbLoaded, autoSyncedInitial, db.olts]);
 
+  // Background Real-Time OLT Status, Optical Power & MikroTik WAN IP Poller (Every 10s)
+  const pollRealtimeOltTelemetry = async (targetOltId?: number, targetOnuId?: number) => {
+    const oltToPoll =
+      db.olts.find((o) => o.id === (targetOltId || selectedOltId)) || db.olts[0];
+    if (!oltToPoll) return;
+    try {
+      const resp = await fetch(`/api/olts/${oltToPoll.id}/poll-realtime`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          onuId:
+            targetOnuId !== undefined
+              ? targetOnuId
+              : activeView === 'ONU_DETAIL'
+                ? selectedOnuId
+                : undefined,
+        }),
+      });
+      const data = await resp.json();
+      if (data && data.ok && !data.skipped && data.state) {
+        setDb(data.state);
+      }
+    } catch {
+      // ignore transient network errors during background poll
+    }
+  };
+
+  useEffect(() => {
+    if (!dbLoaded || db.olts.length === 0) return;
+    // Initial real-time status & WAN IP poll shortly after load
+    const initialTimer = setTimeout(() => {
+      void pollRealtimeOltTelemetry();
+    }, 1500);
+    // Continuous real-time poll every 10 seconds
+    const intervalTimer = setInterval(() => {
+      void pollRealtimeOltTelemetry();
+    }, 10000);
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(intervalTimer);
+    };
+  }, [dbLoaded, db.olts.length, selectedOltId, activeView, selectedOnuId]);
+
   // Central Live OLT CLI Executor — sends commands via Telnet/SSH to the target OLT
   // and updates provisioning_logs + toast with the real OLT execution response.
   const executeOltCliLive = async (
@@ -336,7 +379,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       olt_username: string;
       olt_password: string;
     }
-  ) => {
+  ): Promise<{
+    ok: boolean;
+    output: string;
+    error?: string;
+    durationMs: number;
+    reallocatedOnuIndex?: number;
+  }> => {
     const startMs = Date.now();
     const targetOlt = db.olts.find((o) => o.id === oltId);
     const connPayload = {
@@ -344,6 +393,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       telnet_port: oltConnectionOverride?.telnet_port || targetOlt?.telnet_port,
       olt_username: oltConnectionOverride?.olt_username || targetOlt?.olt_username,
       olt_password: oltConnectionOverride?.olt_password || targetOlt?.olt_password,
+      enable_password: targetOlt?.enable_password,
     };
     try {
       const resp = await fetch('/api/telnet/exec', {
@@ -373,7 +423,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               : l
           ),
         }));
-        showToast(`✓ LIVE OLT: ${summaryLabel} berhasil dieksekusi di OLT (${elapsedMs}ms)`);
+        showToast(`✓ LIVE OLT: ${summaryLabel} berhasil ter-push ke OLT (${elapsedMs}ms)`);
+        return {
+          ok: true,
+          output: cleanOutput,
+          durationMs: elapsedMs,
+          reallocatedOnuIndex:
+            typeof data.reallocatedOnuIndex === 'number'
+              ? data.reallocatedOnuIndex
+              : undefined,
+        };
       } else {
         const errMsg = data.error || 'Telnet execution failed';
         setDb((prev) => ({
@@ -390,22 +449,35 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           ),
         }));
         showToast(`⚠ Disimpan ke DB, namun gagal eksekusi Telnet OLT: ${errMsg}`);
+        return {
+          ok: false,
+          output: data.output || '',
+          error: errMsg,
+          durationMs: elapsedMs,
+        };
       }
     } catch (err) {
       const elapsedMs = Date.now() - startMs;
+      const errMsg = (err as Error).message;
       setDb((prev) => ({
         ...prev,
         provisioning_logs: prev.provisioning_logs.map((l) =>
           l.id === logId
             ? {
                 ...l,
-                olt_response: `[NETWORK ERROR] ${(err as Error).message}`,
+                olt_response: `[NETWORK ERROR] ${errMsg}`,
                 execution_status: 'FAILED',
                 duration_ms: elapsedMs,
               }
             : l
         ),
       }));
+      return {
+        ok: false,
+        output: '',
+        error: errMsg,
+        durationMs: elapsedMs,
+      };
     }
   };
 
@@ -460,10 +532,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             ...prev.pon_ports,
             {
               id: targetOltId * 100 + targetPortNum,
-              olt_id: targetOltId,
               rack: 1,
               shelf: 3,
               slot: targetBoard,
+              olt_id: targetOltId,
               port_number: targetPortNum,
               interface_name: `gpon-olt_1/${targetBoard}/${targetPortNum}`,
               board_model: 'GTGH',
@@ -540,11 +612,30 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       generatedCli,
       logId,
       `Authorize ${targetOnu.serial_number} (${onuIf})`
-    );
+    ).then((res) => {
+      if (res.reallocatedOnuIndex && res.reallocatedOnuIndex !== allocatedOnuIndex) {
+        const newIf = `gpon-onu_1/${targetBoard}/${targetPortNum}:${res.reallocatedOnuIndex}`;
+        setDb((prev) => ({
+          ...prev,
+          onus: prev.onus.map((item) =>
+            item.id === onuId
+              ? { ...item, onu_index: res.reallocatedOnuIndex! }
+              : item
+          ),
+        }));
+        showToast(
+          `✓ Anti-Collision: ONU ${targetOnu.serial_number} otomatis ditempatkan di index kosong ${newIf}`
+        );
+      }
+      // Poll real-time status & MikroTik PPPoE WAN IP 4 seconds after authorization completes
+      setTimeout(() => {
+        void pollRealtimeOltTelemetry(targetOltId, onuId);
+      }, 4000);
+    });
   };
 
   // Execute ONU Action Handler (Update ONU mode, TR069 Push, Reboot, Resync, Restore, Delete)
-  const handleExecuteOnuAction = (
+  const handleExecuteOnuAction = async (
     onuId: number,
     actionType:
       | 'UPDATE_ONU_MODE'
@@ -557,19 +648,29 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       | 'POLL_SIGNAL',
     cliScript: string,
     updatedFields?: Partial<OnuRecord>
-  ) => {
+  ): Promise<{
+    ok: boolean;
+    output: string;
+    error?: string;
+    durationMs?: number;
+  }> => {
     const targetOnu = db.onus.find((o) => o.id === onuId);
-    if (!targetOnu) return;
+    if (!targetOnu) {
+      return { ok: false, output: '', error: 'ONU not found' };
+    }
 
     const targetOltId = targetOnu.olt_id || db.olts[0]?.id || 1;
-    const onuIf = `gpon-onu_1/${targetOnu.board}/${targetOnu.port}:${targetOnu.onu_index || 1}`;
+    const nextBoard = updatedFields?.board ?? targetOnu.board;
+    const nextPort = updatedFields?.port ?? targetOnu.port;
+    const nextIdx = updatedFields?.onu_index ?? targetOnu.onu_index ?? 1;
+    const onuIf = `gpon-onu_1/${nextBoard}/${nextPort}:${nextIdx}`;
     const summaryMap: Record<string, string> = {
-      UPDATE_ONU_MODE: `${onuIf} Changed WAN mode & WAN remote access`,
-      TR069_PUSH: `${onuIf} TR-069 CWMP Inform & SetParameterValues pushed`,
+      UPDATE_ONU_MODE: `${onuIf} Updated ONU mode, VLAN & PPPoE`,
+      TR069_PUSH: `${onuIf} Pushed TR-069 / OMCI configuration`,
       REBOOT: `${onuIf} Rebooted ONU`,
-      RESYNC_CONFIG: `${onuIf} Resync config`,
+      RESYNC_CONFIG: `${onuIf} Synced & pushed ONU configuration`,
       FACTORY_RESET: `${onuIf} Restored factory defaults`,
-      UPDATE_PPPOE: `${onuIf} Updated CLI configuration`,
+      UPDATE_PPPOE: `${onuIf} Updated PPPoE credentials & VLAN`,
       DELETE_ONU: `${onuIf} Deleted ONU (${targetOnu.serial_number})`,
       POLL_SIGNAL: `${onuIf} Polled optical power attenuation`,
     };
@@ -579,7 +680,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       id: logId,
       olt_id: targetOltId,
       onu_id: onuId,
-      serial_number: targetOnu.serial_number,
+      serial_number: updatedFields?.serial_number || targetOnu.serial_number,
       action_type: actionType,
       interface_target: onuIf,
       summary_text: summaryMap[actionType] || `${onuIf} ${actionType}`,
@@ -609,13 +710,12 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       }));
       setActiveView('UNCONFIGURED');
       showToast(`Menghapus ONU ${targetOnu.serial_number} dari OLT (${onuIf})...`);
-      void executeOltCliLive(
+      return executeOltCliLive(
         targetOltId,
         cliScript,
         logId,
         `Delete ONU ${targetOnu.serial_number} (${onuIf})`
       );
-      return;
     }
 
     setDb((prev) => ({
@@ -628,15 +728,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
     showToast(`Mengeksekusi ${summaryMap[actionType]} ke OLT...`);
 
-    // Execute CLI script on live OLT via Telnet (skip if it's an HTTP JSON preview like TR069_PUSH)
-    if (actionType !== 'TR069_PUSH' && cliScript && !cliScript.trim().startsWith('# [TR-069')) {
-      void executeOltCliLive(
+    if (cliScript && !cliScript.trim().startsWith('# [TR-069')) {
+      return executeOltCliLive(
         targetOltId,
         cliScript,
         logId,
         summaryMap[actionType] || actionType
       );
     }
+
+    return { ok: true, output: cliScript, durationMs: 0 };
   };
 
   // Render Signal Bars helper matching Screenshot _D6CCC96A
@@ -1273,7 +1374,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#1e3a5f]/50">
-                        {[...losOnus, ...criticalSignalOnus]
+                        {[...losOnus, ...pwrFailOnus, ...otherOfflineOnus, ...criticalSignalOnus]
                           .slice(0, 6)
                           .map((item) => {
                             const o = db.olts.find((x) => x.id === item.olt_id);
@@ -1290,10 +1391,24 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                   {item.serial_number}
                                 </td>
                                 <td className="px-3 py-1.5">
-                                  <span className="rounded bg-red-600 px-1.5 py-0.5 font-mono text-[10px] font-bold text-white">
+                                  <span
+                                    className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold text-white ${
+                                      item.phase_state === 'LOS'
+                                        ? 'bg-red-600'
+                                        : item.phase_state === 'DyingGasp'
+                                          ? 'bg-amber-600'
+                                          : item.phase_state !== 'working'
+                                            ? 'bg-slate-600'
+                                            : 'bg-orange-600'
+                                    }`}
+                                  >
                                     {item.phase_state === 'LOS'
                                       ? 'LOS'
-                                      : `${item.onu_rx_dbm} dBm`}
+                                      : item.phase_state === 'DyingGasp'
+                                        ? 'Power fail'
+                                        : item.phase_state !== 'working'
+                                          ? 'Offline'
+                                          : `${item.onu_rx_dbm} dBm`}
                                   </span>
                                 </td>
                               </tr>
@@ -1764,19 +1879,37 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           </button>
                         </td>
                         <td className="px-2 py-2.5">
-                          {o.phase_state === 'LOS' ? (
+                          {o.phase_state === 'working' ? (
+                            <span
+                              title="Online (working)"
+                              className="inline-flex items-center gap-1 text-emerald-400 font-semibold"
+                            >
+                              <Wifi className="h-4 w-4" />
+                              <span className="text-[10px]">Online</span>
+                            </span>
+                          ) : o.phase_state === 'DyingGasp' ? (
+                            <span
+                              title="Power fail (DyingGasp)"
+                              className="inline-flex items-center gap-1 text-amber-400 font-semibold"
+                            >
+                              <Power className="h-4 w-4" />
+                              <span className="text-[10px]">PwrFail</span>
+                            </span>
+                          ) : o.phase_state === 'LOS' ? (
                             <span
                               title="LOS (Loss of Signal)"
-                              className="inline-flex items-center text-red-500"
+                              className="inline-flex items-center gap-1 text-red-500 font-semibold"
                             >
                               <AlertTriangle className="h-4 w-4" />
+                              <span className="text-[10px]">LOS</span>
                             </span>
                           ) : (
                             <span
-                              title="Working (Online)"
-                              className="inline-flex items-center text-emerald-400"
+                              title={`Offline (${o.phase_state})`}
+                              className="inline-flex items-center gap-1 text-slate-400 font-semibold"
                             >
-                              <Wifi className="h-4 w-4" />
+                              <AlertTriangle className="h-4 w-4" />
+                              <span className="text-[10px]">Offline</span>
                             </span>
                           )}
                         </td>
