@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   INITIAL_DB_STATE,
   SmartOltDatabaseState,
@@ -159,6 +159,225 @@ export default function App() {
   const [openDropdown, setOpenDropdown] = useState<
     'MAP' | 'TASKS' | 'REPORTS' | 'SETTINGS' | null
   >(null);
+
+  // ==========================================================================
+  // BROWSER BACK / FORWARD HISTORY ENGINE (HTML5 pushState + popstate + Root Guard)
+  // Memungkinkan tombol Back & Forward di browser / mouse berpindah antar menu,
+  // tab OLT, dan detail ONU di dalam aplikasi tanpa keluar ke situs sebelumnya!
+  // ==========================================================================
+  const isHandlingPopStateRef = useRef(false);
+  const historyReadyRef = useRef(false);
+  const lastPushedSignatureRef = useRef<string>('');
+  const dbOnusRef = useRef<OnuRecord[]>(db.onus);
+  useEffect(() => {
+    dbOnusRef.current = db.onus;
+  }, [db.onus]);
+
+  const buildHashForNav = (
+    view: NavigationView,
+    oltId: number,
+    oltTab: OltDetailTab,
+    onuId: number,
+    authOnuId: number | null
+  ): string => {
+    switch (view) {
+      case 'DASHBOARD':
+        return '#/dashboard';
+      case 'UNCONFIGURED':
+        return '#/unconfigured';
+      case 'AUTHORIZE_FORM':
+        return `#/authorize/${authOnuId || ''}`;
+      case 'CONFIGURED':
+        return '#/configured';
+      case 'ONU_DETAIL':
+        return `#/onu/${onuId}`;
+      case 'OLTS_LIST':
+        return '#/olts';
+      case 'ADD_OLT':
+        return '#/olts/add';
+      case 'OLT_DETAIL':
+        return `#/olt/${oltId}/${oltTab}`;
+      case 'TASKS':
+        return '#/tasks';
+      case 'ZONES':
+        return '#/settings/zones';
+      case 'SECTORS':
+        return '#/settings/sectors';
+      case 'SPLITTERS':
+        return '#/settings/splitters';
+      case 'SPEED_PROFILES':
+        return '#/settings/speed-profiles';
+      case 'VPN_TR069':
+        return '#/settings/vpn-tr069';
+      case 'DIAG_PARSER':
+        return '#/diag';
+      case 'GRAPHS':
+        return '#/graphs';
+      case 'SOURCE_CODE':
+        return '#/source-code';
+      default:
+        return '#/dashboard';
+    }
+  };
+
+  useEffect(() => {
+    // 1. Setup Root Guard entry so pressing Back at the root of the app stays on DASHBOARD
+    //    instead of exiting to the previous website in the browser tab!
+    const rootGuardState = {
+      smartOltRootGuard: true,
+      activeView: 'DASHBOARD' as NavigationView,
+      selectedOltId: 1,
+      initialOltTab: 'OLT_DETAILS' as OltDetailTab,
+      selectedOnuId: 1,
+      authorizingOnuId: null as number | null,
+      updatingModeOnuId: null as number | null,
+    };
+
+    const initialNavState = {
+      smartOltNav: true,
+      activeView: 'DASHBOARD' as NavigationView,
+      selectedOltId: 1,
+      initialOltTab: 'OLT_DETAILS' as OltDetailTab,
+      selectedOnuId: 1,
+      authorizingOnuId: null as number | null,
+      updatingModeOnuId: null as number | null,
+    };
+
+    try {
+      window.history.replaceState(rootGuardState, '', '#/dashboard');
+      window.history.pushState(initialNavState, '', '#/dashboard');
+      lastPushedSignatureRef.current = JSON.stringify({
+        v: 'DASHBOARD',
+        olt: 1,
+        tab: 'OLT_DETAILS',
+        onu: 1,
+        auth: null,
+        upd: null,
+      });
+    } catch {
+      // Ignore if running in restricted environment
+    }
+    historyReadyRef.current = true;
+
+    const handlePopState = (event: PopStateEvent) => {
+      const st = event.state;
+      isHandlingPopStateRef.current = true;
+      setOpenDropdown(null);
+
+      if (st && st.smartOltNav) {
+        const nextView: NavigationView = st.activeView || 'DASHBOARD';
+        const nextOltId: number = Number(st.selectedOltId || 1);
+        const nextOltTab: OltDetailTab = st.initialOltTab || 'OLT_DETAILS';
+        const nextOnuId: number = Number(st.selectedOnuId || 1);
+        const nextAuthId: number | null = st.authorizingOnuId ?? null;
+        const nextUpdId: number | null = st.updatingModeOnuId ?? null;
+
+        setActiveView(nextView);
+        setSelectedOltId(nextOltId);
+        setInitialOltTab(nextOltTab);
+        setSelectedOnuId(nextOnuId);
+        setAuthorizingOnu(
+          nextAuthId
+            ? dbOnusRef.current.find((u) => u.id === nextAuthId) || null
+            : null
+        );
+        setUpdatingModeOnu(
+          nextUpdId
+            ? dbOnusRef.current.find((u) => u.id === nextUpdId) || null
+            : null
+        );
+
+        lastPushedSignatureRef.current = JSON.stringify({
+          v: nextView,
+          olt: nextOltId,
+          tab: nextOltTab,
+          onu: nextOnuId,
+          auth: nextAuthId,
+          upd: nextUpdId,
+        });
+      } else {
+        // Hit the root guard (or empty state at start of tab): stay on DASHBOARD and re-arm guard
+        setActiveView('DASHBOARD');
+        setAuthorizingOnu(null);
+        setUpdatingModeOnu(null);
+        const fallbackSig = JSON.stringify({
+          v: 'DASHBOARD',
+          olt: 1,
+          tab: 'OLT_DETAILS',
+          onu: 1,
+          auth: null,
+          upd: null,
+        });
+        lastPushedSignatureRef.current = fallbackSig;
+        try {
+          window.history.pushState(initialNavState, '', '#/dashboard');
+        } catch {
+          // Ignore
+        }
+      }
+
+      setTimeout(() => {
+        isHandlingPopStateRef.current = false;
+      }, 0);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
+
+  // Push new browser history state whenever the user navigates inside the app
+  useEffect(() => {
+    if (!historyReadyRef.current) return;
+    if (isHandlingPopStateRef.current) return;
+
+    const authId = authorizingOnu?.id ?? null;
+    const updId = updatingModeOnu?.id ?? null;
+    const signature = JSON.stringify({
+      v: activeView,
+      olt: selectedOltId,
+      tab: initialOltTab,
+      onu: selectedOnuId,
+      auth: authId,
+      upd: updId,
+    });
+
+    if (signature === lastPushedSignatureRef.current) return;
+    lastPushedSignatureRef.current = signature;
+
+    const hash = buildHashForNav(
+      activeView,
+      selectedOltId,
+      initialOltTab,
+      selectedOnuId,
+      authId
+    );
+    try {
+      window.history.pushState(
+        {
+          smartOltNav: true,
+          activeView,
+          selectedOltId,
+          initialOltTab,
+          selectedOnuId,
+          authorizingOnuId: authId,
+          updatingModeOnuId: updId,
+        },
+        '',
+        hash
+      );
+    } catch {
+      // Ignore
+    }
+  }, [
+    activeView,
+    selectedOltId,
+    initialOltTab,
+    selectedOnuId,
+    authorizingOnu,
+    updatingModeOnu,
+  ]);
 
   // Configured ONUs Filter State
   const [searchQuery, setSearchQuery] = useState('');
@@ -2550,6 +2769,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             olt={selectedOlt}
             db={db}
             initialTab={initialOltTab}
+            onTabChange={(tab) => setInitialOltTab(tab)}
             onBack={() => setActiveView('OLTS_LIST')}
             onAddVlan={(newVlans, tagUplinkIds, cliScript) => {
               const createdRecords: VlanRecord[] = newVlans.map((nv, idx) => ({

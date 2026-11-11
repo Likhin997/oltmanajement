@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   OltRecord,
   SmartOltDatabaseState,
@@ -91,6 +91,7 @@ interface OltDetailViewProps {
   ) => void;
   onImportRunningConfig?: (oltId: number, rawConfig: string) => void;
   onSyncOltLive?: (oltId: number) => Promise<void>;
+  onTabChange?: (tab: OltDetailTab) => void;
 }
 
 export const OltDetailView: React.FC<OltDetailViewProps> = ({
@@ -111,8 +112,19 @@ export const OltDetailView: React.FC<OltDetailViewProps> = ({
   onUpdateOltTr069,
   onImportRunningConfig,
   onSyncOltLive,
+  onTabChange,
 }) => {
   const [activeTab, setActiveTab] = useState<OltDetailTab>(initialTab);
+
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
+
+  const handleSelectTab = (tab: OltDetailTab) => {
+    setActiveTab(tab);
+    onTabChange?.(tab);
+  };
+
   const [isSyncingLive, setIsSyncingLive] = useState(false);
   const [showTelnetUser, setShowTelnetUser] = useState(false);
   const [showTelnetPass, setShowTelnetPass] = useState(false);
@@ -649,7 +661,7 @@ ${oltVlans
             <button
               key={t.id}
               type="button"
-              onClick={() => setActiveTab(t.id)}
+              onClick={() => handleSelectTab(t.id)}
               className={`flex items-center gap-1.5 rounded-t border px-3.5 py-2.5 text-xs font-semibold transition ${
                 isActive
                   ? '-mb-px border-[#3b6998] border-b-[#0a192f] bg-[#0d2038] text-white'
@@ -1021,7 +1033,7 @@ ${oltVlans
                       </button>
                       <button
                         type="button"
-                        onClick={() => setActiveTab('PROFILES')}
+                        onClick={() => handleSelectTab('PROFILES')}
                         className="text-xs text-sky-400 underline"
                       >
                         Manage TR069 profiles
@@ -1670,7 +1682,7 @@ ${oltVlans
               Go to{' '}
               <button
                 type="button"
-                onClick={() => setActiveTab('UPLINK')}
+                onClick={() => handleSelectTab('UPLINK')}
                 className="font-semibold text-sky-400 underline"
               >
                 Uplink
