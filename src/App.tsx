@@ -723,8 +723,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       onus: prev.onus.map((item) =>
         item.id === onuId ? { ...item, ...(updatedFields || {}) } : item
       ),
-      provisioning_logs: [newLog, ...prev.provisioning_logs],
+      provisioning_logs:
+        actionType === 'POLL_SIGNAL'
+          ? prev.provisioning_logs
+          : [newLog, ...prev.provisioning_logs],
     }));
+
+    if (actionType === 'POLL_SIGNAL' && updatedFields) {
+      return { ok: true, output: cliScript, durationMs: 0 };
+    }
 
     showToast(`Mengeksekusi ${summaryMap[actionType]} ke OLT...`);
 

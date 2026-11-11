@@ -1341,9 +1341,7 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
     const realWanIp =
       wanInfo && wanInfo.currentIp && wanInfo.currentIp !== '0.0.0.0'
         ? wanInfo.currentIp
-        : prevOnu?.ip_address &&
-          !prevOnu.ip_address.startsWith('10.0.183.') &&
-          prevOnu.ip_address !== '0.0.0.0'
+        : prevOnu?.ip_address && prevOnu.ip_address !== '0.0.0.0'
         ? prevOnu.ip_address
         : wanInfo?.currentIp || null;
 
@@ -2232,8 +2230,9 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
           if (focusedAtten.onuTxDbm !== null) nextOnuTx = focusedAtten.onuTxDbm;
         }
 
-        // Real WAN IP from MikroTik via OLT `show gpon remote-onu wan-ip`
-        let nextIp = u.ip_address && !u.ip_address.startsWith('10.0.183.') ? u.ip_address : null;
+        // Real WAN IP from MikroTik via OLT `show gpon remote-onu ip-host / pppoe / wan-ip`
+        let nextIp =
+          u.ip_address && u.ip_address !== '0.0.0.0' ? u.ip_address : null;
         const effectiveWan = isFocused && focusedWan?.currentIp ? focusedWan : wanInfo;
         if (effectiveWan && effectiveWan.currentIp) {
           nextIp = effectiveWan.currentIp;
@@ -2252,7 +2251,19 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
               : u.distance_m,
           ip_address: nextIp,
           pppoe_username:
-            effectiveWan?.username || u.pppoe_username,
+            effectiveWan?.username ||
+            (isFocused && focusedWan?.username) ||
+            u.pppoe_username,
+          pppoe_password:
+            (effectiveWan?.password && !effectiveWan.password.includes('*')
+              ? effectiveWan.password
+              : null) ||
+            (isFocused &&
+            focusedWan?.password &&
+            !focusedWan.password.includes('*')
+              ? focusedWan.password
+              : null) ||
+            u.pppoe_password,
           last_online_at:
             nextPhase === 'working'
               ? nowStr

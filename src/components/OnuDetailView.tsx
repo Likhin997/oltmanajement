@@ -338,15 +338,12 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
         // Real PPPoE WAN IP assigned by MikroTik (from show gpon remote-onu ip-host / pppoe / wan-ip)
         if (parsedWan.currentIp) {
           updatedFields.ip_address = parsedWan.currentIp;
-        } else if (
-          onu.ip_address &&
-          onu.ip_address.startsWith('10.0.183.')
-        ) {
-          // Clear legacy fake placeholder IP if real WAN IP is 0.0.0.0 / unassigned
-          updatedFields.ip_address = null;
         }
-        if (parsedWan.username && !onu.pppoe_username) {
+        if (parsedWan.username) {
           updatedFields.pppoe_username = parsedWan.username;
+        }
+        if (parsedWan.password && !parsedWan.password.includes('*')) {
+          updatedFields.pppoe_password = parsedWan.password;
         }
 
         void onExecuteAction(onu.id, 'POLL_SIGNAL', cliJoined, updatedFields);
@@ -1252,7 +1249,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="font-mono">
                     {onu.wan_mode === 'PPPOE' ? 'PPPoE' : onu.wan_mode} -{' '}
-                    {onu.ip_address && !onu.ip_address.startsWith('10.0.183.') ? (
+                    {onu.ip_address && onu.ip_address !== '0.0.0.0' ? (
                       <span className="font-bold text-emerald-300">{onu.ip_address}</span>
                     ) : (
                       <span className="text-amber-300">0.0.0.0 (Waiting PPPoE / MikroTik IP)</span>
