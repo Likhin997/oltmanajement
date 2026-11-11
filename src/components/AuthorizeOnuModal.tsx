@@ -92,8 +92,8 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   const [presetName, setPresetName] = useState<string>('None');
   const [ponType, setPonType] = useState<'GPON' | 'EPON'>('GPON');
   const [gponChannel, setGponChannel] = useState<'GPON' | 'XG-PON' | 'XGS-PON'>('GPON');
-  const [onuType, setOnuType] = useState<string>(onu.onu_type || 'ALL');
-  const [useCustomProfile, setUseCustomProfile] = useState<boolean>(false);
+  const [onuType, setOnuType] = useState<string>('ALL');
+  const [useCustomProfile, setUseCustomProfile] = useState<boolean>(true);
   const [serviceProfile, setServiceProfile] = useState<string>('Default (ALL)');
   const [onuMode, setOnuMode] = useState<OnuModeOption>('Routing');
   const [vlanRecordId, setVlanRecordId] = useState<number>(
@@ -120,15 +120,15 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   const [wanRemoteAccess, setWanRemoteAccess] = useState<WanRemoteAccessOption>(
     'Enabled from everywhere in the internet'
   );
-  const [pppoeUsername, setPppoeUsername] = useState<string>(
-    `USER-${onu.serial_number.slice(-4)}-${String(allocatedOnuIndex).padStart(2, '0')}`
-  );
+  const [pppoeUsername, setPppoeUsername] = useState<string>('');
+  const [pppoeUserEdited, setPppoeUserEdited] = useState<boolean>(false);
   const [pppoePassword, setPppoePassword] = useState<string>('jetcyber');
-  const [showCliPreview, setShowCliPreview] = useState<boolean>(false);
+  const [showCliPreview, setShowCliPreview] = useState<boolean>(true);
   const [copiedCli, setCopiedCli] = useState<boolean>(false);
 
   const selectedVlan =
-    db.vlans.find((v) => v.id === vlanRecordId) ||
+    db.vlans.find((v) => v.id === vlanRecordId || v.vlan_id === vlanRecordId) ||
+    db.vlans.find((v) => v.vlan_id === 101) ||
     db.vlans[0] || {
       id: 101,
       vlan_id: 101,
@@ -139,23 +139,28 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   const selectedTcont = db.tcont_profiles[0];
   const selectedTr069 = db.tr069_profiles[0];
 
+  const effectivePppoeUser =
+    pppoeUsername.trim() ||
+    customerName.trim().replace(/\s+/g, '-') ||
+    onu.serial_number;
+
   const generatedCli = useMemo(() => {
     return generateAuthorizeCliScript({
       firmwareVersion: olt?.firmware_version || 'V2.1.0',
       ponInterface: `gpon-olt_1/${boardNum}/${portNum}`,
       onuIndex: allocatedOnuIndex,
       serialNumber: onu.serial_number,
-      onuType,
-      customerName: customerName || onu.serial_number,
-      address: address || 'None',
-      tcontProfile: selectedTcont?.profile_name || 'TCONT-1G',
-      speedProfile: selectedSpeed?.profile_name || '1G',
+      onuType: 'ALL',
+      customerName: customerName.trim() || effectivePppoeUser || onu.serial_number,
+      address: address.trim() || 'none',
+      tcontProfile: selectedTcont?.profile_name || 'SMARTOLT-1G-UP',
+      speedProfile: selectedSpeed?.profile_name || 'SMARTOLT-1G-DOWN',
       vlanId: selectedVlan?.vlan_id || 101,
       onuMode,
       wanMode: onuMode === 'Bridging' ? 'BRIDGE' : wanMode,
       configMethod,
       wanRemoteAccess,
-      pppoeUsername,
+      pppoeUsername: effectivePppoeUser,
       pppoePassword,
       tr069Enabled: configMethod === 'TR069',
       tr069AcsUrl: selectedTr069?.acs_url,
@@ -169,7 +174,6 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
     portNum,
     allocatedOnuIndex,
     onu.serial_number,
-    onuType,
     customerName,
     address,
     selectedTcont,
@@ -179,14 +183,17 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
     wanMode,
     configMethod,
     wanRemoteAccess,
-    pppoeUsername,
+    effectivePppoeUser,
     pppoePassword,
     selectedTr069,
   ]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const finalName = customerName.trim() || `SUBSCRIBER-${onu.serial_number.slice(-4)}`;
+    const finalName =
+      customerName.trim().replace(/\s+/g, '-') ||
+      effectivePppoeUser ||
+      onu.serial_number;
     onConfirmAuthorize(
       onu.id,
       {
@@ -194,15 +201,15 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         board: boardNum,
         port: portNum,
         onu_index: allocatedOnuIndex,
-        onu_type: onuType,
+        onu_type: 'ALL',
         is_authorized: true,
         customer_name: finalName.toUpperCase(),
-        address: address || 'None',
+        address: address.trim() || 'none',
         external_id: externalId || onu.serial_number,
         zone_id: zoneId,
         odb_id: odbId === 'NONE' ? null : odbId,
         odb_port: odbPort === 'NONE' ? null : odbPort,
-        vlan_id: vlanRecordId,
+        vlan_id: selectedVlan?.id || vlanRecordId,
         speed_profile_id: downSpeedId,
         tcont_profile_id: selectedTcont?.id || 1,
         onu_mode: onuMode,
@@ -215,7 +222,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         tr069_last_inform: 'Today 16:40:00',
         mgmt_ip: `10.100.${portNum}.${allocatedOnuIndex}`,
         wifi_enabled: true,
-        pppoe_username: onuMode === 'Routing' ? pppoeUsername : null,
+        pppoe_username: onuMode === 'Routing' ? effectivePppoeUser : null,
         pppoe_password: onuMode === 'Routing' ? pppoePassword : null,
         phase_state: 'working',
         onu_rx_dbm: onu.onu_rx_dbm || -22.45,
@@ -659,8 +666,14 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
             <input
               type="text"
               value={customerName}
-              onChange={(e) => setCustomerName(e.target.value)}
-              placeholder="Customer Name (e.g. RATMI)"
+              onChange={(e) => {
+                const nextVal = e.target.value;
+                setCustomerName(nextVal);
+                if (!pppoeUserEdited) {
+                  setPppoeUsername(nextVal.trim().replace(/\s+/g, '-'));
+                }
+              }}
+              placeholder="Customer Name (e.g. SAIPUL-RIFAI)"
               className="w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
             />
           </div>
@@ -676,7 +689,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
               type="text"
               value={address}
               onChange={(e) => setAddress(e.target.value)}
-              placeholder="Address or comment (optional)"
+              placeholder="Address or comment (optional, defaults to none)"
               className="w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
             />
           </div>
@@ -721,7 +734,11 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
                 <input
                   type="text"
                   value={pppoeUsername}
-                  onChange={(e) => setPppoeUsername(e.target.value)}
+                  onChange={(e) => {
+                    setPppoeUserEdited(true);
+                    setPppoeUsername(e.target.value);
+                  }}
+                  placeholder={effectivePppoeUser}
                   className="mt-1 w-full rounded border border-[#284870] bg-[#0c1c30] px-2.5 py-1.5 font-mono text-xs text-white"
                 />
               </div>

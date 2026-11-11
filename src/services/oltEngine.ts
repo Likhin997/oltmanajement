@@ -339,15 +339,23 @@ export function buildTr069CliLines(params: {
  *   pppoe 1 nat enable user <USER> password <PASS>, vlan-filter, dhcp-ip ethuni eth_0/1..8 from-onu, security-mgmt
  */
 export function generateAuthorizeCliScript(params: CliProvisioningParams): string {
-  const coords = params.ponInterface.replace(/^gpon-olt_/i, ''); // contoh: 1/3/2
+  const coords = params.ponInterface.replace(/^gpon-olt_/i, ''); // contoh: 1/3/3
   const oltIf = `gpon-olt_${coords}`;
   const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
   const cleanName =
-    params.customerName.replace(/[^a-zA-Z0-9_\-. ]/g, '').trim().toUpperCase() ||
-    `ONU-${params.serialNumber}`;
+    params.customerName
+      .replace(/[^a-zA-Z0-9_\-. ]/g, '')
+      .trim()
+      .replace(/\s+/g, '-')
+      .toUpperCase() || `ONU-${params.serialNumber}`;
   const cleanDesc =
-    params.address && params.address.trim() && params.address !== 'none'
-      ? params.address.replace(/[^a-zA-Z0-9_\-. ,/]/g, '').trim()
+    params.address &&
+    params.address.trim() &&
+    params.address.trim().toLowerCase() !== 'none'
+      ? params.address
+          .replace(/[^a-zA-Z0-9_\-. ,/]/g, '')
+          .trim()
+          .replace(/\s+/g, '-')
       : 'none';
 
   const onuMode: OnuModeOption =
@@ -356,10 +364,9 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
   const wanRemoteAccess: WanRemoteAccessOption =
     params.wanRemoteAccess || 'Enabled from everywhere in the internet';
 
-  const zteOnuType =
-    params.onuType === 'F670LV9.0' || params.onuType.includes('F670')
-      ? 'F670LV9.0'
-      : 'ALL';
+  // SmartOLT ZTE C300 standard: always register with `type ALL` and 8 ethuni ports
+  // to avoid OMCI Equipment-ID mismatch that blocks PPPoE ME creation on ZTE ONUs.
+  const zteOnuType = 'ALL';
   const tcontUpProfile =
     params.tcontProfile && params.tcontProfile.startsWith('SMARTOLT')
       ? params.tcontProfile
@@ -371,16 +378,12 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
 
   const lines: string[] = [
     `configure terminal`,
-    `vlan database`,
-    `  vlan ${params.vlanId}`,
-    `exit`,
     `interface ${oltIf}`,
     `  onu ${params.onuIndex} type ${zteOnuType} sn ${params.serialNumber}`,
     `exit`,
     `interface ${onuIf}`,
     `  name ${cleanName}`,
     `  description ${cleanDesc}`,
-    `  sn-bind enable sn`,
     `  tcont 1 profile ${tcontUpProfile}`,
   ];
 
@@ -435,10 +438,9 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
       `  vlan port eth_0/4 mode tag vlan ${params.vlanId}`
     );
   } else if (params.wanMode === 'PPPOE') {
-    const user =
-      params.pppoeUsername ||
-      `${cleanName.replace(/\s+/g, '-')}-0101${String(params.onuIndex).padStart(2, '0')}`;
-    const pass = params.pppoePassword || 'jetcyber';
+    const rawUser = params.pppoeUsername ? params.pppoeUsername.trim() : cleanName;
+    const user = rawUser.replace(/\s+/g, '-') || cleanName;
+    const pass = (params.pppoePassword || 'jetcyber').trim().replace(/\s+/g, '');
     lines.push(
       `  pppoe 1 nat enable user ${user} password ${pass}`,
       `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
@@ -467,9 +469,8 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
     );
   }
 
-  // Jumlah port Ethernet: F670LV9.0 = 4 port, ALL = 8 port (sesuai running-config)
-  const ethCount = zteOnuType === 'F670LV9.0' ? 4 : 8;
-  for (let e = 1; e <= ethCount; e++) {
+  // SmartOLT standard: configure all 8 ethuni ports (`eth_0/1` .. `eth_0/8`)
+  for (let e = 1; e <= 8; e++) {
     lines.push(`  dhcp-ip ethuni eth_0/${e} from-onu`);
   }
 
@@ -509,6 +510,9 @@ export function generateUpdateOnuModeCliScript(params: {
   ponInterface: string;
   onuIndex: number;
   serialNumber: string;
+  customerName?: string;
+  address?: string;
+  rebindTypeAll?: boolean;
   vlanId: number;
   onuMode: OnuModeOption;
   wanMode: WanModeOption;
@@ -529,14 +533,52 @@ export function generateUpdateOnuModeCliScript(params: {
   wifiPassword?: string;
 }): string {
   const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
+  const oltIf = `gpon-olt_${coords}`;
   const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const cleanName =
+    (params.customerName || params.pppoeUsername || params.serialNumber)
+      .replace(/[^a-zA-Z0-9_\-. ]/g, '')
+      .trim()
+      .replace(/\s+/g, '-')
+      .toUpperCase() || params.serialNumber;
+  const cleanDesc =
+    params.address &&
+    params.address.trim() &&
+    params.address.trim().toLowerCase() !== 'none'
+      ? params.address
+          .replace(/[^a-zA-Z0-9_\-. ,/]/g, '')
+          .trim()
+          .replace(/\s+/g, '-')
+      : 'none';
 
-  const lines: string[] = [
-    `configure terminal`,
-    `interface ${onuIf}`,
-    `  no service-port 1`,
-    `  service-port 1 vport 1 user-vlan ${params.vlanId} vlan ${params.vlanId}`,
-  ];
+  const lines: string[] = [`configure terminal`];
+
+  if (params.rebindTypeAll) {
+    lines.push(
+      `interface ${oltIf}`,
+      `  no onu ${params.onuIndex}`,
+      `  onu ${params.onuIndex} type ALL sn ${params.serialNumber}`,
+      `exit`,
+      `interface ${onuIf}`,
+      `  name ${cleanName}`,
+      `  description ${cleanDesc}`,
+      `  tcont 1 profile SMARTOLT-1G-UP`,
+      `  gemport 1 tcont 1`,
+      `  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN`,
+      `  service-port 1 vport 1 user-vlan ${params.vlanId} vlan ${params.vlanId}`
+    );
+  } else {
+    lines.push(
+      `interface ${onuIf}`,
+      `  name ${cleanName}`,
+      `  description ${cleanDesc}`,
+      `  tcont 1 profile SMARTOLT-1G-UP`,
+      `  gemport 1 tcont 1`,
+      `  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN`,
+      `  no service-port 1`,
+      `  service-port 1 vport 1 user-vlan ${params.vlanId} vlan ${params.vlanId}`
+    );
+  }
 
   if (params.configMethod === 'TR069') {
     lines.push(
@@ -567,8 +609,14 @@ export function generateUpdateOnuModeCliScript(params: {
     );
   } else {
     if (params.wanMode === 'PPPOE') {
+      const user =
+        (params.pppoeUsername || cleanName).trim().replace(/\s+/g, '-') || cleanName;
+      const pass = (params.pppoePassword || 'jetcyber').trim().replace(/\s+/g, '');
+      if (!params.rebindTypeAll) {
+        lines.push(`  no pppoe 1`);
+      }
       lines.push(
-        `  pppoe 1 nat enable user ${params.pppoeUsername || 'RATMI-010111'} password ${params.pppoePassword || 'jetcyber'}`,
+        `  pppoe 1 nat enable user ${user} password ${pass}`,
         `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
         `  vlan-filter iphost 1 pri 0 vlan ${params.vlanId}`
       );
@@ -707,17 +755,35 @@ export function generateUpdatePppoeCliScript(
 ): string {
   const coords = ponInterface.replace(/^gpon-olt_/i, '');
   const onuIf = `gpon-onu_${coords}:${onuIndex}`;
+  const cleanUser = pppoeUsername.trim().replace(/\s+/g, '-');
+  const cleanPass = pppoePassword.trim().replace(/\s+/g, '');
   return [
     `configure terminal`,
+    `interface ${onuIf}`,
+    `  tcont 1 profile SMARTOLT-1G-UP`,
+    `  gemport 1 tcont 1`,
+    `  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN`,
+    `  no service-port 1`,
+    `  service-port 1 vport 1 user-vlan ${vlanId} vlan ${vlanId}`,
+    `exit`,
     `pon-onu-mng ${onuIf}`,
     `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
     `  flow 1 pri 0 vlan ${vlanId}`,
     `  gemport 1 flow 1`,
     `  switchport-bind switch_0/1 iphost 1`,
     `  switchport-bind switch_0/1 veip 1`,
-    `  pppoe 1 nat enable user ${pppoeUsername} password ${pppoePassword}`,
+    `  no pppoe 1`,
+    `  pppoe 1 nat enable user ${cleanUser} password ${cleanPass}`,
     `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
     `  vlan-filter iphost 1 pri 0 vlan ${vlanId}`,
+    `  dhcp-ip ethuni eth_0/1 from-onu`,
+    `  dhcp-ip ethuni eth_0/2 from-onu`,
+    `  dhcp-ip ethuni eth_0/3 from-onu`,
+    `  dhcp-ip ethuni eth_0/4 from-onu`,
+    `  dhcp-ip ethuni eth_0/5 from-onu`,
+    `  dhcp-ip ethuni eth_0/6 from-onu`,
+    `  dhcp-ip ethuni eth_0/7 from-onu`,
+    `  dhcp-ip ethuni eth_0/8 from-onu`,
     ...buildWanRemoteAccessCliLines(wanRemoteAccess),
     `exit`,
     `end`,

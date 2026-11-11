@@ -685,12 +685,14 @@ export function normalizeCliCommandsForExecution(
     Array.isArray(rawCommands) ? rawCommands.join('\n') : String(rawCommands)
   ).split(/\r?\n/);
 
+  const hasExplicitExits = inputLines.some((l) => /^exit$/i.test(l.trim()));
   const result: string[] = [];
   let inConfigMode = false;
   let inSubBlock = false;
 
+  // Note: `vlan <id>` is a sub-command inside `vlan database` on ZTE C300, NOT a top-level block!
   const isTopSubBlockStart = (cmd: string): boolean =>
-    /^(interface\s+|pon-onu-mng\s+|vlan\s+database\b|vlan\s+\d+\b|gpon\b|epon\b|pon\b|onu-pnp\b)/i.test(
+    /^(interface\s+|pon-onu-mng\s+|vlan\s+database\b|gpon\b|epon\b|pon\b|onu-pnp\b)/i.test(
       cmd
     );
 
@@ -706,7 +708,7 @@ export function normalizeCliCommandsForExecution(
     }
 
     if (line === '!') {
-      if (inConfigMode && inSubBlock) {
+      if (inConfigMode && inSubBlock && !hasExplicitExits) {
         result.push('exit');
         inSubBlock = false;
       }
@@ -726,7 +728,7 @@ export function normalizeCliCommandsForExecution(
       continue;
     }
 
-    if (inConfigMode && isTopSubBlockStart(line)) {
+    if (!hasExplicitExits && inConfigMode && isTopSubBlockStart(line)) {
       if (inSubBlock) {
         result.push('exit');
       }
@@ -750,10 +752,10 @@ function hasCliPromptAtEnd(buffer: string): {
   isUserMode: boolean;
 } {
   const cleaned = buffer
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-    .replace(/\x00/g, '');
-  const lines = cleaned.split(/\r?\n/);
-  // Find the last non-empty line
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  // Split on both LF (\n) and bare CR (\r) used by ZTE horizontal line scrolling
+  const lines = cleaned.split(/[\r\n]+/);
   let lastLine = '';
   for (let i = lines.length - 1; i >= 0; i--) {
     if (lines[i].trim().length > 0) {
@@ -768,8 +770,8 @@ function hasCliPromptAtEnd(buffer: string): {
     return { isPrompt: false, isUserMode: false };
   }
 
-  // Standard ZTE/Huawei prompt: `ZXAN#`, `ZXAN>`, `ZXAN(config)#`, `ZXAN(config-if)#`, `POP-OLT#`
-  const promptRegex = /^[A-Za-z0-9_.\-]+(?:\([A-Za-z0-9_.\-\/:]+\))?([>#])\s*$/;
+  // Standard ZTE/Huawei prompt: `ZXAN#`, `ZXAN>`, `ZXAN(config)#`, `ZXAN(config-if)#`, `ZXAN(gpon-onu-mng)#`
+  const promptRegex = /^[A-Za-z0-9_.\-]+(?:\([^\r\n()]{1,48}\))?([>#])\s*$/;
   const match = lastLine.match(promptRegex);
   if (!match) {
     return { isPrompt: false, isUserMode: false };
@@ -803,7 +805,7 @@ async function executeTelnetSession(params: {
   );
   const timeout =
     params.timeoutMs ||
-    Math.max(hasHeavyShow ? 35000 : 18000, normalizedCmds.length * 600 + 10000);
+    Math.max(hasHeavyShow ? 35000 : 20000, normalizedCmds.length * 450 + 10000);
 
   return new Promise((resolve) => {
     const socket = new net.Socket();
@@ -824,6 +826,7 @@ async function executeTelnetSession(params: {
     let cmdIndex = 0;
     let currentCmd = '';
     let waitingForPrompt = false;
+    let sawOnuRegistration = false;
     let stepTimer: NodeJS.Timeout | null = null;
     let wakeTimer: NodeJS.Timeout | null = null;
     let promptDebounceTimer: NodeJS.Timeout | null = null;
@@ -863,10 +866,10 @@ async function executeTelnetSession(params: {
         clearTimeout(stepTimer);
         stepTimer = null;
       }
-      const isSlowCmd = /^(write|wr|show\s+running-config|show\s+gpon|show\s+card|reset-card)/i.test(
+      const isSlowCmd = /^(write|wr|show\s+running-config|show\s+gpon|show\s+card|reset-card|no\s+onu\s+\d+|onu\s+\d+\s+type)/i.test(
         cmd
       );
-      const idleLimitMs = isSlowCmd ? 8000 : 2500;
+      const idleLimitMs = isSlowCmd ? 6500 : 750;
       stepTimer = setTimeout(() => {
         if (waitingForPrompt && stage === 'EXEC_CMDS' && !settled) {
           waitingForPrompt = false;
@@ -893,6 +896,25 @@ async function executeTelnetSession(params: {
       }
 
       currentCmd = cmdQueue[cmdIndex++];
+      if (/^onu\s+\d+\s+type\s+/i.test(currentCmd)) {
+        sawOnuRegistration = true;
+      }
+
+      // If we just registered a new ONU (`onu <idx> type ALL sn ...`) in this session,
+      // pause 1200ms before entering `pon-onu-mng` so the ZTE C300 finishes creating
+      // the ONU OMCI MIB context before pushing `pppoe 1 nat enable ...`
+      if (sawOnuRegistration && /^pon-onu-mng\s+/i.test(currentCmd)) {
+        sawOnuRegistration = false;
+        setTimeout(() => {
+          if (settled) return;
+          stepBuffer = '';
+          waitingForPrompt = true;
+          socket.write(currentCmd + '\r\n');
+          armCommandWatchdog(currentCmd);
+        }, 1200);
+        return;
+      }
+
       stepBuffer = '';
       waitingForPrompt = true;
       socket.write(currentCmd + '\r\n');
@@ -1163,15 +1185,19 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
 
   // 2. VLANs
   const otherVlans = state.vlans.filter((v) => v.olt_id !== oltId);
-  const newVlans: VlanRecord[] = parsed.vlans.map((v, idx) => {
+  const newVlans: VlanRecord[] = parsed.vlans.map((v) => {
     const onuCount = parsed.onus.filter((o) => o.vlanId === v.vlanId).length;
+    const vlanLabel =
+      v.vlanId === 101 && (!v.name || v.name === 'VLAN0101')
+        ? 'PPPOE'
+        : v.name;
     return {
-      id: oltId * 10000 + v.vlanId + idx,
+      id: oltId * 10000 + v.vlanId,
       olt_id: oltId,
       vlan_id: v.vlanId,
-      name: v.name,
-      description: v.name,
-      default_for: 'None selected',
+      name: vlanLabel,
+      description: vlanLabel,
+      default_for: v.vlanId === 101 ? 'PPPoE / HSI' : 'None selected',
       used_for_mgmt_tr069_voip: v.vlanId === 100 || /tr069|mgmt|mjmt/i.test(v.name),
       used_for_iptv: false,
       dhcp_snooping: /ip\s+dhcp\s+snooping\s+control-port\s+enable/i.test(rawConfig),

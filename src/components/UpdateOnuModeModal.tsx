@@ -43,7 +43,16 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
     ponPort?.interface_name || `gpon-olt_1/${onu.board || 3}/${onu.port || 1}`;
 
   const [vlanRecordId, setVlanRecordId] = useState<number>(
-    onu.vlan_id || db.vlans[0]?.id || 101
+    onu.vlan_id ||
+      db.vlans.find((v) => v.vlan_id === 101)?.id ||
+      db.vlans[0]?.id ||
+      101
+  );
+  const [customerName, setCustomerName] = useState<string>(
+    onu.customer_name || onu.pppoe_username || onu.serial_number
+  );
+  const [rebindTypeAll, setRebindTypeAll] = useState<boolean>(
+    Boolean(onu.onu_type && onu.onu_type !== 'ALL')
   );
   const [onuMode, setOnuMode] = useState<OnuModeOption>(onu.onu_mode || 'Routing');
   const [wanMode, setWanMode] = useState<WanModeOption>(
@@ -53,7 +62,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
     onu.config_method || 'OMCI'
   );
   const [username, setUsername] = useState<string>(
-    onu.pppoe_username || 'RATMI-010111'
+    onu.pppoe_username || onu.customer_name || 'SAIPUL-RIFAI'
   );
   const [password, setPassword] = useState<string>(
     onu.pppoe_password || 'jetcyber'
@@ -93,7 +102,8 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
   const [copied, setCopied] = useState<boolean>(false);
 
   const selectedVlan =
-    db.vlans.find((v) => v.id === vlanRecordId) ||
+    db.vlans.find((v) => v.id === vlanRecordId || v.vlan_id === vlanRecordId) ||
+    db.vlans.find((v) => v.vlan_id === 101) ||
     db.vlans[0] || {
       id: 101,
       vlan_id: 101,
@@ -109,6 +119,9 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
       ponInterface: ponInterfaceName,
       onuIndex: onu.onu_index || 1,
       serialNumber: onu.serial_number,
+      customerName: customerName.trim() || username.trim() || onu.serial_number,
+      address: onu.address || 'none',
+      rebindTypeAll,
       vlanId: selectedVlan?.vlan_id || 101,
       onuMode,
       wanMode: onuMode === 'Bridging' ? 'BRIDGE' : wanMode,
@@ -133,6 +146,9 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
     ponInterfaceName,
     onu.onu_index,
     onu.serial_number,
+    onu.address,
+    customerName,
+    rebindTypeAll,
     selectedVlan,
     onuMode,
     wanMode,
@@ -155,14 +171,24 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
     onConfirmUpdate(
       onu.id,
       {
-        vlan_id: vlanRecordId,
+        customer_name: (customerName.trim() || username.trim() || onu.serial_number)
+          .replace(/\s+/g, '-')
+          .toUpperCase(),
+        onu_type: rebindTypeAll ? 'ALL' : onu.onu_type,
+        vlan_id: selectedVlan?.id || vlanRecordId,
         onu_mode: onuMode,
         wan_mode: onuMode === 'Bridging' ? 'BRIDGE' : wanMode,
         config_method: configMethod,
         wan_remote_access: wanRemoteAccess,
         wan_remote_allowed_subnet: allowedSubnet,
-        pppoe_username: onuMode === 'Routing' && wanMode === 'PPPOE' ? username : onu.pppoe_username,
-        pppoe_password: onuMode === 'Routing' && wanMode === 'PPPOE' ? password : onu.pppoe_password,
+        pppoe_username:
+          onuMode === 'Routing' && wanMode === 'PPPOE'
+            ? username.trim().replace(/\s+/g, '-')
+            : onu.pppoe_username,
+        pppoe_password:
+          onuMode === 'Routing' && wanMode === 'PPPOE'
+            ? password.trim()
+            : onu.pppoe_password,
         static_ip_address: wanMode === 'STATIC_IP' ? staticIp : null,
         static_subnet_mask: wanMode === 'STATIC_IP' ? staticMask : null,
         static_gateway: wanMode === 'STATIC_IP' ? staticGw : null,
@@ -216,6 +242,30 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
         >
           {/* Left Column: Identical SmartOLT "Update ONU mode" Form */}
           <div className={`space-y-5 p-6 ${showCliPreview ? 'lg:col-span-7' : 'lg:col-span-12'}`}>
+            {/* Row 0: Name & Hardware Type Rebind */}
+            <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-12">
+              <label className="text-sm font-bold text-slate-200 sm:col-span-4 sm:text-right sm:pr-4">
+                ONU Name
+              </label>
+              <div className="space-y-2 sm:col-span-8">
+                <input
+                  type="text"
+                  value={customerName}
+                  onChange={(e) => setCustomerName(e.target.value)}
+                  className="w-full rounded-md border border-slate-600 bg-[#1c2536] px-3.5 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-hidden"
+                />
+                <label className="flex cursor-pointer items-center gap-2 text-xs text-amber-300">
+                  <input
+                    type="checkbox"
+                    checked={rebindTypeAll}
+                    onChange={(e) => setRebindTypeAll(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded accent-amber-500"
+                  />
+                  Re-register ONU as `type ALL` (Gunakan jika PPPoE belum masuk / hanya 4 port eth)
+                </label>
+              </div>
+            </div>
+
             {/* Row 1: WAN VLAN-ID */}
             <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-12">
               <label className="text-sm font-bold text-slate-200 sm:col-span-4 sm:text-right sm:pr-4">
@@ -223,7 +273,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
               </label>
               <div className="sm:col-span-8">
                 <select
-                  value={vlanRecordId}
+                  value={selectedVlan?.id || vlanRecordId}
                   onChange={(e) => setVlanRecordId(Number(e.target.value))}
                   className="w-full rounded-md border border-slate-600 bg-[#1c2536] px-3.5 py-2.5 text-sm font-medium text-white focus:border-blue-500 focus:outline-hidden"
                 >
