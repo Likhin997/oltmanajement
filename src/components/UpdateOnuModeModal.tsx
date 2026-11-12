@@ -204,7 +204,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
         static_dns1: wanMode === 'STATIC_IP' ? staticDns : null,
         tr069_profile_id: tr069ProfileId,
         tr069_status: 'ACTIVE_INFORMING',
-        tr069_last_inform: new Date().toISOString().slice(0, 19).replace('T', ' '),
+        tr069_last_inform: `${new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ')} WIB`,
         wifi_ssid: wifiSsid,
         wifi_password: wifiPassword,
       },

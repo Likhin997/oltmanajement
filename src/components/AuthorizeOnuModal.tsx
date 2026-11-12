@@ -370,7 +370,9 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
       customerName.trim().replace(/\s+/g, '-') ||
       effectivePppoeUser ||
       onu.serial_number;
-    const nowTime = new Date().toLocaleTimeString('en-GB', { hour12: false });
+    const jktNow = new Date(Date.now() + 7 * 3600 * 1000);
+    const jktIso = jktNow.toISOString().replace('T', ' ').slice(0, 19);
+    const nowTime = jktIso.slice(11, 19);
     onConfirmAuthorize(
       onu.id,
       {
@@ -397,7 +399,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         wan_remote_allowed_subnet: '0.0.0.0/0',
         tr069_profile_id: 1,
         tr069_status: 'ACTIVE_INFORMING',
-        tr069_last_inform: `Today ${nowTime}`,
+        tr069_last_inform: `${jktIso} WIB`,
         mgmt_ip: null,
         wifi_enabled: true,
         pppoe_username: onuMode === 'Routing' ? effectivePppoeUser : null,
@@ -409,8 +411,8 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
           onuMode === 'Routing'
             ? null
             : `Bridge-VLAN${selectedVlan?.vlan_id || 101}`,
-        auth_date_label: `Today ${nowTime}`,
-        last_online_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
+        auth_date_label: `Today ${nowTime} WIB`,
+        last_online_at: jktIso,
         last_offline_reason: 'None',
       },
       generatedCli,

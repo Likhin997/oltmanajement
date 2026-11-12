@@ -659,7 +659,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       {
         config_method: 'TR069',
         tr069_status: 'ACTIVE_INFORMING',
-        tr069_last_inform: new Date().toISOString().slice(0, 19).replace('T', ' '),
+        tr069_last_inform: `${new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ')} WIB`,
       },
       `TR-069 CWMP & OMCI Push (${onu.serial_number})\n${rpcPreview}`
     );

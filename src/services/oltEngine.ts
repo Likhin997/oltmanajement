@@ -545,15 +545,21 @@ export interface InterfaceTrafficParsed {
  * - OLT `input rate` / `Input Bytes`   = Upstream dari ONU ke OLT  (UPLOAD pelanggan)
  * - OLT `output rate` / `Output Bytes` = Downstream dari OLT ke ONU (DOWNLOAD pelanggan)
  */
-export function parseZteInterfaceTraffic(rawOutput: string): InterfaceTrafficParsed {
+export function parseZteInterfaceTraffic(
+  rawOutput: string,
+  isUplinkDirection = false
+): InterfaceTrafficParsed {
   const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
-  const ifSectionIdx = cleaned.search(/show\s+interface\s+gpon-onu_/i);
+  const ifSectionIdx = cleaned.search(/show\s+interface\s+/i);
   const section = ifSectionIdx >= 0 ? cleaned.slice(ifSectionIdx) : cleaned;
 
   const parseRateToMbps = (valStr: string, unitRaw: string): number => {
     const val = parseFloat(valStr);
     if (isNaN(val) || val < 0) return 0;
     const u = unitRaw.trim();
+    if (/^Gbps$/i.test(u)) {
+      return Number((val * 1000).toFixed(3));
+    }
     if (/^MBps$/i.test(u) && u.includes('B')) {
       return Number((val * 8).toFixed(3));
     }
@@ -575,10 +581,10 @@ export function parseZteInterfaceTraffic(rawOutput: string): InterfaceTrafficPar
   };
 
   const inRateMatch = section.match(
-    /input\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Mbps|MBps)/i
+    /input\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Mbps|MBps|Gbps)/i
   );
   const outRateMatch = section.match(
-    /output\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Mbps|MBps)/i
+    /output\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Mbps|MBps|Gbps)/i
   );
 
   // Extract cumulative Input Bytes & Output Bytes
@@ -607,12 +613,17 @@ export function parseZteInterfaceTraffic(rawOutput: string): InterfaceTrafficPar
     if (bm) outBytes = parseInt(bm[1], 10);
   }
 
-  const uploadMbps = inRateMatch
+  const inRateMbps = inRateMatch
     ? parseRateToMbps(inRateMatch[1], inRateMatch[2])
     : null;
-  const downloadMbps = outRateMatch
+  const outRateMbps = outRateMatch
     ? parseRateToMbps(outRateMatch[1], outRateMatch[2])
     : null;
+
+  // On Uplink (xgei/gei): Input from Core Router = Download, Output to Core Router = Upload
+  // On PON/ONU (gpon-olt/gpon-onu): Output from OLT to ONU = Download, Input from ONU to OLT = Upload
+  const downloadMbps = isUplinkDirection ? inRateMbps : outRateMbps;
+  const uploadMbps = isUplinkDirection ? outRateMbps : inRateMbps;
 
   return {
     downloadMbps,
@@ -622,6 +633,26 @@ export function parseZteInterfaceTraffic(rawOutput: string): InterfaceTrafficPar
     inPackets,
     outPackets,
   };
+}
+
+/**
+ * 3c. Multi-Interface Traffic Parser untuk Uplink (`xgei_1/19/1`, `gei_1/19/3`) & PON (`gpon-olt_1/3/1`, dll.)
+ */
+export function parseZteMultiInterfaceTraffic(
+  rawOutput: string
+): Map<string, InterfaceTrafficParsed> {
+  const map = new Map<string, InterfaceTrafficParsed>();
+  const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const regex =
+    /show\s+interface\s+([A-Za-z0-9_\-\/:.]+)([\s\S]*?)(?=show\s+interface\s+|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(cleaned)) !== null) {
+    const ifName = m[1].trim().toLowerCase();
+    const isUplink = /^(?:x?gei|smartgroup)/i.test(ifName);
+    const parsed = parseZteInterfaceTraffic(`show interface ${ifName}\n${m[2]}`, isUplink);
+    map.set(ifName, parsed);
+  }
+  return map;
 }
 
 /**

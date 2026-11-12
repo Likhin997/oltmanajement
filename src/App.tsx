@@ -496,6 +496,142 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   const [splitterFormLng, setSplitterFormLng] = useState('106.251');
   const [splitterFormDesc, setSplitterFormDesc] = useState('');
 
+  // ==========================================================================
+  // ASIA/JAKARTA (WIB / UTC+7) TIMEZONE FORMATTER & OLT GRAPHS STATE
+  // ==========================================================================
+  const formatJakartaDateTime = (ms: number = Date.now()): string => {
+    const jkt = new Date(ms + 7 * 3600 * 1000);
+    const yyyy = jkt.getUTCFullYear();
+    const mm = String(jkt.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(jkt.getUTCDate()).padStart(2, '0');
+    const hh = String(jkt.getUTCHours()).padStart(2, '0');
+    const mi = String(jkt.getUTCMinutes()).padStart(2, '0');
+    const ss = String(jkt.getUTCSeconds()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+  };
+
+  interface OltGraphPoint {
+    timestampMs: number;
+    label: string;
+    shortLabel: string;
+    downloadMbps: number;
+    uploadMbps: number;
+    sampleCount: number;
+    isLive: boolean;
+  }
+
+  interface OltGraphPeriodSeries {
+    period: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
+    intervalLabel: string;
+    points: OltGraphPoint[];
+    curDownloadMbps: number;
+    maxDownloadMbps: number;
+    avgDownloadMbps: number;
+    curUploadMbps: number;
+    maxUploadMbps: number;
+    avgUploadMbps: number;
+  }
+
+  interface OltInterfaceGraphItem {
+    id: number;
+    portNumber?: number;
+    interfaceName: string;
+    interfaceType: 'UPLINK' | 'PON';
+    title: string;
+    subtitle: string;
+    status: string;
+    activeOnus: number;
+    totalOnus: number;
+    periods: {
+      Daily: OltGraphPeriodSeries;
+      Weekly: OltGraphPeriodSeries;
+      Monthly: OltGraphPeriodSeries;
+      Yearly: OltGraphPeriodSeries;
+    };
+  }
+
+  interface OltGraphsPayload {
+    oltId: number;
+    oltName: string;
+    timezone: string;
+    polledAtWib: string;
+    uplinks: OltInterfaceGraphItem[];
+    ponPorts: OltInterfaceGraphItem[];
+  }
+
+  const [graphsOltId, setGraphsOltId] = useState<number>(1);
+  const [oltGraphsData, setOltGraphsData] = useState<OltGraphsPayload | null>(null);
+  const [graphsLoading, setGraphsLoading] = useState<boolean>(false);
+  const [graphsPollingLive, setGraphsPollingLive] = useState<boolean>(false);
+  const [graphsFilterType, setGraphsFilterType] = useState<'ALL' | 'UPLINK' | 'PON'>('ALL');
+  const [graphsShowAllPon, setGraphsShowAllPon] = useState<boolean>(true);
+  const [selectedGraphInterfaceName, setSelectedGraphInterfaceName] = useState<string | null>(null);
+  const [selectedGraphPeriod, setSelectedGraphPeriod] = useState<
+    'ALL_PERIODS' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
+  >('ALL_PERIODS');
+  const [jakartaClockStr, setJakartaClockStr] = useState<string>(() =>
+    formatJakartaDateTime()
+  );
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setJakartaClockStr(formatJakartaDateTime());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const fetchOltGraphs = async (targetOltId: number) => {
+    setGraphsLoading(true);
+    try {
+      const resp = await fetch(`/api/olts/${targetOltId}/graphs`);
+      const json = await resp.json();
+      if (json && json.ok) {
+        setOltGraphsData(json);
+      }
+    } catch {
+      // Ignore network error
+    } finally {
+      setGraphsLoading(false);
+    }
+  };
+
+  const pollOltGraphsLive = async (targetOltId: number, silent = false) => {
+    setGraphsPollingLive(true);
+    try {
+      const resp = await fetch(`/api/olts/${targetOltId}/poll-graphs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const json = await resp.json();
+      if (json && json.ok) {
+        setOltGraphsData(json);
+        if (!silent) {
+          showToast(
+            json.reachable
+              ? `✓ Grafik Uplink & PON OLT diperbarui secara real-time (${json.polledAtWib} WIB)`
+              : `Grafik Uplink & PON dimuat (${json.polledAtWib} WIB)`
+          );
+        }
+      }
+    } catch {
+      // Ignore network error
+    } finally {
+      setGraphsPollingLive(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeView !== 'GRAPHS') return;
+    const targetId = graphsOltId || selectedOltId || 1;
+    void fetchOltGraphs(targetId);
+    void pollOltGraphsLive(targetId, true);
+
+    const interval = setInterval(() => {
+      void pollOltGraphsLive(targetId, true);
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [activeView, graphsOltId, selectedOltId]);
+
   // Quick-add helpers shared between Settings -> Zones/Sectors/Splitters & AuthorizeOnuModal
   const handleQuickAddZone = (zoneInput: Omit<ZoneRecord, 'id'>): ZoneRecord => {
     const nextId = Math.max(0, ...db.zones.map((z) => z.id)) + 1;
@@ -2689,7 +2825,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             onBack={() => setActiveView('OLTS_LIST')}
             onSaveOlt={(newOltData) => {
               const nextId = Math.max(0, ...db.olts.map((o) => o.id)) + 1;
-              const nowStr = new Date().toISOString().replace('T', ' ').slice(0, 19);
+              const nowStr = formatJakartaDateTime();
               setDb((prev) => ({
                 ...prev,
                 olts: [
@@ -3216,10 +3352,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               );
             }}
             onRefreshOltCards={async () => {
-              const nowStr = new Date()
-                .toISOString()
-                .slice(0, 19)
-                .replace('T', ' ');
+              const nowStr = formatJakartaDateTime();
               setDb((prev) => ({
                 ...prev,
                 olt_cards: prev.olt_cards.map((c) => ({
@@ -3240,10 +3373,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               const slotNum = targetCard?.slot || 3;
               const logId = Date.now();
               const rebootCardCli = `reset-card slotno ${slotNum}`;
-              const nowStr = new Date()
-                .toISOString()
-                .slice(0, 19)
-                .replace('T', ' ');
+              const nowStr = formatJakartaDateTime();
               setDb((prev) => ({
                 ...prev,
                 olt_cards: prev.olt_cards.map((c) =>
@@ -4809,27 +4939,417 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               </div>
             )}
 
-            {activeView === 'GRAPHS' && (
-              <div className="rounded border border-slate-800 bg-[#05080f] p-5">
-                <div className="text-center font-mono text-xs font-bold text-white">
-                  Aggregate OLT Uplink Traffic (`gei_1/19/3` Core Router) — Peak 1.84 Gbps
-                </div>
-                <div className="mt-4 flex h-40 items-end gap-1 border-b border-l border-slate-800 px-4 pb-1">
-                  {Array.from({ length: 28 }, (_, i) => (
-                    <div key={i} className="flex flex-1 flex-col items-center gap-0.5">
-                      <div
-                        className="w-full rounded-t bg-emerald-500/80"
-                        style={{ height: `${40 + ((i * 17) % 85)}px` }}
-                      />
-                      <div
-                        className="w-full rounded-b bg-sky-500/80"
-                        style={{ height: `${15 + ((i * 9) % 35)}px` }}
-                      />
+            {activeView === 'GRAPHS' && (() => {
+              const allUplinks = oltGraphsData?.uplinks || [];
+              const allPonPorts = (oltGraphsData?.ponPorts || []).filter((p) =>
+                graphsShowAllPon ? true : p.activeOnus > 0 || p.totalOnus > 0
+              );
+              const allItems: OltInterfaceGraphItem[] = [
+                ...allUplinks,
+                ...(oltGraphsData?.ponPorts || []),
+              ];
+              const selectedGraphItem = selectedGraphInterfaceName
+                ? allItems.find(
+                    (it) =>
+                      it.interfaceName.toLowerCase() ===
+                      selectedGraphInterfaceName.toLowerCase()
+                  ) || null
+                : null;
+
+              const formatRateLabel = (mbps: number): string => {
+                if (mbps >= 1000) {
+                  return `${(mbps / 1000).toFixed(2)} Gbps`;
+                }
+                return `${mbps.toFixed(2)} Mbps`;
+              };
+
+              const renderGraphChartBlock = (
+                item: OltInterfaceGraphItem,
+                periodKey: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
+                periodTitleIndo: string,
+                isClickableCard: boolean
+              ) => {
+                const series = item.periods[periodKey];
+                const pts = series?.points || [];
+                const peakScale = Math.max(
+                  10,
+                  series?.maxDownloadMbps || 10,
+                  series?.maxUploadMbps || 5
+                );
+
+                return (
+                  <div
+                    key={`${item.interfaceName}-${periodKey}`}
+                    onClick={
+                      isClickableCard
+                        ? () => {
+                            setSelectedGraphInterfaceName(item.interfaceName);
+                            setSelectedGraphPeriod('ALL_PERIODS');
+                          }
+                        : undefined
+                    }
+                    className={`rounded-lg border transition-all ${
+                      isClickableCard
+                        ? 'cursor-pointer border-slate-800 bg-[#05080f] p-5 hover:border-sky-500/70 hover:shadow-lg hover:shadow-sky-950/40'
+                        : 'border-slate-800 bg-[#05080f] p-5'
+                    }`}
+                  >
+                    {/* Header */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-2.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                            item.interfaceType === 'UPLINK'
+                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                              : 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                          }`}
+                        >
+                          {item.interfaceType === 'UPLINK' ? 'OLT UPLINK' : 'GPON PORT'}
+                        </span>
+                        <span className="font-mono text-xs font-bold text-white">
+                          {item.title} — {periodTitleIndo} (Peak{' '}
+                          {formatRateLabel(
+                            Math.max(
+                              series?.maxDownloadMbps || 0,
+                              series?.maxUploadMbps || 0
+                            )
+                          )}
+                          )
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[11px] text-slate-400">
+                          {item.subtitle}
+                        </span>
+                        {isClickableCard && (
+                          <span className="rounded bg-[#0275d8]/20 border border-[#0275d8]/50 px-2 py-0.5 text-[10px] font-bold text-sky-300">
+                            Klik untuk Grafik Harian / Mingguan / Bulanan / Tahunan →
+                          </span>
+                        )}
+                      </div>
                     </div>
-                  ))}
+
+                    {/* Bars Container (48 bars @ 5-minute interval for 24h Daily) */}
+                    <div className="mt-4 flex h-40 items-end gap-1 border-b border-l border-slate-800 px-3 pb-1">
+                      {pts.map((pt, idx) => {
+                        const downHeightPx = Math.max(
+                          4,
+                          Math.round((pt.downloadMbps / peakScale) * 96)
+                        );
+                        const upHeightPx = Math.max(
+                          3,
+                          Math.round((pt.uploadMbps / peakScale) * 48)
+                        );
+                        return (
+                          <div
+                            key={idx}
+                            title={`${pt.label}\nDownload: ${formatRateLabel(
+                              pt.downloadMbps
+                            )}\nUpload: ${formatRateLabel(pt.uploadMbps)}`}
+                            className="group relative flex flex-1 flex-col items-center gap-0.5"
+                          >
+                            <div
+                              className={`w-full rounded-t transition-all ${
+                                pt.isLive
+                                  ? 'bg-emerald-400 ring-1 ring-emerald-300/70'
+                                  : 'bg-emerald-500/85 group-hover:bg-emerald-400'
+                              }`}
+                              style={{ height: `${downHeightPx}px` }}
+                            />
+                            <div
+                              className={`w-full rounded-b transition-all ${
+                                pt.isLive
+                                  ? 'bg-sky-400 ring-1 ring-sky-300/70'
+                                  : 'bg-sky-500/85 group-hover:bg-sky-400'
+                              }`}
+                              style={{ height: `${upHeightPx}px` }}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* X-Axis WIB Timestamps */}
+                    {pts.length > 0 && (
+                      <div className="mt-1.5 flex items-center justify-between px-3 font-mono text-[10px] text-slate-400">
+                        {pts.map((pt, idx) => (
+                          <span
+                            key={idx}
+                            className="flex-1 truncate text-center"
+                          >
+                            {pt.shortLabel}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Legend & Summary Footer */}
+                    <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] text-slate-400">
+                      <div className="flex flex-wrap items-center gap-4">
+                        <span className="flex items-center gap-1.5 text-emerald-400">
+                          <span className="h-2.5 w-2.5 rounded-xs bg-emerald-500" />
+                          Download: Now {formatRateLabel(series?.curDownloadMbps ?? 0)}{' '}
+                          / Max {formatRateLabel(series?.maxDownloadMbps ?? 0)} / Avg{' '}
+                          {formatRateLabel(series?.avgDownloadMbps ?? 0)}
+                        </span>
+                        <span className="flex items-center gap-1.5 text-sky-400">
+                          <span className="h-2.5 w-2.5 rounded-xs bg-sky-500" />
+                          Upload: Now {formatRateLabel(series?.curUploadMbps ?? 0)} /
+                          Max {formatRateLabel(series?.maxUploadMbps ?? 0)} / Avg{' '}
+                          {formatRateLabel(series?.avgUploadMbps ?? 0)}
+                        </span>
+                      </div>
+                      <span className="text-slate-400">
+                        {series?.intervalLabel}
+                      </span>
+                    </div>
+                  </div>
+                );
+              };
+
+              return (
+                <div className="space-y-4">
+                  {/* Top Control Bar for OLT Graphs */}
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#1e3a5f] bg-[#0c1c30]/95 p-3.5">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-slate-200">OLT:</span>
+                        <select
+                          value={graphsOltId}
+                          onChange={(e) => {
+                            const nextId = Number(e.target.value);
+                            setGraphsOltId(nextId);
+                            setSelectedGraphInterfaceName(null);
+                          }}
+                          className="rounded border border-slate-600 bg-[#132842] px-2.5 py-1.5 font-bold text-white"
+                        >
+                          {db.olts.map((o) => (
+                            <option key={o.id} value={o.id}>
+                              {o.name} ({o.ip_address})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Filter Tabs: Semua / Uplink / PON */}
+                      <div className="flex items-center gap-1 rounded border border-[#1e3a5f] bg-[#091526] p-1">
+                        {(
+                          [
+                            { id: 'ALL', label: 'Semua (Uplink + PON)' },
+                            {
+                              id: 'UPLINK',
+                              label: `Uplink (${allUplinks.length})`,
+                            },
+                            {
+                              id: 'PON',
+                              label: `PON Ports (${oltGraphsData?.ponPorts?.length || 0})`,
+                            },
+                          ] as const
+                        ).map((tab) => (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            onClick={() => {
+                              setGraphsFilterType(tab.id);
+                              setSelectedGraphInterfaceName(null);
+                            }}
+                            className={`rounded px-2.5 py-1 text-xs font-bold transition ${
+                              graphsFilterType === tab.id
+                                ? 'bg-[#0275d8] text-white'
+                                : 'text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            {tab.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {graphsFilterType !== 'UPLINK' && (
+                        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-300">
+                          <input
+                            type="checkbox"
+                            checked={!graphsShowAllPon}
+                            onChange={(e) => setGraphsShowAllPon(!e.target.checked)}
+                            className="rounded border-slate-600"
+                          />
+                          Hanya PON Port berisi ONU
+                        </label>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <span className="rounded border border-emerald-500/40 bg-emerald-950/50 px-2.5 py-1 font-mono text-[11px] text-emerald-300">
+                        Zona Waktu: Asia/Jakarta (WIB) • {jakartaClockStr} WIB
+                      </span>
+                      <button
+                        type="button"
+                        disabled={graphsPollingLive}
+                        onClick={() => void pollOltGraphsLive(graphsOltId, false)}
+                        className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-50"
+                      >
+                        <RefreshCw
+                          className={`h-3.5 w-3.5 ${
+                            graphsPollingLive ? 'animate-spin' : ''
+                          }`}
+                        />
+                        {graphsPollingLive
+                          ? 'Polling OLT...'
+                          : 'Poll Real-Time Traffic (5-Min Interval)'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Drill-Down View when user clicks any Uplink or PON Graph */}
+                  {selectedGraphItem ? (
+                    <div className="space-y-4 rounded-lg border border-sky-500/50 bg-[#081322] p-4 shadow-2xl">
+                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#1e3a5f] pb-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedGraphInterfaceName(null)}
+                              className="rounded bg-[#132842] px-2.5 py-1 text-xs font-bold text-sky-300 hover:bg-[#1c395d] hover:text-white"
+                            >
+                              ← Kembali ke Semua Grafik 24 Jam
+                            </button>
+                            <h2 className="font-mono text-sm font-bold text-white">
+                              Detail Grafik Interface: {selectedGraphItem.title}
+                            </h2>
+                          </div>
+                          <p className="mt-1 text-[11px] text-slate-300">
+                            Menampilkan grafik trafik Harian (24 Jam • Interval 5 Menit), Mingguan (7 Hari), Bulanan (30 Hari), dan Tahunan (12 Bulan) dalam Zona Waktu Jakarta (WIB / UTC+7).
+                          </p>
+                        </div>
+
+                        {/* Period selector buttons */}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {(
+                            [
+                              {
+                                id: 'ALL_PERIODS',
+                                label: 'Semua Periode (Harian/Mingguan/Bulanan/Tahunan)',
+                              },
+                              { id: 'Daily', label: 'Harian (24 Jam / 5 Menit)' },
+                              { id: 'Weekly', label: 'Mingguan (7 Hari)' },
+                              { id: 'Monthly', label: 'Bulanan (30 Hari)' },
+                              { id: 'Yearly', label: 'Tahunan (12 Bulan)' },
+                            ] as const
+                          ).map((pTab) => (
+                            <button
+                              key={pTab.id}
+                              type="button"
+                              onClick={() => setSelectedGraphPeriod(pTab.id)}
+                              className={`rounded px-3 py-1.5 text-xs font-bold transition ${
+                                selectedGraphPeriod === pTab.id
+                                  ? 'bg-[#0275d8] text-white shadow'
+                                  : 'bg-[#132842] text-slate-300 hover:text-white'
+                              }`}
+                            >
+                              {pTab.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {(selectedGraphPeriod === 'ALL_PERIODS' ||
+                        selectedGraphPeriod === 'Daily') &&
+                        renderGraphChartBlock(
+                          selectedGraphItem,
+                          'Daily',
+                          'Grafik Harian (24 Jam — Interval Batang 5 Menit)',
+                          false
+                        )}
+
+                      {(selectedGraphPeriod === 'ALL_PERIODS' ||
+                        selectedGraphPeriod === 'Weekly') &&
+                        renderGraphChartBlock(
+                          selectedGraphItem,
+                          'Weekly',
+                          'Grafik Mingguan (7 Hari Terakhir)',
+                          false
+                        )}
+
+                      {(selectedGraphPeriod === 'ALL_PERIODS' ||
+                        selectedGraphPeriod === 'Monthly') &&
+                        renderGraphChartBlock(
+                          selectedGraphItem,
+                          'Monthly',
+                          'Grafik Bulanan (30 Hari Terakhir)',
+                          false
+                        )}
+
+                      {(selectedGraphPeriod === 'ALL_PERIODS' ||
+                        selectedGraphPeriod === 'Yearly') &&
+                        renderGraphChartBlock(
+                          selectedGraphItem,
+                          'Yearly',
+                          'Grafik Tahunan (12 Bulan Terakhir)',
+                          false
+                        )}
+                    </div>
+                  ) : (
+                    <>
+                      {graphsLoading && !oltGraphsData && (
+                        <div className="rounded border border-[#1e3a5f] bg-[#0c1c30]/80 p-6 text-center text-slate-300">
+                          Memuat grafik real-time Uplink & PON OLT (WIB)...
+                        </div>
+                      )}
+
+                      {/* SECTION 1: UPLINK PORTS (24 JAM - INTERVAL 5 MENIT) */}
+                      {(graphsFilterType === 'ALL' ||
+                        graphsFilterType === 'UPLINK') &&
+                        allUplinks.length > 0 && (
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                              <h2 className="font-mono text-sm font-bold text-emerald-400">
+                                1. Grafik Uplink OLT — 24 Jam Terakhir (Interval Batang 5 Menit • WIB)
+                              </h2>
+                              <span className="text-[11px] text-slate-400">
+                                Klik grafik mana saja untuk membuka detail Harian, Mingguan, Bulanan & Tahunan
+                              </span>
+                            </div>
+                            <div className="space-y-4">
+                              {allUplinks.map((uItem) =>
+                                renderGraphChartBlock(
+                                  uItem,
+                                  'Daily',
+                                  '24 Jam (Interval 5 Menit)',
+                                  true
+                                )
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                      {/* SECTION 2: GPON PON PORTS (24 JAM - INTERVAL 5 MENIT) */}
+                      {(graphsFilterType === 'ALL' ||
+                        graphsFilterType === 'PON') && (
+                        <div className="space-y-3 pt-2">
+                          <div className="flex items-center justify-between">
+                            <h2 className="font-mono text-sm font-bold text-sky-400">
+                              2. Grafik GPON Port OLT (`gpon-olt_1/3/*`) — 24 Jam Terakhir (Interval Batang 5 Menit • WIB)
+                            </h2>
+                            <span className="text-[11px] text-slate-400">
+                              Menampilkan {allPonPorts.length} PON Port • Klik grafik untuk melihat Harian, Mingguan, Bulanan & Tahunan
+                            </span>
+                          </div>
+                          <div className="space-y-4">
+                            {allPonPorts.map((pItem) =>
+                              renderGraphChartBlock(
+                                pItem,
+                                'Daily',
+                                '24 Jam (Interval 5 Menit)',
+                                true
+                              )
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         )}
 
