@@ -19,11 +19,14 @@ import {
   AppUserRecord,
 } from './src/services/mockDatabase.js';
 import {
+  cleanZteCliText,
   parseZteRunningConfig,
   parseZteUncfgOutput,
   parseZteOnuStateOutput,
+  parseZteOnuBaseinfoOutput,
   parseZteCardOutput,
   parseZteOnuDetailInfo,
+  parseZteMultiOnuDetailInfo,
   parseZteWanIpOutput,
   parseZteMultiWanIpOutput,
   parseZtePonPowerRxTable,
@@ -628,6 +631,20 @@ async function syncRelationalTablesToPostgres(
 }
 
 async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
+  let sqliteState: SmartOltDatabaseState | null = null;
+  try {
+    const row = sqliteDb
+      .prepare(
+        `SELECT json_payload FROM smartolt_relational_store WHERE store_key = 'MAIN_STATE'`
+      )
+      .get() as { json_payload: string } | undefined;
+    if (row && row.json_payload) {
+      sqliteState = JSON.parse(row.json_payload) as SmartOltDatabaseState;
+    }
+  } catch {
+    // ignore sqlite read error
+  }
+
   if (pgPool && pgConnected) {
     try {
       const res = await pgPool.query(
@@ -638,7 +655,27 @@ async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
         if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
           parsed.users = DEFAULT_APP_USERS;
         }
+        // Reconcile any extra ONUs from SQLite cache if present
+        if (sqliteState && Array.isArray(sqliteState.onus) && sqliteState.onus.length > parsed.onus.length) {
+          const existingKeys = new Set(
+            parsed.onus.map((u) => `${u.olt_id}:${u.board}:${u.port}:${u.onu_index ?? u.serial_number}`)
+          );
+          for (const su of sqliteState.onus) {
+            const k = `${su.olt_id}:${su.board}:${su.port}:${su.onu_index ?? su.serial_number}`;
+            if (!existingKeys.has(k)) {
+              existingKeys.add(k);
+              parsed.onus.push(su);
+            }
+          }
+        }
         return parsed;
+      }
+      if (sqliteState) {
+        if (!Array.isArray(sqliteState.users) || sqliteState.users.length === 0) {
+          sqliteState.users = DEFAULT_APP_USERS;
+        }
+        await saveDatabaseState(sqliteState);
+        return sqliteState;
       }
       await saveDatabaseState(INITIAL_DB_STATE);
       return INITIAL_DB_STATE;
@@ -647,18 +684,11 @@ async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
     }
   }
 
-  const row = sqliteDb
-    .prepare(
-      `SELECT json_payload FROM smartolt_relational_store WHERE store_key = 'MAIN_STATE'`
-    )
-    .get() as { json_payload: string } | undefined;
-
-  if (row && row.json_payload) {
-    const parsed = JSON.parse(row.json_payload) as SmartOltDatabaseState;
-    if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
-      parsed.users = DEFAULT_APP_USERS;
+  if (sqliteState) {
+    if (!Array.isArray(sqliteState.users) || sqliteState.users.length === 0) {
+      sqliteState.users = DEFAULT_APP_USERS;
     }
-    return parsed;
+    return sqliteState;
   }
 
   await saveDatabaseState(INITIAL_DB_STATE);
@@ -901,11 +931,11 @@ async function executeTelnetSession(params: {
   const startTime = Date.now();
   const normalizedCmds = normalizeCliCommandsForExecution(params.commands);
   const hasHeavyShow = normalizedCmds.some((c) =>
-    /^(show\s+running-config|show\s+gpon|write|wr)/i.test(c)
+    /^(show\s+running-config|show\s+gpon|show\s+onu|write|wr)/i.test(c)
   );
   const timeout =
     params.timeoutMs ||
-    Math.max(hasHeavyShow ? 35000 : 20000, normalizedCmds.length * 450 + 10000);
+    Math.max(hasHeavyShow ? 60000 : 22000, normalizedCmds.length * 550 + 12000);
 
   return new Promise((resolve) => {
     const socket = new net.Socket();
@@ -954,7 +984,7 @@ async function executeTelnetSession(params: {
       resolve({
         ok: reachable && !error,
         reachable,
-        output,
+        output: cleanZteCliText(output),
         commandsExecuted: normalizedCmds,
         durationMs: Date.now() - startTime,
         error,
@@ -966,10 +996,11 @@ async function executeTelnetSession(params: {
         clearTimeout(stepTimer);
         stepTimer = null;
       }
-      const isSlowCmd = /^(write|wr|show\s+running-config|show\s+gpon|show\s+card|reset-card|no\s+onu\s+\d+|onu\s+\d+\s+type)/i.test(
-        cmd
+      const isFullRunCfg = /^show\s+running-config\s*$/i.test(cmd.trim());
+      const isSlowCmd = /^(write|wr|show\s+running-config|show\s+onu|show\s+gpon|show\s+pon|show\s+card|reset-card|no\s+onu\s+\d+|onu\s+\d+\s+type)/i.test(
+        cmd.trim()
       );
-      const idleLimitMs = isSlowCmd ? 6500 : 750;
+      const idleLimitMs = isFullRunCfg ? 22000 : isSlowCmd ? 10000 : 900;
       stepTimer = setTimeout(() => {
         if (waitingForPrompt && stage === 'EXEC_CMDS' && !settled) {
           waitingForPrompt = false;
@@ -991,7 +1022,7 @@ async function executeTelnetSession(params: {
 
       if (cmdIndex >= cmdQueue.length) {
         stage = 'DONE';
-        setTimeout(() => finish(true, fullOutput), 250);
+        setTimeout(() => finish(true, fullOutput), 300);
         return;
       }
 
@@ -1055,7 +1086,8 @@ async function executeTelnetSession(params: {
 
       // Handle `--More--` paging automatically and reset watchdog timer
       if (/--\s*More\s*--/i.test(stepBuffer)) {
-        stepBuffer = stepBuffer.replace(/--\s*More\s*--/gi, '');
+        stepBuffer = stepBuffer.replace(/--\s*More\s*--[\x08 \t]*/gi, '');
+        fullOutput = fullOutput.replace(/--\s*More\s*--[\x08 \t]*/gi, '');
         socket.write(' ');
         if (stage === 'EXEC_CMDS') {
           armCommandWatchdog(currentCmd);
@@ -1164,6 +1196,17 @@ async function executeTelnetSession(params: {
         armCommandWatchdog(currentCmd);
 
         if (waitingForPrompt) {
+          // If running full `show running-config`, do not conclude while still at `Building configuration...`
+          const isFullRunCfg = /^show\s+running-config\s*$/i.test(currentCmd.trim());
+          if (
+            isFullRunCfg &&
+            /building\s+configuration/i.test(stepBuffer) &&
+            !/\bend\b/i.test(stepBuffer) &&
+            !/interface\s+/i.test(stepBuffer)
+          ) {
+            return;
+          }
+
           const promptCheck = hasCliPromptAtEnd(stepBuffer);
           if (promptCheck.isPrompt) {
             if (promptDebounceTimer) clearTimeout(promptDebounceTimer);
@@ -1172,7 +1215,7 @@ async function executeTelnetSession(params: {
                 waitingForPrompt = false;
                 sendNextCommand();
               }
-            }, 65);
+            }, 90);
           }
         }
       }
@@ -1194,6 +1237,173 @@ async function executeTelnetSession(params: {
       finish(false, fullOutput, err.message);
     });
   });
+}
+
+/**
+ * Helper to automatically fetch per-port `interface gpon-olt_1/B/P`, `baseinfo`,
+ * `interface gpon-onu_1/B/P:I`, `pon-onu-mng`, and `detail-info` from ZTE OLT via Telnet
+ * whenever `show gpon onu state` (or active ports) has ONUs that were not yet captured
+ * by `show running-config`.
+ */
+async function fetchMissingOnuConfigsFromOlt(params: {
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  enablePassword?: string;
+  combinedOutputSoFar: string;
+  existingOnusInDb: OnuRecord[];
+  oltId: number;
+}): Promise<string> {
+  const {
+    host,
+    port,
+    username,
+    password,
+    enablePassword,
+    combinedOutputSoFar,
+    existingOnusInDb,
+    oltId,
+  } = params;
+
+  let extraOutput = '';
+  let parsedCfg = parseZteRunningConfig(combinedOutputSoFar);
+  let parsedStates = parseZteOnuStateOutput(combinedOutputSoFar);
+  let baseinfoMap = parseZteOnuBaseinfoOutput(combinedOutputSoFar);
+
+  // Step A: If global `show gpon onu state` returned 0 states AND `parsedCfg.onus` has <= 1 ONU,
+  // query `show gpon onu baseinfo` and per-port `show gpon onu state gpon-olt_1/3/<p>` + `show running-config interface gpon-olt_1/3/<p>`
+  if (parsedStates.length <= 1 && parsedCfg.onus.length <= 1) {
+    const portDiscoveryCmds: string[] = ['show gpon onu baseinfo', 'show gpon onu state'];
+    for (let p = 1; p <= 16; p++) {
+      portDiscoveryCmds.push(
+        `show gpon onu state gpon-olt_1/3/${p}`,
+        `show running-config interface gpon-olt_1/3/${p}`
+      );
+    }
+    const discRes = await executeTelnetSession({
+      host,
+      port,
+      username,
+      password,
+      enablePassword,
+      commands: portDiscoveryCmds,
+      timeoutMs: 32000,
+    });
+    if (discRes.reachable && discRes.output.trim()) {
+      extraOutput += '\n' + discRes.output;
+      const mergedText = `${combinedOutputSoFar}\n${extraOutput}`;
+      parsedCfg = parseZteRunningConfig(mergedText);
+      parsedStates = parseZteOnuStateOutput(mergedText);
+      baseinfoMap = parseZteOnuBaseinfoOutput(mergedText);
+    }
+  }
+
+  // Step B: Identify all active PON ports and all ONU coordinates (`1/B/P:I`) known across state, baseinfo, and config
+  const allPorts = new Set<string>();
+  const allOnuCoords = new Map<string, { board: number; port: number; onuIndex: number }>();
+
+  for (const st of parsedStates) {
+    const m = st.fullInterface.match(/(\d+)\/(\d+)\/(\d+):(\d+)/);
+    if (!m) continue;
+    const b = parseInt(m[2], 10);
+    const p = parseInt(m[3], 10);
+    const idx = parseInt(m[4], 10);
+    allPorts.add(`1/${b}/${p}`);
+    allOnuCoords.set(`1/${b}/${p}:${idx}`, { board: b, port: p, onuIndex: idx });
+  }
+  for (const [key, bi] of baseinfoMap.entries()) {
+    allPorts.add(`1/${bi.board}/${bi.port}`);
+    allOnuCoords.set(key, { board: bi.board, port: bi.port, onuIndex: bi.onuIndex });
+  }
+  for (const o of parsedCfg.onus) {
+    allPorts.add(`1/${o.board}/${o.port}`);
+    allOnuCoords.set(`1/${o.board}/${o.port}:${o.onuIndex}`, {
+      board: o.board,
+      port: o.port,
+      onuIndex: o.onuIndex,
+    });
+  }
+
+  // Check which ports or ONUs still need their `interface gpon-olt_1/B/P` or `interface gpon-onu_1/B/P:I` config
+  const cfgByKey = new Map(
+    parsedCfg.onus.map((o) => [`1/${o.board}/${o.port}:${o.onuIndex}`, o])
+  );
+  const dbByKey = new Map(
+    existingOnusInDb
+      .filter((u) => u.olt_id === oltId && u.is_authorized && u.onu_index !== null)
+      .map((u) => [`1/${u.board}/${u.port}:${u.onu_index}`, u])
+  );
+
+  const portsNeedingOltConfig = new Set<string>();
+  const onusNeedingDetailConfig: Array<{ board: number; port: number; onuIndex: number }> = [];
+
+  for (const [key, coord] of allOnuCoords.entries()) {
+    const cfgOnu = cfgByKey.get(key);
+    const dbOnu = dbByKey.get(key);
+    const biOnu = baseinfoMap.get(key);
+
+    const hasRealSn =
+      (cfgOnu && !cfgOnu.serialNumber.startsWith('ONU-')) ||
+      (biOnu && !biOnu.serialNumber.startsWith('ONU-')) ||
+      (dbOnu && !dbOnu.serial_number.startsWith('ONU-'));
+
+    const hasRealName =
+      (cfgOnu && !cfgOnu.name.startsWith('ONU-')) ||
+      (dbOnu && dbOnu.customer_name && !dbOnu.customer_name.startsWith('ONU-'));
+
+    if (!hasRealSn) {
+      portsNeedingOltConfig.add(`1/${coord.board}/${coord.port}`);
+    }
+    if (!hasRealSn || !hasRealName || !cfgOnu?.pppoeUsername) {
+      onusNeedingDetailConfig.push(coord);
+    }
+  }
+
+  const targetedCmds: string[] = [];
+  for (const portCoord of allPorts) {
+    if (
+      portsNeedingOltConfig.has(portCoord) ||
+      !new RegExp(`interface\\s+gpon-olt_${portCoord}\\b`, 'i').test(
+        `${combinedOutputSoFar}\n${extraOutput}`
+      )
+    ) {
+      targetedCmds.push(
+        `show running-config interface gpon-olt_${portCoord}`,
+        `show gpon onu baseinfo gpon-olt_${portCoord}`
+      );
+    }
+    targetedCmds.push(`show pon power onu-rx gpon-olt_${portCoord}`);
+  }
+
+  // Query individual ONU running-config & detail-info for up to 35 ONUs per batch
+  for (const coord of onusNeedingDetailConfig.slice(0, 35)) {
+    const onuIf = `gpon-onu_1/${coord.board}/${coord.port}:${coord.onuIndex}`;
+    targetedCmds.push(
+      `show running-config interface ${onuIf}`,
+      `show onu running config ${onuIf}`,
+      `show gpon onu detail-info ${onuIf}`,
+      `show gpon remote-onu pppoe ${onuIf}`,
+      `show gpon remote-onu wan-ip ${onuIf}`
+    );
+  }
+
+  if (targetedCmds.length > 0) {
+    const targetRes = await executeTelnetSession({
+      host,
+      port,
+      username,
+      password,
+      enablePassword,
+      commands: targetedCmds,
+      timeoutMs: 35000,
+    });
+    if (targetRes.reachable && targetRes.output.trim()) {
+      extraOutput += '\n' + targetRes.output;
+    }
+  }
+
+  return extraOutput;
 }
 
 /**
@@ -1231,18 +1441,15 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
   } = params;
 
   const olt = state.olts.find((o) => o.id === oltId) || state.olts[0];
-  const parsed = parseZteRunningConfig(rawConfig);
-  const parsedStates = parseZteOnuStateOutput(
-    `${rawStateOutput}\n${rawConfig}\n${rawTelemetryOutput}`
-  );
+  const combinedRawText = `${rawConfig}\n${rawStateOutput}\n${rawTelemetryOutput}`;
+  const parsed = parseZteRunningConfig(combinedRawText);
+  const parsedStates = parseZteOnuStateOutput(combinedRawText);
+  const baseinfoMap = parseZteOnuBaseinfoOutput(combinedRawText);
+  const multiDetailsMap = parseZteMultiOnuDetailInfo(combinedRawText);
   const parsedUncfg = parseZteUncfgOutput(`${rawUncfgOutput}\n${rawConfig}`);
   const extraCards = rawCardOutput ? parseZteCardOutput(rawCardOutput) : [];
-  const powerRxMap = parseZtePonPowerRxTable(
-    `${rawTelemetryOutput}\n${rawStateOutput}\n${rawConfig}`
-  );
-  const wanIpMap = parseZteMultiWanIpOutput(
-    `${rawTelemetryOutput}\n${rawStateOutput}\n${rawConfig}`
-  );
+  const powerRxMap = parseZtePonPowerRxTable(combinedRawText);
+  const wanIpMap = parseZteMultiWanIpOutput(combinedRawText);
 
   const stateByIf = new Map<string, (typeof parsedStates)[number]>();
   for (const st of parsedStates) {
@@ -1261,6 +1468,10 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
     const port = parseInt(m[3], 10);
     const onuIndex = parseInt(m[4], 10);
     const key = `1/${board}/${port}:${onuIndex}`;
+    const fullIfKey = `gpon-onu_1/${board}/${port}:${onuIndex}`.toLowerCase();
+    const bi = baseinfoMap.get(key);
+    const det = multiDetailsMap.get(fullIfKey);
+
     if (!parsedOnuKeys.has(key)) {
       parsedOnuKeys.add(key);
       const prevMatch = state.onus.find(
@@ -1270,13 +1481,27 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
           u.port === port &&
           u.onu_index === onuIndex
       );
+      const resolvedSn =
+        bi?.serialNumber ||
+        det?.serialNumber ||
+        (prevMatch && !prevMatch.serial_number.startsWith('ONU-')
+          ? prevMatch.serial_number
+          : null) ||
+        `ONU-${board}-${port}-${onuIndex}`;
+      const resolvedName =
+        det?.name ||
+        (prevMatch?.customer_name && !prevMatch.customer_name.startsWith('ONU-')
+          ? prevMatch.customer_name
+          : null) ||
+        (resolvedSn.startsWith('ONU-') ? resolvedSn : `ONU-${resolvedSn}`);
+
       parsed.onus.push({
         board,
         port,
         onuIndex,
-        onuType: prevMatch?.onu_type || 'ALL',
-        serialNumber: prevMatch?.serial_number || `ONU-${board}-${port}-${onuIndex}`,
-        name: prevMatch?.customer_name || `ONU-${board}-${port}-${onuIndex}`,
+        onuType: bi?.onuType || prevMatch?.onu_type || 'ALL',
+        serialNumber: resolvedSn,
+        name: resolvedName,
         description: prevMatch?.address || 'none',
         tcontProfile: 'SMARTOLT-1G-UP',
         trafficProfile: 'SMARTOLT-1G-DOWN',
@@ -1351,7 +1576,7 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
 
   // 2. VLANs
   const otherVlans = state.vlans.filter((v) => v.olt_id !== oltId);
-  const newVlans: VlanRecord[] = parsed.vlans.map((v) => {
+  const parsedVlanRows: VlanRecord[] = parsed.vlans.map((v) => {
     const onuCount = parsed.onus.filter((o) => o.vlanId === v.vlanId).length;
     const vlanLabel =
       v.vlanId === 101 && (!v.name || v.name === 'VLAN0101')
@@ -1379,6 +1604,13 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
       is_default: v.vlanId === 101 || v.vlanId === 111,
     };
   });
+  // Preserve existing VLANs for this OLT if parsed.vlans was partial
+  const existingOltVlans = state.vlans.filter((v) => v.olt_id === oltId);
+  const newVlanIds = new Set(parsedVlanRows.map((v) => v.vlan_id));
+  const newVlans: VlanRecord[] = [
+    ...parsedVlanRows,
+    ...existingOltVlans.filter((v) => !newVlanIds.has(v.vlan_id)),
+  ];
 
   // 3. Uplink Ports
   const otherUplinks = state.uplink_ports.filter((u) => u.olt_id !== oltId);
@@ -1407,20 +1639,27 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
         }))
       : state.uplink_ports.filter((u) => u.olt_id === oltId);
 
-  // 4. Configured ONUs
+  // 4. Configured ONUs (Non-Destructive Merge with existing authorized ONUs in state.onus)
   const otherOnus = state.onus.filter((o) => o.olt_id !== oltId);
-  const configuredOnus: OnuRecord[] = parsed.onus.map((o) => {
+  const parsedConfiguredOnus: OnuRecord[] = parsed.onus.map((o) => {
     const matchedVlan = newVlans.find((v) => v.vlan_id === o.vlanId);
     const fullIfKey = `gpon-onu_1/${o.board}/${o.port}:${o.onuIndex}`.toLowerCase();
+    const coordKey = `1/${o.board}/${o.port}:${o.onuIndex}`;
+    const bi = baseinfoMap.get(coordKey);
+    const det = multiDetailsMap.get(fullIfKey);
+
     const prevOnu = state.onus.find(
       (u) =>
         u.olt_id === oltId &&
         ((u.board === o.board && u.port === o.port && u.onu_index === o.onuIndex) ||
-          u.serial_number.toUpperCase() === o.serialNumber.toUpperCase())
+          (!o.serialNumber.startsWith('ONU-') &&
+            u.serial_number.toUpperCase() === o.serialNumber.toUpperCase()))
     );
     const liveState = stateByIf.get(fullIfKey);
     const phaseState = liveState
       ? liveState.phaseState
+      : det?.phaseState
+      ? det.phaseState
       : parsedStates.length > 0
       ? prevOnu?.phase_state || 'OffLine'
       : prevOnu?.phase_state || 'working';
@@ -1439,6 +1678,24 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
         ? prevOnu.ip_address
         : wanInfo?.currentIp || null;
 
+    // Never overwrite a real Serial Number or Customer Name with a fallback `ONU-` placeholder
+    const bestSerial =
+      (!o.serialNumber.startsWith('ONU-') ? o.serialNumber : null) ||
+      bi?.serialNumber ||
+      det?.serialNumber ||
+      (prevOnu && !prevOnu.serial_number.startsWith('ONU-')
+        ? prevOnu.serial_number
+        : null) ||
+      o.serialNumber;
+
+    const bestCustomerName =
+      (!o.name.startsWith('ONU-') ? o.name : null) ||
+      det?.name ||
+      (prevOnu?.customer_name && !prevOnu.customer_name.startsWith('ONU-')
+        ? prevOnu.customer_name
+        : null) ||
+      o.name;
+
     return {
       id: prevOnu?.id || oltId * 100000 + o.board * 10000 + o.port * 1000 + o.onuIndex,
       olt_id: oltId,
@@ -1446,17 +1703,18 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
       board: o.board,
       port: o.port,
       onu_index: o.onuIndex,
-      serial_number: o.serialNumber,
-      onu_type: o.onuType,
+      serial_number: bestSerial,
+      onu_type: o.onuType !== 'ALL' ? o.onuType : bi?.onuType || prevOnu?.onu_type || 'ALL',
       is_authorized: true,
-      customer_name: o.name,
+      customer_name: bestCustomerName,
       address: o.description === 'none' ? prevOnu?.address || '' : o.description,
       contact: prevOnu?.contact || 'None',
-      external_id: prevOnu?.external_id || o.serialNumber,
+      external_id: prevOnu?.external_id || bestSerial,
       zone_id: prevOnu?.zone_id || state.zones[0]?.id || null,
+      sector_id: prevOnu?.sector_id ?? null,
       odb_id: prevOnu?.odb_id || state.odbs[0]?.id || null,
       odb_port: prevOnu?.odb_port || o.onuIndex,
-      vlan_id: matchedVlan ? matchedVlan.id : o.vlanId,
+      vlan_id: matchedVlan ? matchedVlan.id : prevOnu?.vlan_id || o.vlanId,
       speed_profile_id: prevOnu?.speed_profile_id || 1,
       tcont_profile_id: prevOnu?.tcont_profile_id || 1,
       onu_mode: prevOnu?.onu_mode || 'Routing',
@@ -1471,30 +1729,61 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
       tr069_last_inform: o.tr069Enabled ? nowStr : null,
       wifi_ssid: prevOnu?.wifi_ssid || null,
       wifi_password: prevOnu?.wifi_password || null,
-      pppoe_username: o.pppoeUsername || wanInfo?.username || prevOnu?.pppoe_username || o.name,
-      pppoe_password: o.pppoePassword || wanInfo?.password || prevOnu?.pppoe_password || 'jetcyber',
-      hotspot_bridge_vlan: o.extraFlowVlans[0] || null,
-      admin_state: liveState ? liveState.adminState : 'ENABLED',
+      pppoe_username:
+        o.pppoeUsername ||
+        wanInfo?.username ||
+        prevOnu?.pppoe_username ||
+        bestCustomerName,
+      pppoe_password:
+        o.pppoePassword ||
+        wanInfo?.password ||
+        prevOnu?.pppoe_password ||
+        'jetcyber',
+      hotspot_bridge_vlan: o.extraFlowVlans[0] || prevOnu?.hotspot_bridge_vlan || null,
+      admin_state: liveState ? liveState.adminState : det?.adminState || 'ENABLED',
       phase_state: phaseState,
       onu_rx_dbm: phaseState === 'working' ? liveRxDbm : null,
       onu_tx_dbm: phaseState === 'working' ? prevOnu?.onu_tx_dbm ?? 2.35 : null,
       olt_rx_dbm: phaseState === 'working' ? prevOnu?.olt_rx_dbm ?? -25.4 : null,
-      distance_m: prevOnu?.distance_m || 540,
+      distance_m: det?.distanceM || prevOnu?.distance_m || 540,
       temperature_c: 41,
       ip_address: phaseState === 'working' ? realWanIp : null,
       firmware_ver: 'V2.1.0',
-      auth_date_label: prevOnu?.auth_date_label || nowStr.slice(0, 10),
-      last_online_at: phaseState === 'working' ? nowStr : prevOnu?.last_online_at || nowStr,
+      auth_date_label: prevOnu?.auth_date_label || det?.lastAuthTime?.slice(0, 10) || nowStr.slice(0, 10),
+      last_online_at:
+        phaseState === 'working'
+          ? nowStr
+          : det?.lastAuthTime || prevOnu?.last_online_at || nowStr,
       last_offline_reason:
         phaseState === 'LOS'
           ? 'LOS'
           : phaseState === 'DyingGasp'
           ? 'Power Fail'
           : phaseState === 'OffLine'
-          ? 'Offline'
+          ? det?.lastOfflineReason || 'Offline'
           : 'None',
     };
   });
+
+  // Preserve any existing authorized ONU in `state.onus` for this OLT that wasn't in `parsedConfiguredOnus`
+  // so a partial Telnet output can NEVER wipe out existing configured ONUs!
+  const coveredCoords = new Set(
+    parsedConfiguredOnus.map((u) => `${u.board}:${u.port}:${u.onu_index}`)
+  );
+  const coveredSns = new Set(
+    parsedConfiguredOnus.map((u) => u.serial_number.toUpperCase())
+  );
+  const preservedExistingOnus = state.onus.filter(
+    (u) =>
+      u.olt_id === oltId &&
+      u.is_authorized &&
+      !coveredCoords.has(`${u.board}:${u.port}:${u.onu_index}`) &&
+      !coveredSns.has(u.serial_number.toUpperCase())
+  );
+  const configuredOnus: OnuRecord[] = [
+    ...parsedConfiguredOnus,
+    ...preservedExistingOnus,
+  ];
 
   // 5. Unconfigured ONUs from `show gpon onu uncfg`
   const configuredSnSet = new Set(configuredOnus.map((o) => o.serial_number.toUpperCase()));
@@ -2174,10 +2463,12 @@ app.post('/api/db/config', async (req, res) => {
 });
 
 // POST /api/state/sync — Persist updated state to PostgreSQL (and SQLite cache)
+// Includes non-destructive ONU merge protection so stale client state never wipes out ONUs synced from OLT
 app.post('/api/state/sync', async (req, res) => {
   try {
     const authUser = (req as express.Request & { authUser?: AppUserRecord }).authUser;
     const nextState = req.body.state as SmartOltDatabaseState;
+    const allowShrink = Boolean(req.body.allowShrink);
     if (!nextState || !Array.isArray(nextState.olts)) {
       res.status(400).json({ error: 'Invalid database state payload' });
       return;
@@ -2217,8 +2508,80 @@ app.post('/api/state/sync', async (req, res) => {
       nextState.users = existingUsers;
     }
 
+    // Protect OLTs and ONUs from accidental overwrite by a stale frontend state
+    if (!allowShrink) {
+      if (nextState.olts.length === 0 && currentDbState.olts.length > 0) {
+        nextState.olts = currentDbState.olts;
+      }
+      const activeOltIds = new Set(nextState.olts.map((o) => o.id));
+      const clientOnus = Array.isArray(nextState.onus) ? nextState.onus : [];
+
+      // Upgrade any placeholder `ONU-` SN/Name in clientOnus if currentDbState already has the real SN/Name
+      const dbOnuByCoord = new Map<string, OnuRecord>();
+      for (const dbOnu of currentDbState.onus) {
+        if (dbOnu.onu_index !== null) {
+          dbOnuByCoord.set(
+            `${dbOnu.olt_id}:${dbOnu.board}:${dbOnu.port}:${dbOnu.onu_index}`,
+            dbOnu
+          );
+        }
+      }
+
+      const upgradedClientOnus = clientOnus.map((co) => {
+        if (co.onu_index === null) return co;
+        const dbMatch = dbOnuByCoord.get(
+          `${co.olt_id}:${co.board}:${co.port}:${co.onu_index}`
+        );
+        if (!dbMatch) return co;
+        return {
+          ...co,
+          serial_number:
+            co.serial_number.startsWith('ONU-') &&
+            !dbMatch.serial_number.startsWith('ONU-')
+              ? dbMatch.serial_number
+              : co.serial_number,
+          customer_name:
+            (!co.customer_name || co.customer_name.startsWith('ONU-')) &&
+            dbMatch.customer_name &&
+            !dbMatch.customer_name.startsWith('ONU-')
+              ? dbMatch.customer_name
+              : co.customer_name,
+        };
+      });
+
+      const clientIds = new Set(upgradedClientOnus.map((u) => u.id));
+      const clientCoords = new Set(
+        upgradedClientOnus
+          .filter((u) => u.onu_index !== null)
+          .map((u) => `${u.olt_id}:${u.board}:${u.port}:${u.onu_index}`)
+      );
+      const clientSns = new Set(
+        upgradedClientOnus.map((u) => u.serial_number.toUpperCase())
+      );
+
+      for (const dbOnu of currentDbState.onus) {
+        if (!activeOltIds.has(dbOnu.olt_id)) continue;
+        const coordKey =
+          dbOnu.onu_index !== null
+            ? `${dbOnu.olt_id}:${dbOnu.board}:${dbOnu.port}:${dbOnu.onu_index}`
+            : null;
+        const snKey = dbOnu.serial_number.toUpperCase();
+        if (
+          !clientIds.has(dbOnu.id) &&
+          (!coordKey || !clientCoords.has(coordKey)) &&
+          !clientSns.has(snKey)
+        ) {
+          upgradedClientOnus.push(dbOnu);
+          clientIds.add(dbOnu.id);
+          if (coordKey) clientCoords.add(coordKey);
+          clientSns.add(snKey);
+        }
+      }
+      nextState.onus = upgradedClientOnus;
+    }
+
     await saveDatabaseState(nextState);
-    res.json({ ok: true, dbEngine: activeDbEngine, pgConnected });
+    res.json({ ok: true, dbEngine: activeDbEngine, pgConnected, state: nextState });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -2925,9 +3288,10 @@ app.post('/api/olts/:id/sync-live', async (req, res) => {
         'show card',
         'show gpon onu uncfg',
         'show gpon onu state',
+        'show gpon onu baseinfo',
         'show running-config',
       ],
-      timeoutMs: 45000,
+      timeoutMs: 60000,
     });
 
     if (!telnetRes.reachable || !telnetRes.output.trim()) {
@@ -2942,9 +3306,25 @@ app.post('/api/olts/:id/sync-live', async (req, res) => {
       return;
     }
 
+    const effectiveOltId = olt ? olt.id : oltId;
+
+    // Automatically enrich any PON ports / ONUs whose details were not in initial `show running-config`
+    const enrichedMissingOutput = await fetchMissingOnuConfigsFromOlt({
+      host: targetHost,
+      port: targetPort,
+      username: targetUser,
+      password: targetPass,
+      enablePassword: targetEnablePass,
+      combinedOutputSoFar: telnetRes.output,
+      existingOnusInDb: state.onus,
+      oltId: effectiveOltId,
+    });
+
+    const combinedSyncOutput = `${telnetRes.output}\n${enrichedMissingOutput}`;
+
     // Discover active PON ports & working ONUs to immediately pull real optical power & MikroTik WAN IPs
-    const prelimParsed = parseZteRunningConfig(telnetRes.output);
-    const prelimStates = parseZteOnuStateOutput(telnetRes.output);
+    const prelimParsed = parseZteRunningConfig(combinedSyncOutput);
+    const prelimStates = parseZteOnuStateOutput(combinedSyncOutput);
     const activePortSet = new Set<string>();
     for (const o of prelimParsed.onus) {
       activePortSet.add(`1/${o.board}/${o.port}`);
@@ -2956,11 +3336,13 @@ app.post('/api/olts/:id/sync-live', async (req, res) => {
 
     const telemetryCmds: string[] = [];
     for (const coords of activePortSet) {
-      telemetryCmds.push(`show pon power onu-rx gpon-olt_${coords}`);
+      if (!combinedSyncOutput.includes(`show pon power onu-rx gpon-olt_${coords}`)) {
+        telemetryCmds.push(`show pon power onu-rx gpon-olt_${coords}`);
+      }
     }
     const workingIfs = prelimStates
       .filter((st) => st.phaseState === 'working')
-      .slice(0, 20)
+      .slice(0, 25)
       .map((st) => st.fullInterface);
     for (const onuIf of workingIfs) {
       telemetryCmds.push(
@@ -2970,7 +3352,7 @@ app.post('/api/olts/:id/sync-live', async (req, res) => {
       );
     }
 
-    let rawTelemetryOutput = '';
+    let rawTelemetryOutput = enrichedMissingOutput;
     if (telemetryCmds.length > 0) {
       const teleRes = await executeTelnetSession({
         host: targetHost,
@@ -2979,20 +3361,20 @@ app.post('/api/olts/:id/sync-live', async (req, res) => {
         password: targetPass,
         enablePassword: targetEnablePass,
         commands: telemetryCmds,
-        timeoutMs: 25000,
+        timeoutMs: 28000,
       });
       if (teleRes.reachable) {
-        rawTelemetryOutput = teleRes.output;
+        rawTelemetryOutput += '\n' + teleRes.output;
       }
     }
 
     const { nextState, summary } = applyRunningConfigAndLiveTelemetryToState({
       state,
-      oltId: olt ? olt.id : oltId,
-      rawConfig: telnetRes.output,
-      rawUncfgOutput: telnetRes.output,
-      rawStateOutput: telnetRes.output,
-      rawCardOutput: telnetRes.output,
+      oltId: effectiveOltId,
+      rawConfig: combinedSyncOutput,
+      rawUncfgOutput: combinedSyncOutput,
+      rawStateOutput: combinedSyncOutput,
+      rawCardOutput: combinedSyncOutput,
       rawTelemetryOutput,
       sourceLabel: 'Live Telnet Auto-Sync',
     });
@@ -3005,7 +3387,11 @@ app.post('/api/olts/:id/sync-live', async (req, res) => {
     res.json({
       ok: true,
       reachable: true,
-      synced: summary,
+      synced: {
+        ...summary,
+        configuredOnus: summary.onus,
+        unconfiguredOnus: summary.uncfgOnus,
+      },
       state: nextState,
     });
   } catch (err) {
@@ -3098,8 +3484,52 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       return;
     }
 
-    const rawOut = telnetRes.output;
-    const parsedStates = parseZteOnuStateOutput(rawOut);
+    let rawOut = telnetRes.output;
+    let parsedStates = parseZteOnuStateOutput(rawOut);
+
+    // Check if there are ONUs on the OLT (or in DB with `ONU-` placeholder SN/Name) that need full config enrichment
+    const dbAuthorizedForOlt = state.onus.filter(
+      (u) => u.olt_id === olt.id && u.is_authorized && u.onu_index !== null
+    );
+    const dbCoordSet = new Set(
+      dbAuthorizedForOlt.map((u) => `1/${u.board}/${u.port}:${u.onu_index}`)
+    );
+    const hasMissingOrPlaceholderOnus =
+      parsedStates.some((st) => {
+        const m = st.fullInterface.match(/(\d+)\/(\d+)\/(\d+):(\d+)/);
+        if (!m) return false;
+        return !dbCoordSet.has(`1/${m[2]}/${m[3]}:${m[4]}`);
+      }) ||
+      dbAuthorizedForOlt.some(
+        (u) =>
+          u.serial_number.startsWith('ONU-') ||
+          !u.customer_name ||
+          u.customer_name.startsWith('ONU-')
+      );
+
+    if (hasMissingOrPlaceholderOnus && !focusedOnu) {
+      const extraEnrich = await fetchMissingOnuConfigsFromOlt({
+        host: olt.ip_address,
+        port: olt.telnet_port,
+        username: olt.olt_username,
+        password: olt.olt_password,
+        enablePassword: olt.enable_password,
+        combinedOutputSoFar: rawOut,
+        existingOnusInDb: state.onus,
+        oltId: olt.id,
+      });
+      if (extraEnrich.trim()) {
+        rawOut += '\n' + extraEnrich;
+        parsedStates = parseZteOnuStateOutput(rawOut);
+      }
+    }
+
+    const parsedCfg = parseZteRunningConfig(rawOut);
+    const cfgByCoord = new Map(
+      parsedCfg.onus.map((o) => [`1/${o.board}/${o.port}:${o.onuIndex}`, o])
+    );
+    const baseinfoMap = parseZteOnuBaseinfoOutput(rawOut);
+    const multiDetailsMap = parseZteMultiOnuDetailInfo(rawOut);
     const parsedUncfg = parseZteUncfgOutput(rawOut);
     const powerRxMap = parseZtePonPowerRxTable(rawOut);
     const wanIpMap = parseZteMultiWanIpOutput(rawOut);
@@ -3124,22 +3554,27 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
           return u;
         }
         const key = `gpon-onu_1/${u.board}/${u.port}:${u.onu_index}`.toLowerCase();
+        const coordKey = `1/${u.board}/${u.port}:${u.onu_index}`;
         existingIfKeys.add(key);
 
         const st = stateByIf.get(key);
+        const cfgOnu = cfgByCoord.get(coordKey);
+        const biOnu = baseinfoMap.get(coordKey);
+        const multiDet = multiDetailsMap.get(key);
         const wanInfo = wanIpMap.get(key);
         const isFocused = focusedOnu && u.id === focusedOnu.id;
 
-        let nextPhase = st ? st.phaseState : u.phase_state;
+        let nextPhase = st ? st.phaseState : multiDet?.phaseState || u.phase_state;
         let nextOfflineReason = u.last_offline_reason;
 
         // If detail-info provided a more specific cause (e.g., DyingGasp vs LOS when Phase is OffLine/logging)
-        if (isFocused && focusedDetail) {
-          if (focusedDetail.phaseState) {
-            nextPhase = focusedDetail.phaseState;
+        const effectiveDet = isFocused && focusedDetail ? focusedDetail : multiDet;
+        if (effectiveDet) {
+          if (effectiveDet.phaseState) {
+            nextPhase = effectiveDet.phaseState;
           }
-          if (focusedDetail.lastOfflineReason) {
-            nextOfflineReason = focusedDetail.lastOfflineReason;
+          if (effectiveDet.lastOfflineReason) {
+            nextOfflineReason = effectiveDet.lastOfflineReason;
           }
         }
 
@@ -3180,10 +3615,25 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
           nextIp = effectiveWan.currentIp;
         }
 
+        const resolvedSn =
+          (!u.serial_number.startsWith('ONU-') ? u.serial_number : null) ||
+          (cfgOnu && !cfgOnu.serialNumber.startsWith('ONU-') ? cfgOnu.serialNumber : null) ||
+          biOnu?.serialNumber ||
+          effectiveDet?.serialNumber ||
+          u.serial_number;
+
+        const resolvedName =
+          (u.customer_name && !u.customer_name.startsWith('ONU-') ? u.customer_name : null) ||
+          (cfgOnu && !cfgOnu.name.startsWith('ONU-') ? cfgOnu.name : null) ||
+          effectiveDet?.name ||
+          u.customer_name ||
+          resolvedSn;
+
         const safeExistingUser =
           u.pppoe_username &&
           u.pppoe_username.trim().toLowerCase() !== 'zte' &&
-          !u.pppoe_username.includes('%')
+          !u.pppoe_username.includes('%') &&
+          !u.pppoe_username.startsWith('ONU-')
             ? u.pppoe_username.trim()
             : null;
         const safeExistingPass =
@@ -3195,23 +3645,31 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
 
         return {
           ...u,
+          serial_number: resolvedSn,
+          customer_name: resolvedName,
+          onu_type:
+            u.onu_type !== 'ALL'
+              ? u.onu_type
+              : cfgOnu?.onuType || biOnu?.onuType || u.onu_type,
           admin_state: st ? st.adminState : u.admin_state,
           phase_state: nextPhase,
           onu_rx_dbm: nextOnuRx,
           olt_rx_dbm: nextOltRx,
           onu_tx_dbm: nextOnuTx,
           distance_m:
-            isFocused && focusedDetail?.distanceM
-              ? focusedDetail.distanceM
+            effectiveDet?.distanceM
+              ? effectiveDet.distanceM
               : u.distance_m,
           ip_address: nextIp,
           pppoe_username:
             safeExistingUser ||
+            cfgOnu?.pppoeUsername ||
             effectiveWan?.username ||
             (isFocused && focusedWan?.username) ||
-            (u.customer_name || u.serial_number).toLowerCase(),
+            resolvedName.toLowerCase(),
           pppoe_password:
             safeExistingPass ||
+            cfgOnu?.pppoePassword ||
             (effectiveWan?.password && !effectiveWan.password.includes('*')
               ? effectiveWan.password
               : null) ||
@@ -3224,24 +3682,68 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
           last_online_at:
             nextPhase === 'working'
               ? nowStr
-              : isFocused && focusedDetail?.lastAuthTime
-              ? focusedDetail.lastAuthTime
+              : effectiveDet?.lastAuthTime
+              ? effectiveDet.lastAuthTime
               : u.last_online_at,
           last_offline_reason: nextOfflineReason,
         };
       });
 
-    // If `show gpon onu state` reported any ONU index on the OLT that wasn't in `state.onus` yet,
-    // add it so `AuthorizeOnuModal` never collides with that index!
+    // If `show gpon onu state` or `parsedCfg.onus` reported any ONU index on the OLT that wasn't in `state.onus` yet,
+    // add it with its enriched SN, Customer Name, VLAN, PPPoE & Signal and persist it to DB!
+    const allDiscoveredCoords = new Map<
+      string,
+      { board: number; port: number; onuIndex: number; adminState: 'ENABLED' | 'DISABLED'; phaseState: OnuRecord['phase_state'] }
+    >();
     for (const st of parsedStates) {
-      const key = st.fullInterface.toLowerCase();
-      if (existingIfKeys.has(key)) continue;
       const m = st.fullInterface.match(/(\d+)\/(\d+)\/(\d+):(\d+)/);
       if (!m) continue;
-      const board = parseInt(m[2], 10);
-      const port = parseInt(m[3], 10);
-      const onuIndex = parseInt(m[4], 10);
+      const b = parseInt(m[2], 10);
+      const p = parseInt(m[3], 10);
+      const idx = parseInt(m[4], 10);
+      allDiscoveredCoords.set(`gpon-onu_1/${b}/${p}:${idx}`.toLowerCase(), {
+        board: b,
+        port: p,
+        onuIndex: idx,
+        adminState: st.adminState,
+        phaseState: st.phaseState,
+      });
+    }
+    for (const o of parsedCfg.onus) {
+      const fullKey = `gpon-onu_1/${o.board}/${o.port}:${o.onuIndex}`.toLowerCase();
+      if (!allDiscoveredCoords.has(fullKey)) {
+        allDiscoveredCoords.set(fullKey, {
+          board: o.board,
+          port: o.port,
+          onuIndex: o.onuIndex,
+          adminState: 'ENABLED',
+          phaseState: 'working',
+        });
+      }
+    }
+
+    for (const [key, item] of allDiscoveredCoords.entries()) {
+      if (existingIfKeys.has(key)) continue;
       existingIfKeys.add(key);
+      const { board, port, onuIndex } = item;
+      const coordKey = `1/${board}/${port}:${onuIndex}`;
+      const cfgOnu = cfgByCoord.get(coordKey);
+      const biOnu = baseinfoMap.get(coordKey);
+      const det = multiDetailsMap.get(key);
+      const wanInfo = wanIpMap.get(key);
+
+      const resolvedSn =
+        (cfgOnu && !cfgOnu.serialNumber.startsWith('ONU-') ? cfgOnu.serialNumber : null) ||
+        biOnu?.serialNumber ||
+        det?.serialNumber ||
+        `ONU-${board}-${port}-${onuIndex}`;
+      const resolvedName =
+        (cfgOnu && !cfgOnu.name.startsWith('ONU-') ? cfgOnu.name : null) ||
+        det?.name ||
+        resolvedSn;
+      const matchedVlan = state.vlans.find(
+        (v) => v.olt_id === olt.id && v.vlan_id === (cfgOnu?.vlanId || 101)
+      );
 
       updatedOnus.push({
         id: olt.id * 100000 + board * 10000 + port * 1000 + onuIndex,
@@ -3250,46 +3752,49 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         board,
         port,
         onu_index: onuIndex,
-        serial_number: `ONU-${board}-${port}-${onuIndex}`,
-        onu_type: 'ALL',
+        serial_number: resolvedSn,
+        onu_type: cfgOnu?.onuType || biOnu?.onuType || 'ALL',
         is_authorized: true,
-        customer_name: `ONU-${board}-${port}-${onuIndex}`,
-        address: 'none',
-        external_id: `ONU-${board}-${port}-${onuIndex}`,
+        customer_name: resolvedName,
+        address:
+          cfgOnu?.description && cfgOnu.description !== 'none'
+            ? cfgOnu.description
+            : 'none',
+        external_id: resolvedSn,
         zone_id: state.zones[0]?.id || null,
         odb_id: state.odbs[0]?.id || null,
         odb_port: onuIndex,
-        vlan_id: state.vlans.find((v) => v.vlan_id === 101)?.id || 101,
+        vlan_id: matchedVlan?.id || state.vlans.find((v) => v.vlan_id === 101)?.id || 101,
         speed_profile_id: 1,
         tcont_profile_id: 1,
         onu_mode: 'Routing',
         wan_mode: 'PPPOE',
-        config_method: 'OMCI',
+        config_method: cfgOnu?.tr069Enabled ? 'TR069' : 'OMCI',
         wan_remote_access: 'Enabled from everywhere in the internet',
         wan_remote_allowed_subnet: '0.0.0.0/0',
         tr069_profile_id: 1,
-        tr069_status: 'DISABLED',
-        tr069_last_inform: null,
+        tr069_status: cfgOnu?.tr069Enabled ? 'ACTIVE_INFORMING' : 'DISABLED',
+        tr069_last_inform: cfgOnu?.tr069Enabled ? nowStr : null,
         wifi_ssid: null,
         wifi_password: null,
-        pppoe_username: null,
-        pppoe_password: 'jetcyber',
-        hotspot_bridge_vlan: null,
-        admin_state: st.adminState,
-        phase_state: st.phaseState,
-        onu_rx_dbm: powerRxMap.get(key) ?? null,
-        onu_tx_dbm: null,
-        olt_rx_dbm: null,
-        distance_m: 500,
+        pppoe_username: cfgOnu?.pppoeUsername || wanInfo?.username || resolvedName.toLowerCase(),
+        pppoe_password: cfgOnu?.pppoePassword || wanInfo?.password || 'jetcyber',
+        hotspot_bridge_vlan: cfgOnu?.extraFlowVlans?.[0] || null,
+        admin_state: item.adminState,
+        phase_state: det?.phaseState || item.phaseState,
+        onu_rx_dbm: powerRxMap.get(key) ?? (item.phaseState === 'working' ? -21.5 : null),
+        onu_tx_dbm: item.phaseState === 'working' ? 2.3 : null,
+        olt_rx_dbm: item.phaseState === 'working' ? -25.1 : null,
+        distance_m: det?.distanceM || 500,
         temperature_c: 40,
-        ip_address: wanIpMap.get(key)?.currentIp || null,
+        ip_address: wanInfo?.currentIp || null,
         firmware_ver: 'V2.1.0',
-        auth_date_label: nowStr.slice(0, 10),
+        auth_date_label: det?.lastAuthTime?.slice(0, 10) || nowStr.slice(0, 10),
         last_online_at: nowStr,
         last_offline_reason:
-          st.phaseState === 'LOS'
+          item.phaseState === 'LOS'
             ? 'LOS'
-            : st.phaseState === 'DyingGasp'
+            : item.phaseState === 'DyingGasp'
             ? 'Power Fail'
             : 'None',
       });
@@ -4960,11 +5465,11 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
     }
 
     const oltHasVlans = state.vlans.some((v) => v.olt_id === olt.id);
-    const oltHasConfiguredOnus = state.onus.some(
+    const oltConfiguredOnusCount = state.onus.filter(
       (o) => o.olt_id === olt.id && o.is_authorized
-    );
+    ).length;
     const shouldRunFullSync =
-      fullSync === true || !oltHasVlans || !oltHasConfiguredOnus;
+      fullSync === true || !oltHasVlans || oltConfiguredOnusCount <= 1;
 
     if (!manualCliOutput && shouldRunFullSync) {
       const syncRes = await executeTelnetSession({
@@ -4977,19 +5482,32 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
           'show card',
           'show gpon onu uncfg',
           'show gpon onu state',
+          'show gpon onu baseinfo',
           'show running-config',
         ],
-        timeoutMs: 42000,
+        timeoutMs: 55000,
       });
 
-      if (syncRes.reachable && syncRes.output.includes('interface ')) {
+      if (syncRes.reachable && syncRes.output.trim()) {
+        const extraEnrich = await fetchMissingOnuConfigsFromOlt({
+          host: olt.ip_address,
+          port: olt.telnet_port,
+          username: olt.olt_username,
+          password: olt.olt_password,
+          enablePassword: olt.enable_password,
+          combinedOutputSoFar: syncRes.output,
+          existingOnusInDb: state.onus,
+          oltId: olt.id,
+        });
+        const combinedOut = `${syncRes.output}\n${extraEnrich}`;
         const { nextState, summary } = applyRunningConfigAndLiveTelemetryToState({
           state,
           oltId: olt.id,
-          rawConfig: syncRes.output,
-          rawUncfgOutput: syncRes.output,
-          rawStateOutput: syncRes.output,
-          rawCardOutput: syncRes.output,
+          rawConfig: combinedOut,
+          rawUncfgOutput: combinedOut,
+          rawStateOutput: combinedOut,
+          rawCardOutput: combinedOut,
+          rawTelemetryOutput: extraEnrich,
           sourceLabel: 'Live Telnet Poll & Sync',
         });
         await saveDatabaseState(nextState);
@@ -4997,7 +5515,11 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
           ok: true,
           telnetReachable: true,
           discoveredCount: summary.uncfgOnus,
-          synced: summary,
+          synced: {
+            ...summary,
+            configuredOnus: summary.onus,
+            unconfiguredOnus: summary.uncfgOnus,
+          },
           state: nextState,
         });
         return;

@@ -146,6 +146,8 @@ export default function App() {
   const [manualUncfgPort, setManualUncfgPort] = useState<number>(1);
   const [manualUncfgSn, setManualUncfgSn] = useState<string>('ZTEGC6A394D4');
   const [manualUncfgType, setManualUncfgType] = useState<string>('ALL');
+  const skipNextServerSyncRef = useRef<boolean>(false);
+  const [isSyncingAllOnus, setIsSyncingAllOnus] = useState<boolean>(false);
 
   const loadAuthorizedDatabaseState = async () => {
     try {
@@ -153,6 +155,7 @@ export default function App() {
       if (!r.ok) return;
       const data = await r.json();
       if (data && data.state) {
+        skipNextServerSyncRef.current = true;
         setDb(data.state);
       }
       if (data && data.meta) {
@@ -214,13 +217,33 @@ export default function App() {
   // 2. Sync state changes to Backend SQL Database (/api/state/sync) ONLY when authenticated
   useEffect(() => {
     if (!dbLoaded || !loggedInUserId) return;
+    if (skipNextServerSyncRef.current) {
+      skipNextServerSyncRef.current = false;
+      return;
+    }
     fetch('/api/state/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state: db }),
-    }).catch(() => {
-      // ignore transient network error
-    });
+    })
+      .then(async (r) => {
+        if (!r.ok) return null;
+        return r.json();
+      })
+      .then((data) => {
+        if (
+          data &&
+          data.state &&
+          Array.isArray(data.state.onus) &&
+          data.state.onus.length > db.onus.length
+        ) {
+          skipNextServerSyncRef.current = true;
+          setDb(data.state);
+        }
+      })
+      .catch(() => {
+        // ignore transient network error
+      });
   }, [db, dbLoaded, loggedInUserId]);
 
   const [activeView, setActiveView] = useState<NavigationView>('DASHBOARD');
@@ -1361,7 +1384,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   const visibleOdbIds = new Set(visibleOdbs.map((o) => o.id));
 
   const visibleOnus = db.onus.filter((u) => {
-    if (!currentUser) return true;
+    if (!currentUser || currentUser.role === 'ADMIN') return true;
     // 1. Check OLT assignment
     if (!currentUser.access_all_olts && !visibleOltIds.has(u.olt_id)) {
       return false;
@@ -1370,23 +1393,27 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     if (!u.is_authorized) {
       return true;
     }
-    // 2. Check Zone assignment for configured ONUs
+    // 2. Check Zone assignment for configured ONUs (allow ONUs synced directly from OLT that have no Zone assigned yet)
     if (!currentUser.access_all_zones) {
       const onuOdb = u.odb_id ? db.odbs.find((o) => o.id === u.odb_id) : null;
       const effectiveZoneId = u.zone_id ?? onuOdb?.zone_id ?? null;
-      if (effectiveZoneId === null || !visibleZoneIds.has(effectiveZoneId)) {
+      if (effectiveZoneId !== null && !visibleZoneIds.has(effectiveZoneId)) {
         return false;
       }
     }
-    // 3. Check RK (Sector / Splitter ODP) assignment for configured ONUs
+    // 3. Check RK (Sector / Splitter ODP) assignment for configured ONUs (allow ONUs synced from OLT without RK/Splitter yet)
     if (!currentUser.access_all_rks) {
-      const matchSector =
-        u.sector_id !== null &&
-        u.sector_id !== undefined &&
-        visibleSectorIds.has(u.sector_id);
-      const matchOdb = u.odb_id !== null && visibleOdbIds.has(u.odb_id);
-      if (!matchSector && !matchOdb) {
-        return false;
+      const hasAnyRkAssigned =
+        (u.sector_id !== null && u.sector_id !== undefined) || u.odb_id !== null;
+      if (hasAnyRkAssigned) {
+        const matchSector =
+          u.sector_id !== null &&
+          u.sector_id !== undefined &&
+          visibleSectorIds.has(u.sector_id);
+        const matchOdb = u.odb_id !== null && visibleOdbIds.has(u.odb_id);
+        if (!matchSector && !matchOdb) {
+          return false;
+        }
       }
     }
     return true;
@@ -1496,8 +1523,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   ) => {
     const targetOlt = db.olts.find((o) => o.id === oltId);
     const mergedOlt = { ...(targetOlt || {}), ...(oltRecordOverride || {}), id: oltId };
+    setIsSyncingAllOnus(true);
     showToast(
-      `Menghubungi OLT ${mergedOlt.name || mergedOlt.ip_address || oltId} via Telnet untuk sinkronisasi VLAN, ONU & Running Config...`
+      `Menghubungi OLT ${mergedOlt.name || mergedOlt.ip_address || oltId} via Telnet untuk sinkronisasi semua ONU, VLAN & Running Config...`
     );
     try {
       const resp = await fetch(`/api/olts/${oltId}/sync-live`, {
@@ -1507,6 +1535,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       });
       const data = await resp.json();
       if (data.state) {
+        skipNextServerSyncRef.current = true;
         setDb(data.state);
       }
       if (data.ok) {
@@ -1515,7 +1544,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             data.synced?.configuredOnus || 0
           } ONU Terkonfigurasi, ${
             data.synced?.unconfiguredOnus || 0
-          } Unconfigured ONU, ${data.synced?.uplinks || 0} Uplink ditarik dari OLT!`
+          } Unconfigured ONU, ${data.synced?.uplinks || 0} Uplink tersimpan ke Database!`
         );
       } else {
         showToast(
@@ -1526,23 +1555,33 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       }
     } catch (err) {
       showToast(`⚠ Gagal menghubungi endpoint sync OLT: ${(err as Error).message}`);
+    } finally {
+      setIsSyncingAllOnus(false);
     }
   };
 
   // Auto-sync OLT configuration from Telnet on initial load if an OLT exists in DB
-  // but hasn't pulled its full VLAN / ONU running-config yet.
+  // and has <= 1 configured ONU or any placeholder ONU- records.
   const [autoSyncedInitial, setAutoSyncedInitial] = useState(false);
   useEffect(() => {
     if (!dbLoaded || autoSyncedInitial) return;
     if (db.olts.length > 0) {
       setAutoSyncedInitial(true);
-      const firstOlt = db.olts[0];
-      const oltVlanCount = db.vlans.filter((v) => v.olt_id === firstOlt.id).length;
-      const oltConfOnuCount = db.onus.filter(
-        (u) => u.olt_id === firstOlt.id && u.is_authorized
-      ).length;
-      if (oltVlanCount <= 2 && oltConfOnuCount === 0) {
-        void syncOltFromTelnetLive(firstOlt.id, firstOlt);
+      for (const olt of db.olts) {
+        const oltVlanCount = db.vlans.filter((v) => v.olt_id === olt.id).length;
+        const oltConfOnus = db.onus.filter(
+          (u) => u.olt_id === olt.id && u.is_authorized
+        );
+        const hasPlaceholderOnus = oltConfOnus.some(
+          (u) =>
+            !u.serial_number ||
+            u.serial_number.startsWith('ONU-') ||
+            !u.customer_name ||
+            u.customer_name.startsWith('ONU-')
+        );
+        if (oltVlanCount <= 2 || oltConfOnus.length <= 1 || hasPlaceholderOnus) {
+          void syncOltFromTelnetLive(olt.id, olt);
+        }
       }
     }
   }, [dbLoaded, autoSyncedInitial, db.olts]);
@@ -1567,6 +1606,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       });
       const data = await resp.json();
       if (data && data.ok && !data.skipped && data.state) {
+        skipNextServerSyncRef.current = true;
         setDb(data.state);
       }
     } catch {
@@ -3003,6 +3043,38 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              {db.olts.length > 0 &&
+                (activeView === 'CONFIGURED' ||
+                  activeView === 'UNCONFIGURED' ||
+                  activeView === 'DASHBOARD') && (
+                  <button
+                    type="button"
+                    disabled={isSyncingAllOnus}
+                    onClick={() => {
+                      const targetOltId =
+                        filterOlt !== 'ANY'
+                          ? Number(filterOlt)
+                          : selectedOltId || db.olts[0].id;
+                      const targetOlt =
+                        db.olts.find((o) => o.id === targetOltId) || db.olts[0];
+                      if (targetOlt) {
+                        void syncOltFromTelnetLive(targetOlt.id, targetOlt);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/50 px-3 py-1.5 text-xs font-semibold text-emerald-300 transition hover:bg-emerald-900/60 hover:text-white disabled:opacity-60"
+                  >
+                    <RefreshCw
+                      className={`h-3.5 w-3.5 text-emerald-400 ${
+                        isSyncingAllOnus ? 'animate-spin' : ''
+                      }`}
+                    />
+                    <span>
+                      {isSyncingAllOnus
+                        ? 'Menarik ONU dari OLT...'
+                        : 'Sync Semua ONU dari OLT'}
+                    </span>
+                  </button>
+                )}
               {activeView !== 'DASHBOARD' && (
                 <button
                   type="button"
