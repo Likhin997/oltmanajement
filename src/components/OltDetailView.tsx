@@ -13,6 +13,7 @@ import {
   generateUplinkConfigCliScript,
   generateCreateVlanCliScript,
 } from '../services/oltEngine';
+import { PrtgTrafficGraph, PrtgTrafficSeries } from './PrtgTrafficGraph';
 import {
   Info,
   Grid,
@@ -199,6 +200,51 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
   const [trafficUplink, setTrafficUplink] = useState<UplinkPortRecord | null>(
     null
   );
+  const [modalGraphPeriod, setModalGraphPeriod] = useState<
+    'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
+  >('Live2h');
+  const [modalGraphsPayload, setModalGraphsPayload] = useState<{
+    polledAtWib?: string;
+    uplinks?: Array<{
+      id: number;
+      interfaceName: string;
+      title: string;
+      periods: Record<string, PrtgTrafficSeries>;
+    }>;
+    ponPorts?: Array<{
+      id: number;
+      interfaceName: string;
+      title: string;
+      periods: Record<string, PrtgTrafficSeries>;
+    }>;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!trafficUplink && !trafficPonPort) return;
+    let cancelled = false;
+    fetch(`/api/olts/${olt.id}/graphs`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (!cancelled && d && d.ok) {
+          setModalGraphsPayload(d);
+        }
+      })
+      .catch(() => {});
+    fetch(`/api/olts/${olt.id}/poll-graphs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (!cancelled && d && d.ok) {
+          setModalGraphsPayload(d);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [olt.id, trafficUplink, trafficPonPort]);
 
   // Create LAG Modal state
   const [showCreateLagModal, setShowCreateLagModal] = useState(false);
@@ -2777,7 +2823,7 @@ ${oltVlans
       {/* MODAL 5: UPLINK OR PON TRAFFIC GRAPH MODAL */}
       {(trafficUplink || trafficPonPort) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-2xl rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+          <div className="w-full max-w-4xl rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
             <div className="mb-3 flex items-center justify-between border-b border-slate-700 pb-3">
               <h3 className="text-base font-bold text-white">
                 Real-Time Interface Traffic —{' '}
@@ -2798,30 +2844,47 @@ ${oltVlans
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <div className="rounded border border-slate-800 bg-[#05080f] p-4">
-              <div className="flex h-36 items-end gap-1 border-b border-l border-slate-800 px-3 pb-1">
-                {Array.from({ length: 24 }, (_, i) => (
-                  <div key={i} className="flex flex-1 flex-col items-center gap-0.5">
-                    <div
-                      className="w-full rounded-t bg-emerald-500/80"
-                      style={{ height: `${35 + ((i * 19) % 75)}px` }}
-                    />
-                    <div
-                      className="w-full rounded-b bg-sky-500/80"
-                      style={{ height: `${12 + ((i * 11) % 30)}px` }}
-                    />
-                  </div>
-                ))}
-              </div>
-              <div className="mt-2 flex justify-between font-mono text-[11px] text-slate-300">
-                <span className="text-emerald-400">
-                  ■ RX Downstream: 642.8 Mbps Peak
-                </span>
-                <span className="text-sky-400">
-                  ■ TX Upstream: 194.2 Mbps Peak
-                </span>
-              </div>
-            </div>
+            {(() => {
+              const targetIf = (
+                trafficUplink ? trafficUplink.name : trafficPonPort?.interface_name || ''
+              ).toLowerCase();
+              const matchedItem = trafficUplink
+                ? modalGraphsPayload?.uplinks?.find(
+                    (u) => u.interfaceName.toLowerCase() === targetIf
+                  ) || modalGraphsPayload?.uplinks?.[0]
+                : modalGraphsPayload?.ponPorts?.find(
+                    (p) => p.interfaceName.toLowerCase() === targetIf
+                  );
+              const activeSeries =
+                matchedItem?.periods?.[modalGraphPeriod] ||
+                matchedItem?.periods?.Daily;
+              const watermarkMap: Record<
+                'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
+                string
+              > = {
+                Live2h: 'Live Graph, 2 hours',
+                Daily: 'Live Graph, 24 hours',
+                Weekly: 'Weekly Graph, 7 days',
+                Monthly: 'Monthly Graph, 30 days',
+                Yearly: 'Yearly Graph, 12 months',
+              };
+              return (
+                <PrtgTrafficGraph
+                  breadcrumbPath={`JetCyber > Local Probe > ${olt.name} > ${
+                    trafficUplink ? 'BGP Core Uplink' : 'GPON Port'
+                  } > ${
+                    matchedItem?.title ||
+                    (trafficUplink ? trafficUplink.name : trafficPonPort?.interface_name)
+                  }`}
+                  watermarkTitle={watermarkMap[modalGraphPeriod]}
+                  series={activeSeries}
+                  sensorId={2000 + (matchedItem?.id || 1)}
+                  polledAtStr={modalGraphsPayload?.polledAtWib || 'Asia/Jakarta WIB'}
+                  activePeriod={modalGraphPeriod}
+                  onSelectPeriod={(p) => setModalGraphPeriod(p)}
+                />
+              );
+            })()}
           </div>
         </div>
       )}

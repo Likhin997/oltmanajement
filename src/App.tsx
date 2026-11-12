@@ -31,6 +31,7 @@ import { OnuDetailView } from './components/OnuDetailView';
 import { UpdateOnuModeModal } from './components/UpdateOnuModeModal';
 import { OltDetailView, OltDetailTab } from './components/OltDetailView';
 import { AddOltView } from './components/AddOltView';
+import { PrtgTrafficGraph } from './components/PrtgTrafficGraph';
 import {
   Save,
   Contrast,
@@ -689,6 +690,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     timestampMs: number;
     label: string;
     shortLabel: string;
+    totalMbps?: number;
     downloadMbps: number;
     uploadMbps: number;
     sampleCount: number;
@@ -696,14 +698,20 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   }
 
   interface OltGraphPeriodSeries {
-    period: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
+    period: 'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
     intervalLabel: string;
     points: OltGraphPoint[];
+    curTotalMbps?: number;
+    maxTotalMbps?: number;
+    minTotalMbps?: number;
+    avgTotalMbps?: number;
     curDownloadMbps: number;
     maxDownloadMbps: number;
+    minDownloadMbps?: number;
     avgDownloadMbps: number;
     curUploadMbps: number;
     maxUploadMbps: number;
+    minUploadMbps?: number;
     avgUploadMbps: number;
   }
 
@@ -718,6 +726,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     activeOnus: number;
     totalOnus: number;
     periods: {
+      Live2h?: OltGraphPeriodSeries;
       Daily: OltGraphPeriodSeries;
       Weekly: OltGraphPeriodSeries;
       Monthly: OltGraphPeriodSeries;
@@ -740,9 +749,12 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   const [graphsPollingLive, setGraphsPollingLive] = useState<boolean>(false);
   const [graphsFilterType, setGraphsFilterType] = useState<'ALL' | 'UPLINK' | 'PON'>('ALL');
   const [graphsShowAllPon, setGraphsShowAllPon] = useState<boolean>(true);
+  const [graphsOverviewPeriod, setGraphsOverviewPeriod] = useState<
+    'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
+  >('Live2h');
   const [selectedGraphInterfaceName, setSelectedGraphInterfaceName] = useState<string | null>(null);
   const [selectedGraphPeriod, setSelectedGraphPeriod] = useState<
-    'ALL_PERIODS' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
+    'ALL_PERIODS' | 'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
   >('ALL_PERIODS');
   const [jakartaClockStr, setJakartaClockStr] = useState<string>(() =>
     formatJakartaDateTime()
@@ -783,7 +795,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         if (!silent) {
           showToast(
             json.reachable
-              ? `✓ Grafik Uplink & PON OLT diperbarui secara real-time (${json.polledAtWib} WIB)`
+              ? `✓ Grafik Uplink & PON OLT diperbarui langsung dari OLT (${json.polledAtWib} WIB)`
               : `Grafik Uplink & PON dimuat (${json.polledAtWib} WIB)`
           );
         }
@@ -7409,22 +7421,36 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
               const renderGraphChartBlock = (
                 item: OltInterfaceGraphItem,
-                periodKey: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
-                periodTitleIndo: string,
+                periodKey: 'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
+                watermarkLabel: string,
                 isClickableCard: boolean
               ) => {
-                const series = item.periods[periodKey];
-                const pts = series?.points || [];
-                const peakScale = Math.max(
-                  10,
-                  series?.maxDownloadMbps || 10,
-                  series?.maxUploadMbps || 5
-                );
+                const series =
+                  periodKey === 'Live2h'
+                    ? item.periods.Live2h || item.periods.Daily
+                    : item.periods[periodKey];
+                const oltDisplayName = oltGraphsData?.oltName || 'ZTE-C320-OLT';
+                const probeGroup =
+                  item.interfaceType === 'UPLINK'
+                    ? `BGP Core ${oltDisplayName}`
+                    : `GPON Matrix ${oltDisplayName}`;
+                const breadcrumbPath = `JetCyber > Local Probe > ${oltDisplayName} > ${probeGroup} > ${item.title}`;
 
                 return (
-                  <div
+                  <PrtgTrafficGraph
                     key={`${item.interfaceName}-${periodKey}`}
-                    onClick={
+                    breadcrumbPath={breadcrumbPath}
+                    watermarkTitle={watermarkLabel}
+                    series={series}
+                    sensorId={2000 + (item.id || 1)}
+                    polledAtStr={oltGraphsData?.polledAtWib || jakartaClockStr}
+                    activePeriod={isClickableCard ? graphsOverviewPeriod : periodKey}
+                    onSelectPeriod={
+                      isClickableCard
+                        ? (p) => setGraphsOverviewPeriod(p)
+                        : undefined
+                    }
+                    onClickGraph={
                       isClickableCard
                         ? () => {
                             setSelectedGraphInterfaceName(item.interfaceName);
@@ -7432,123 +7458,24 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           }
                         : undefined
                     }
-                    className={`rounded-lg border transition-all ${
+                    clickHintText={
                       isClickableCard
-                        ? 'cursor-pointer border-slate-800 bg-[#05080f] p-5 hover:border-sky-500/70 hover:shadow-lg hover:shadow-sky-950/40'
-                        : 'border-slate-800 bg-[#05080f] p-5'
-                    }`}
-                  >
-                    {/* Header */}
-                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-2.5">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span
-                          className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold uppercase ${
-                            item.interfaceType === 'UPLINK'
-                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                              : 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
-                          }`}
-                        >
-                          {item.interfaceType === 'UPLINK' ? 'OLT UPLINK' : 'GPON PORT'}
-                        </span>
-                        <span className="font-mono text-xs font-bold text-white">
-                          {item.title} — {periodTitleIndo} (Peak{' '}
-                          {formatRateLabel(
-                            Math.max(
-                              series?.maxDownloadMbps || 0,
-                              series?.maxUploadMbps || 0
-                            )
-                          )}
-                          )
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-[11px] text-slate-400">
-                          {item.subtitle}
-                        </span>
-                        {isClickableCard && (
-                          <span className="rounded bg-[#0275d8]/20 border border-[#0275d8]/50 px-2 py-0.5 text-[10px] font-bold text-sky-300">
-                            Klik untuk Grafik Harian / Mingguan / Bulanan / Tahunan →
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Bars Container (48 bars @ 5-minute interval for 24h Daily) */}
-                    <div className="mt-4 flex h-40 items-end gap-1 border-b border-l border-slate-800 px-3 pb-1">
-                      {pts.map((pt, idx) => {
-                        const downHeightPx = Math.max(
-                          4,
-                          Math.round((pt.downloadMbps / peakScale) * 96)
-                        );
-                        const upHeightPx = Math.max(
-                          3,
-                          Math.round((pt.uploadMbps / peakScale) * 48)
-                        );
-                        return (
-                          <div
-                            key={idx}
-                            title={`${pt.label}\nDownload: ${formatRateLabel(
-                              pt.downloadMbps
-                            )}\nUpload: ${formatRateLabel(pt.uploadMbps)}`}
-                            className="group relative flex flex-1 flex-col items-center gap-0.5"
-                          >
-                            <div
-                              className={`w-full rounded-t transition-all ${
-                                pt.isLive
-                                  ? 'bg-emerald-400 ring-1 ring-emerald-300/70'
-                                  : 'bg-emerald-500/85 group-hover:bg-emerald-400'
-                              }`}
-                              style={{ height: `${downHeightPx}px` }}
-                            />
-                            <div
-                              className={`w-full rounded-b transition-all ${
-                                pt.isLive
-                                  ? 'bg-sky-400 ring-1 ring-sky-300/70'
-                                  : 'bg-sky-500/85 group-hover:bg-sky-400'
-                              }`}
-                              style={{ height: `${upHeightPx}px` }}
-                            />
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    {/* X-Axis WIB Timestamps */}
-                    {pts.length > 0 && (
-                      <div className="mt-1.5 flex items-center justify-between px-3 font-mono text-[10px] text-slate-400">
-                        {pts.map((pt, idx) => (
-                          <span
-                            key={idx}
-                            className="flex-1 truncate text-center"
-                          >
-                            {pt.shortLabel}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Legend & Summary Footer */}
-                    <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] text-slate-400">
-                      <div className="flex flex-wrap items-center gap-4">
-                        <span className="flex items-center gap-1.5 text-emerald-400">
-                          <span className="h-2.5 w-2.5 rounded-xs bg-emerald-500" />
-                          Download: Now {formatRateLabel(series?.curDownloadMbps ?? 0)}{' '}
-                          / Max {formatRateLabel(series?.maxDownloadMbps ?? 0)} / Avg{' '}
-                          {formatRateLabel(series?.avgDownloadMbps ?? 0)}
-                        </span>
-                        <span className="flex items-center gap-1.5 text-sky-400">
-                          <span className="h-2.5 w-2.5 rounded-xs bg-sky-500" />
-                          Upload: Now {formatRateLabel(series?.curUploadMbps ?? 0)} /
-                          Max {formatRateLabel(series?.maxUploadMbps ?? 0)} / Avg{' '}
-                          {formatRateLabel(series?.avgUploadMbps ?? 0)}
-                        </span>
-                      </div>
-                      <span className="text-slate-400">
-                        {series?.intervalLabel}
-                      </span>
-                    </div>
-                  </div>
+                        ? 'Detail Harian / Mingguan / Bulanan / Tahunan →'
+                        : undefined
+                    }
+                  />
                 );
+              };
+
+              const overviewWatermarkMap: Record<
+                'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
+                string
+              > = {
+                Live2h: 'Live Graph, 2 hours',
+                Daily: 'Live Graph, 24 hours',
+                Weekly: 'Weekly Graph, 7 days',
+                Monthly: 'Monthly Graph, 30 days',
+                Yearly: 'Yearly Graph, 12 months',
               };
 
               return (
@@ -7638,7 +7565,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         />
                         {graphsPollingLive
                           ? 'Polling OLT...'
-                          : 'Poll Real-Time Traffic (5-Min Interval)'}
+                          : 'Poll Real-Time Traffic (Live OLT)'}
                       </button>
                     </div>
                   </div>
@@ -7654,14 +7581,14 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                               onClick={() => setSelectedGraphInterfaceName(null)}
                               className="rounded bg-[#132842] px-2.5 py-1 text-xs font-bold text-sky-300 hover:bg-[#1c395d] hover:text-white"
                             >
-                              ← Kembali ke Semua Grafik 24 Jam
+                              ← Kembali ke Semua Grafik
                             </button>
                             <h2 className="font-mono text-sm font-bold text-white">
                               Detail Grafik Interface: {selectedGraphItem.title}
                             </h2>
                           </div>
                           <p className="mt-1 text-[11px] text-slate-300">
-                            Menampilkan grafik trafik Harian (24 Jam • Interval 5 Menit), Mingguan (7 Hari), Bulanan (30 Hari), dan Tahunan (12 Bulan) dalam Zona Waktu Jakarta (WIB / UTC+7).
+                            Menampilkan grafik trafik Real-Time OLT: 2 Jam (Live), Harian (24 Jam • Interval 5 Menit), Mingguan (7 Hari), Bulanan (30 Hari), dan Tahunan (12 Bulan) dalam Zona Waktu Jakarta (WIB / UTC+7).
                           </p>
                         </div>
 
@@ -7671,9 +7598,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             [
                               {
                                 id: 'ALL_PERIODS',
-                                label: 'Semua Periode (Harian/Mingguan/Bulanan/Tahunan)',
+                                label: 'Semua Periode',
                               },
-                              { id: 'Daily', label: 'Harian (24 Jam / 5 Menit)' },
+                              { id: 'Live2h', label: 'Live (2 Jam)' },
+                              { id: 'Daily', label: 'Harian (24 Jam / 5m)' },
                               { id: 'Weekly', label: 'Mingguan (7 Hari)' },
                               { id: 'Monthly', label: 'Bulanan (30 Hari)' },
                               { id: 'Yearly', label: 'Tahunan (12 Bulan)' },
@@ -7696,11 +7624,20 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       </div>
 
                       {(selectedGraphPeriod === 'ALL_PERIODS' ||
+                        selectedGraphPeriod === 'Live2h') &&
+                        renderGraphChartBlock(
+                          selectedGraphItem,
+                          'Live2h',
+                          'Live Graph, 2 hours',
+                          false
+                        )}
+
+                      {(selectedGraphPeriod === 'ALL_PERIODS' ||
                         selectedGraphPeriod === 'Daily') &&
                         renderGraphChartBlock(
                           selectedGraphItem,
                           'Daily',
-                          'Grafik Harian (24 Jam — Interval Batang 5 Menit)',
+                          'Live Graph, 24 hours',
                           false
                         )}
 
@@ -7709,7 +7646,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         renderGraphChartBlock(
                           selectedGraphItem,
                           'Weekly',
-                          'Grafik Mingguan (7 Hari Terakhir)',
+                          'Weekly Graph, 7 days',
                           false
                         )}
 
@@ -7718,7 +7655,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         renderGraphChartBlock(
                           selectedGraphItem,
                           'Monthly',
-                          'Grafik Bulanan (30 Hari Terakhir)',
+                          'Monthly Graph, 30 days',
                           false
                         )}
 
@@ -7727,7 +7664,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         renderGraphChartBlock(
                           selectedGraphItem,
                           'Yearly',
-                          'Grafik Tahunan (12 Bulan Terakhir)',
+                          'Yearly Graph, 12 months',
                           false
                         )}
                     </div>
@@ -7739,25 +7676,25 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         </div>
                       )}
 
-                      {/* SECTION 1: UPLINK PORTS (24 JAM - INTERVAL 5 MENIT) */}
+                      {/* SECTION 1: UPLINK PORTS */}
                       {(graphsFilterType === 'ALL' ||
                         graphsFilterType === 'UPLINK') &&
                         allUplinks.length > 0 && (
                           <div className="space-y-3">
                             <div className="flex items-center justify-between">
                               <h2 className="font-mono text-sm font-bold text-emerald-400">
-                                1. Grafik Uplink OLT — 24 Jam Terakhir (Interval Batang 5 Menit • WIB)
+                                1. Grafik Uplink OLT — Real-Time Telemetry ({overviewWatermarkMap[graphsOverviewPeriod]} • WIB)
                               </h2>
                               <span className="text-[11px] text-slate-400">
-                                Klik grafik mana saja untuk membuka detail Harian, Mingguan, Bulanan & Tahunan
+                                Klik grafik mana saja untuk membuka detail 2 Jam, Harian (24 Jam), Mingguan, Bulanan & Tahunan
                               </span>
                             </div>
                             <div className="space-y-4">
                               {allUplinks.map((uItem) =>
                                 renderGraphChartBlock(
                                   uItem,
-                                  'Daily',
-                                  '24 Jam (Interval 5 Menit)',
+                                  graphsOverviewPeriod,
+                                  overviewWatermarkMap[graphsOverviewPeriod],
                                   true
                                 )
                               )}
@@ -7765,24 +7702,24 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           </div>
                         )}
 
-                      {/* SECTION 2: GPON PON PORTS (24 JAM - INTERVAL 5 MENIT) */}
+                      {/* SECTION 2: GPON PON PORTS */}
                       {(graphsFilterType === 'ALL' ||
                         graphsFilterType === 'PON') && (
                         <div className="space-y-3 pt-2">
                           <div className="flex items-center justify-between">
                             <h2 className="font-mono text-sm font-bold text-sky-400">
-                              2. Grafik GPON Port OLT (`gpon-olt_1/3/*`) — 24 Jam Terakhir (Interval Batang 5 Menit • WIB)
+                              2. Grafik GPON Port OLT (`gpon-olt_1/3/*`) — Real-Time Telemetry ({overviewWatermarkMap[graphsOverviewPeriod]} • WIB)
                             </h2>
                             <span className="text-[11px] text-slate-400">
-                              Menampilkan {allPonPorts.length} PON Port • Klik grafik untuk melihat Harian, Mingguan, Bulanan & Tahunan
+                              Menampilkan {allPonPorts.length} PON Port • Klik grafik untuk melihat 2 Jam, Harian, Mingguan, Bulanan & Tahunan
                             </span>
                           </div>
                           <div className="space-y-4">
                             {allPonPorts.map((pItem) =>
                               renderGraphChartBlock(
                                 pItem,
-                                'Daily',
-                                '24 Jam (Interval 5 Menit)',
+                                graphsOverviewPeriod,
+                                overviewWatermarkMap[graphsOverviewPeriod],
                                 true
                               )
                             )}

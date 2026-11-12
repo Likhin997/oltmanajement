@@ -18,6 +18,7 @@ import {
   parseZteWanIpOutput,
 } from '../services/oltEngine';
 import { UpdateOnuModeModal } from './UpdateOnuModeModal';
+import { PrtgTrafficGraph } from './PrtgTrafficGraph';
 import {
   ArrowLeft,
   Eye,
@@ -136,22 +137,23 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const [customProfile, setCustomProfile] = useState(true);
   const [livePolling, setLivePolling] = useState(false);
   const [trafficPeriod, setTrafficPeriod] = useState<
-    'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
-  >('Daily');
+    'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
+  >('Live2h');
   const [signalPeriod, setSignalPeriod] = useState<
-    'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
-  >('Weekly');
+    'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
+  >('Live2h');
   const [telemetryData, setTelemetryData] = useState<{
     polledAt: string;
     periods: Record<
-      'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
+      'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
       {
-        period: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
+        period: 'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
         intervalLabel: string;
         points: Array<{
           timestampMs: number;
           label: string;
           shortLabel: string;
+          totalMbps?: number;
           downloadMbps: number;
           uploadMbps: number;
           onuRxDbm: number | null;
@@ -161,10 +163,16 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
           sampleCount: number;
           isLive: boolean;
         }>;
+        curTotalMbps?: number;
+        maxTotalMbps?: number;
+        minTotalMbps?: number;
+        avgTotalMbps?: number;
         maxDownloadMbps: number;
+        minDownloadMbps?: number;
         avgDownloadMbps: number;
         curDownloadMbps: number;
         maxUploadMbps: number;
+        minUploadMbps?: number;
         avgUploadMbps: number;
         curUploadMbps: number;
         curOnuRxDbm: number | null;
@@ -1645,22 +1653,30 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       {/* Traffic history + Signal & Status history */}
       <div className="space-y-5 pt-2">
         {(() => {
-          const activeTraffic = telemetryData?.periods?.[trafficPeriod];
-          const trafficPoints = activeTraffic?.points || [];
-          const peakTrafficScale = Math.max(
-            5,
-            activeTraffic?.maxDownloadMbps || 10,
-            activeTraffic?.maxUploadMbps || 5
-          );
+          const activeTraffic =
+            telemetryData?.periods?.[trafficPeriod] ||
+            telemetryData?.periods?.Daily;
 
-          const activeSignal = telemetryData?.periods?.[signalPeriod];
+          const activeSignal =
+            telemetryData?.periods?.[signalPeriod] ||
+            telemetryData?.periods?.Daily;
           const signalPoints = activeSignal?.points || [];
+
+          const watermarkMap: Record<
+            'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
+            string
+          > = {
+            Live2h: 'Live Graph, 2 hours',
+            Daily: 'Live Graph, 24 hours',
+            Weekly: 'Weekly Graph, 7 days',
+            Monthly: 'Monthly Graph, 30 days',
+            Yearly: 'Yearly Graph, 12 months',
+          };
 
           // Map dBm (-12 dBm top .. -35 dBm bottom) to percentage height (8% .. 90%)
           const dbmToTopPercent = (dbm: number | null, fallbackDbm: number) => {
             const v = dbm !== null && !isNaN(dbm) ? dbm : fallbackDbm;
             const clamped = Math.max(-35, Math.min(-12, v));
-            // -12 dBm -> 10% from top, -35 dBm -> 88% from top
             return 10 + ((Math.abs(clamped) - 12) / (35 - 12)) * 78;
           };
 
@@ -1670,107 +1686,46 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 <div className="mb-2 flex items-center gap-2 text-sm">
                   <span className="font-bold text-white">Traffic history</span>
                   <div className="flex items-center gap-1.5 text-xs">
-                    {(['Daily', 'Weekly', 'Monthly', 'Yearly'] as const).map(
-                      (p, i) => (
-                        <React.Fragment key={p}>
-                          {i > 0 && <span className="text-slate-600">|</span>}
-                          <button
-                            type="button"
-                            onClick={() => setTrafficPeriod(p)}
-                            className={
-                              trafficPeriod === p
-                                ? 'font-bold text-white'
-                                : 'text-sky-400 hover:underline'
-                            }
-                          >
-                            {p}
-                          </button>
-                        </React.Fragment>
-                      )
-                    )}
+                    {(
+                      [
+                        { id: 'Live2h', label: '2 Hours (Live)' },
+                        { id: 'Daily', label: 'Daily (24h)' },
+                        { id: 'Weekly', label: 'Weekly' },
+                        { id: 'Monthly', label: 'Monthly' },
+                        { id: 'Yearly', label: 'Yearly' },
+                      ] as const
+                    ).map((p, i) => (
+                      <React.Fragment key={p.id}>
+                        {i > 0 && <span className="text-slate-600">|</span>}
+                        <button
+                          type="button"
+                          onClick={() => setTrafficPeriod(p.id)}
+                          className={
+                            trafficPeriod === p.id
+                              ? 'font-bold text-white'
+                              : 'text-sky-400 hover:underline'
+                          }
+                        >
+                          {p.label}
+                        </button>
+                      </React.Fragment>
+                    ))}
                   </div>
                 </div>
 
-                <div className="rounded border border-slate-800 bg-[#05080f] p-4">
-                  <div className="text-center font-mono text-xs font-bold text-slate-200">
-                    {onu.customer_name || onu.serial_number} (SN:{' '}
-                    {onu.serial_number}) - {trafficPeriod} Traffic
-                  </div>
-
-                  <div className="mt-3 flex h-36 items-end gap-1 border-b border-l border-slate-800 px-3 pb-1">
-                    {trafficPoints.map((pt, idx) => {
-                      const downHeightPx = Math.max(
-                        4,
-                        Math.round((pt.downloadMbps / peakTrafficScale) * 86)
-                      );
-                      const upHeightPx = Math.max(
-                        3,
-                        Math.round((pt.uploadMbps / peakTrafficScale) * 44)
-                      );
-                      return (
-                        <div
-                          key={idx}
-                          title={`${pt.label}\nDownload: ${pt.downloadMbps.toFixed(2)} Mbps\nUpload: ${pt.uploadMbps.toFixed(2)} Mbps`}
-                          className="group relative flex flex-1 flex-col items-center gap-0.5"
-                        >
-                          <div
-                            className={`w-full rounded-t transition-all ${
-                              pt.isLive
-                                ? 'bg-emerald-400 ring-1 ring-emerald-300/60'
-                                : 'bg-emerald-500/85 group-hover:bg-emerald-400'
-                            }`}
-                            style={{ height: `${downHeightPx}px` }}
-                          />
-                          <div
-                            className={`w-full rounded-b transition-all ${
-                              pt.isLive
-                                ? 'bg-sky-400 ring-1 ring-sky-300/60'
-                                : 'bg-sky-500/85 group-hover:bg-sky-400'
-                            }`}
-                            style={{ height: `${upHeightPx}px` }}
-                          />
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* X-axis period labels */}
-                  {trafficPoints.length > 0 && (
-                    <div className="mt-1 flex items-center justify-between px-3 font-mono text-[10px] text-slate-500">
-                      {trafficPoints.map((pt, idx) => (
-                        <span
-                          key={idx}
-                          className="flex-1 text-center truncate"
-                        >
-                          {pt.shortLabel}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-
-                  <div className="mt-2 flex flex-wrap items-center justify-between font-mono text-[11px] text-slate-400">
-                    <div className="flex flex-wrap items-center gap-4">
-                      <span className="flex items-center gap-1.5 text-emerald-400">
-                        <span className="h-2.5 w-2.5 bg-emerald-500" />
-                        Download: Now{' '}
-                        {(activeTraffic?.curDownloadMbps ?? 0).toFixed(2)} Mbps / Max{' '}
-                        {(activeTraffic?.maxDownloadMbps ?? 0).toFixed(2)} Mbps / Avg{' '}
-                        {(activeTraffic?.avgDownloadMbps ?? 0).toFixed(2)} Mbps
-                      </span>
-                      <span className="flex items-center gap-1.5 text-sky-400">
-                        <span className="h-2.5 w-2.5 bg-sky-500" />
-                        Upload: Now{' '}
-                        {(activeTraffic?.curUploadMbps ?? 0).toFixed(2)} Mbps / Max{' '}
-                        {(activeTraffic?.maxUploadMbps ?? 0).toFixed(2)} Mbps / Avg{' '}
-                        {(activeTraffic?.avgUploadMbps ?? 0).toFixed(2)} Mbps
-                      </span>
-                    </div>
-                    <span>
-                      {activeTraffic?.intervalLabel ||
-                        `Real-Time OLT Traffic (${trafficPeriod})`}
-                    </span>
-                  </div>
-                </div>
+                <PrtgTrafficGraph
+                  breadcrumbPath={`JetCyber > Local Probe > ${
+                    olt?.name || 'ZTE OLT'
+                  } > gpon-onu_1/${onu.board}/${onu.port}:${
+                    onu.onu_index || 1
+                  } - ${onu.customer_name || onu.serial_number}`}
+                  watermarkTitle={watermarkMap[trafficPeriod]}
+                  series={activeTraffic}
+                  sensorId={3000 + onu.id}
+                  polledAtStr={telemetryData?.polledAt || 'Asia/Jakarta WIB'}
+                  activePeriod={trafficPeriod}
+                  onSelectPeriod={(p) => setTrafficPeriod(p)}
+                />
               </div>
 
               {/* Signal & Status history */}
@@ -1780,24 +1735,30 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     Signal & Status history
                   </span>
                   <div className="flex items-center gap-1.5 text-xs">
-                    {(['Daily', 'Weekly', 'Monthly', 'Yearly'] as const).map(
-                      (p, i) => (
-                        <React.Fragment key={p}>
-                          {i > 0 && <span className="text-slate-600">|</span>}
-                          <button
-                            type="button"
-                            onClick={() => setSignalPeriod(p)}
-                            className={
-                              signalPeriod === p
-                                ? 'font-bold text-white'
-                                : 'text-sky-400 hover:underline'
-                            }
-                          >
-                            {p}
-                          </button>
-                        </React.Fragment>
-                      )
-                    )}
+                    {(
+                      [
+                        { id: 'Live2h', label: '2 Hours' },
+                        { id: 'Daily', label: 'Daily (24h)' },
+                        { id: 'Weekly', label: 'Weekly' },
+                        { id: 'Monthly', label: 'Monthly' },
+                        { id: 'Yearly', label: 'Yearly' },
+                      ] as const
+                    ).map((p, i) => (
+                      <React.Fragment key={p.id}>
+                        {i > 0 && <span className="text-slate-600">|</span>}
+                        <button
+                          type="button"
+                          onClick={() => setSignalPeriod(p.id)}
+                          className={
+                            signalPeriod === p.id
+                              ? 'font-bold text-white'
+                              : 'text-sky-400 hover:underline'
+                          }
+                        >
+                          {p.label}
+                        </button>
+                      </React.Fragment>
+                    ))}
                   </div>
                 </div>
 
@@ -1826,45 +1787,48 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     </div>
 
                     {signalPoints.map((pt, idx) => {
-                      const onuTop = dbmToTopPercent(
-                        pt.onuRxDbm,
-                        onu.onu_rx_dbm ?? -21.85
-                      );
-                      const oltTop = dbmToTopPercent(
-                        pt.oltRxDbm,
-                        onu.olt_rx_dbm ?? -25.4
-                      );
-                      const isLos = pt.phaseState === 'LOS';
-                      const isPwr = pt.phaseState === 'DyingGasp';
+                      const hasRealOnuRx =
+                        pt.onuRxDbm !== null && pt.onuRxDbm !== undefined;
+                      const hasRealOltRx =
+                        pt.oltRxDbm !== null && pt.oltRxDbm !== undefined;
+                      const onuTop = hasRealOnuRx
+                        ? dbmToTopPercent(pt.onuRxDbm, -21.85)
+                        : null;
+                      const oltTop = hasRealOltRx
+                        ? dbmToTopPercent(pt.oltRxDbm, -25.4)
+                        : null;
+                      const isLos = pt.phaseState === 'LOS' && pt.sampleCount > 0;
+                      const isPwr =
+                        pt.phaseState === 'DyingGasp' && pt.sampleCount > 0;
                       return (
                         <div
                           key={idx}
                           title={`${pt.label}\n1490nm ONU Rx: ${
-                            pt.onuRxDbm !== null ? `${pt.onuRxDbm.toFixed(2)} dBm` : 'N/A (LOS)'
+                            hasRealOnuRx ? `${pt.onuRxDbm!.toFixed(2)} dBm` : 'Belum ada sampel pada slot waktu ini'
                           }\n1310nm OLT Rx: ${
-                            pt.oltRxDbm !== null ? `${pt.oltRxDbm.toFixed(2)} dBm` : 'N/A (LOS)'
+                            hasRealOltRx ? `${pt.oltRxDbm!.toFixed(2)} dBm` : 'Belum ada sampel pada slot waktu ini'
                           }\nStatus: ${pt.phaseState}`}
                           className="group relative flex flex-1 flex-col items-center"
                         >
-                          {!isLos && (
-                            <>
-                              <div
-                                className={`absolute h-2.5 w-2.5 -translate-y-1/2 rounded-full transition-transform group-hover:scale-125 ${
-                                  pt.isLive
-                                    ? 'bg-emerald-300 ring-2 ring-emerald-400/60'
-                                    : 'bg-emerald-400'
-                                }`}
-                                style={{ top: `${onuTop}%` }}
-                              />
-                              <div
-                                className={`absolute h-2.5 w-2.5 -translate-y-1/2 rounded-full transition-transform group-hover:scale-125 ${
-                                  pt.isLive
-                                    ? 'bg-amber-300 ring-2 ring-amber-400/60'
-                                    : 'bg-amber-400'
-                                }`}
-                                style={{ top: `${oltTop}%` }}
-                              />
-                            </>
+                          {!isLos && onuTop !== null && (
+                            <div
+                              className={`absolute h-2.5 w-2.5 -translate-y-1/2 rounded-full transition-transform group-hover:scale-125 ${
+                                pt.isLive
+                                  ? 'bg-emerald-300 ring-2 ring-emerald-400/60'
+                                  : 'bg-emerald-400'
+                              }`}
+                              style={{ top: `${onuTop}%` }}
+                            />
+                          )}
+                          {!isLos && oltTop !== null && (
+                            <div
+                              className={`absolute h-2.5 w-2.5 -translate-y-1/2 rounded-full transition-transform group-hover:scale-125 ${
+                                pt.isLive
+                                  ? 'bg-amber-300 ring-2 ring-amber-400/60'
+                                  : 'bg-amber-400'
+                              }`}
+                              style={{ top: `${oltTop}%` }}
+                            />
                           )}
                           {/* Bottom status indicator dot for LOS / Power Fail / Working */}
                           <div
@@ -1873,7 +1837,9 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                                 ? 'bg-rose-500'
                                 : isPwr
                                 ? 'bg-amber-500'
-                                : 'bg-emerald-500/40'
+                                : hasRealOnuRx || pt.isLive
+                                ? 'bg-emerald-500/50'
+                                : 'bg-slate-800/40'
                             }`}
                           />
                         </div>

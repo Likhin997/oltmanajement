@@ -282,6 +282,18 @@ const POSTGRES_SCHEMA_SQL = `
     onu_tx_dbm DOUBLE PRECISION DEFAULT NULL,
     phase_state VARCHAR(32) NOT NULL DEFAULT 'working'
   );
+
+  CREATE TABLE IF NOT EXISTS olt_interface_telemetry_samples (
+    id BIGSERIAL PRIMARY KEY,
+    olt_id INTEGER NOT NULL,
+    interface_name VARCHAR(64) NOT NULL,
+    interface_type VARCHAR(16) NOT NULL,
+    recorded_at BIGINT NOT NULL,
+    download_mbps DOUBLE PRECISION NOT NULL DEFAULT 0,
+    upload_mbps DOUBLE PRECISION NOT NULL DEFAULT 0,
+    in_bytes BIGINT DEFAULT 0,
+    out_bytes BIGINT DEFAULT 0
+  );
 `;
 
 function formatPgError(err: unknown): string {
@@ -421,6 +433,86 @@ async function initPostgresConnection(cfg: PgConnectionConfig): Promise<{
       }
       pgPool = pool;
       await pgPool.query(POSTGRES_SCHEMA_SQL);
+
+      // Hydrate real historical telemetry samples from PostgreSQL into local SQLite cache on connect
+      try {
+        const localIfCount = (
+          sqliteDb
+            .prepare(`SELECT COUNT(*) AS cnt FROM olt_interface_telemetry_samples`)
+            .get() as { cnt: number }
+        ).cnt;
+        if (localIfCount === 0) {
+          const pgIfRows = await pgPool.query(
+            `SELECT olt_id, interface_name, interface_type, recorded_at, download_mbps, upload_mbps, in_bytes, out_bytes
+             FROM olt_interface_telemetry_samples
+             ORDER BY recorded_at ASC
+             LIMIT 25000`
+          );
+          const insIf = sqliteDb.prepare(
+            `INSERT INTO olt_interface_telemetry_samples (
+              olt_id, interface_name, interface_type, recorded_at,
+              download_mbps, upload_mbps, in_bytes, out_bytes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          );
+          const txIf = sqliteDb.transaction((rows: typeof pgIfRows.rows) => {
+            for (const r of rows) {
+              insIf.run(
+                Number(r.olt_id),
+                String(r.interface_name).toLowerCase(),
+                String(r.interface_type),
+                Number(r.recorded_at),
+                Number(r.download_mbps || 0),
+                Number(r.upload_mbps || 0),
+                Number(r.in_bytes || 0),
+                Number(r.out_bytes || 0)
+              );
+            }
+          });
+          txIf(pgIfRows.rows);
+        }
+
+        const localOnuCount = (
+          sqliteDb
+            .prepare(`SELECT COUNT(*) AS cnt FROM onu_telemetry_samples`)
+            .get() as { cnt: number }
+        ).cnt;
+        if (localOnuCount === 0) {
+          const pgOnuRows = await pgPool.query(
+            `SELECT onu_id, olt_id, onu_interface, recorded_at, download_mbps, upload_mbps, rx_bytes, tx_bytes, onu_rx_dbm, olt_rx_dbm, onu_tx_dbm, phase_state
+             FROM onu_telemetry_samples
+             ORDER BY recorded_at ASC
+             LIMIT 25000`
+          );
+          const insOnu = sqliteDb.prepare(
+            `INSERT INTO onu_telemetry_samples (
+              onu_id, olt_id, onu_interface, recorded_at,
+              download_mbps, upload_mbps, rx_bytes, tx_bytes,
+              onu_rx_dbm, olt_rx_dbm, onu_tx_dbm, phase_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          );
+          const txOnu = sqliteDb.transaction((rows: typeof pgOnuRows.rows) => {
+            for (const r of rows) {
+              insOnu.run(
+                Number(r.onu_id),
+                Number(r.olt_id),
+                String(r.onu_interface),
+                Number(r.recorded_at),
+                Number(r.download_mbps || 0),
+                Number(r.upload_mbps || 0),
+                Number(r.rx_bytes || 0),
+                Number(r.tx_bytes || 0),
+                r.onu_rx_dbm !== null ? Number(r.onu_rx_dbm) : null,
+                r.olt_rx_dbm !== null ? Number(r.olt_rx_dbm) : null,
+                r.onu_tx_dbm !== null ? Number(r.onu_tx_dbm) : null,
+                String(r.phase_state || 'working')
+              );
+            }
+          });
+          txOnu(pgOnuRows.rows);
+        }
+      } catch {
+        // ignore telemetry hydration warning
+      }
 
       const displayHost = isLocalTarget ? 'localhost' : candidateHost;
       currentPgConfig = {
@@ -3443,12 +3535,27 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         `show gpon remote-onu wan-ip ${onuIf}`
       );
     } else {
+      // Always poll real OLT Uplink & active PON port traffic during real-time telemetry cycles
+      const oltUplinkIfs = (state.uplink_ports || [])
+        .filter((u) => u && u.olt_id === olt.id)
+        .map((u) => u.name);
+      const effectiveUplinks =
+        oltUplinkIfs.length > 0
+          ? oltUplinkIfs
+          : [olt.uplink_interface || 'xgei_1/19/1', 'gei_1/19/3'];
+      for (const upIf of effectiveUplinks) {
+        cmds.push(`show interface ${upIf}`);
+      }
+
       const oltOnus = state.onus.filter(
         (u) => u.olt_id === olt.id && u.is_authorized && u.onu_index !== null
       );
       const activePorts = Array.from(
         new Set(oltOnus.map((u) => `1/${u.board}/${u.port}`))
       );
+      for (const pCoord of activePorts) {
+        cmds.push(`show interface gpon-olt_${pCoord}`);
+      }
       if (activePorts.length > 0) {
         const portCoord =
           activePorts[roundRobinTelemetryCursor % activePorts.length];
@@ -3461,6 +3568,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
             oltOnus[(roundRobinTelemetryCursor + i) % oltOnus.length];
           const onuIf = `gpon-onu_1/${target.board}/${target.port}:${target.onu_index}`;
           cmds.push(
+            `show interface ${onuIf}`,
             `show gpon remote-onu ip-host ${onuIf}`,
             `show gpon remote-onu pppoe ${onuIf}`,
             `show gpon remote-onu wan-ip ${onuIf}`
@@ -3898,6 +4006,151 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       onus: [...updatedOnus, ...nextUncfgOnus],
     };
 
+    // Also parse and record any real `show interface` traffic from this poll cycle into telemetry tables
+    try {
+      const nowTrafficMs = Date.now();
+      const parsedMultiTraffic = parseZteMultiInterfaceTraffic(rawOut);
+      for (const [ifKey, parsed] of parsedMultiTraffic.entries()) {
+        const isUplink = /^(?:x?gei|smartgroup|eth|vlan)/i.test(ifKey);
+        const isPonPort = /^gpon-olt_/i.test(ifKey);
+        const isOnuIf = /^gpon-onu_/i.test(ifKey);
+
+        if (isUplink || isPonPort) {
+          const counterKey = `${olt.id}:${ifKey}`;
+          const prev = lastOltIfCounterByKey.get(counterKey);
+          let deltaDown: number | null = null;
+          let deltaUp: number | null = null;
+
+          if (
+            prev &&
+            nowTrafficMs > prev.atMs + 400 &&
+            parsed.inBytes !== null &&
+            parsed.outBytes !== null &&
+            parsed.inBytes >= prev.inBytes &&
+            parsed.outBytes >= prev.outBytes
+          ) {
+            const elapsedSec = (nowTrafficMs - prev.atMs) / 1000;
+            const dInMbps =
+              ((parsed.inBytes - prev.inBytes) * 8) / (elapsedSec * 1_000_000);
+            const dOutMbps =
+              ((parsed.outBytes - prev.outBytes) * 8) / (elapsedSec * 1_000_000);
+            deltaDown = Number(
+              Math.min(100000, isUplink ? dInMbps : dOutMbps).toFixed(2)
+            );
+            deltaUp = Number(
+              Math.min(100000, isUplink ? dOutMbps : dInMbps).toFixed(2)
+            );
+          }
+
+          const downMbps =
+            deltaDown !== null && deltaDown > 0
+              ? deltaDown
+              : parsed.downloadMbps !== null
+              ? Number(parsed.downloadMbps.toFixed(2))
+              : 0;
+          const upMbps =
+            deltaUp !== null && deltaUp > 0
+              ? deltaUp
+              : parsed.uploadMbps !== null
+              ? Number(parsed.uploadMbps.toFixed(2))
+              : 0;
+
+          if (parsed.inBytes !== null && parsed.outBytes !== null) {
+            lastOltIfCounterByKey.set(counterKey, {
+              atMs: nowTrafficMs,
+              inBytes: parsed.inBytes,
+              outBytes: parsed.outBytes,
+              lastDownMbps: downMbps,
+              lastUpMbps: upMbps,
+            });
+          }
+
+          recordOltInterfaceSample({
+            olt_id: olt.id,
+            interface_name: ifKey,
+            interface_type: isUplink ? 'UPLINK' : 'PON',
+            recorded_at: nowTrafficMs,
+            download_mbps: downMbps,
+            upload_mbps: upMbps,
+            in_bytes: parsed.inBytes || 0,
+            out_bytes: parsed.outBytes || 0,
+          });
+        } else if (isOnuIf) {
+          const matchedOnu = updatedOnus.find(
+            (u) =>
+              u.olt_id === olt.id &&
+              u.is_authorized &&
+              `gpon-onu_1/${u.board}/${u.port}:${u.onu_index}`.toLowerCase() === ifKey
+          );
+          if (matchedOnu) {
+            const counterKey = `${olt.id}:${ifKey}`;
+            const prev = lastOnuCounterByKey.get(counterKey);
+            let deltaDown: number | null = null;
+            let deltaUp: number | null = null;
+            if (
+              prev &&
+              nowTrafficMs > prev.atMs + 400 &&
+              parsed.outBytes !== null &&
+              parsed.inBytes !== null &&
+              parsed.outBytes >= prev.outBytes &&
+              parsed.inBytes >= prev.inBytes
+            ) {
+              const elapsedSec = (nowTrafficMs - prev.atMs) / 1000;
+              deltaDown = Number(
+                Math.min(
+                  10000,
+                  ((parsed.outBytes - prev.outBytes) * 8) / (elapsedSec * 1_000_000)
+                ).toFixed(2)
+              );
+              deltaUp = Number(
+                Math.min(
+                  10000,
+                  ((parsed.inBytes - prev.inBytes) * 8) / (elapsedSec * 1_000_000)
+                ).toFixed(2)
+              );
+            }
+            const downMbps =
+              deltaDown !== null && deltaDown > 0
+                ? deltaDown
+                : parsed.downloadMbps !== null
+                ? Number(parsed.downloadMbps.toFixed(2))
+                : 0;
+            const upMbps =
+              deltaUp !== null && deltaUp > 0
+                ? deltaUp
+                : parsed.uploadMbps !== null
+                ? Number(parsed.uploadMbps.toFixed(2))
+                : 0;
+            if (parsed.inBytes !== null && parsed.outBytes !== null) {
+              lastOnuCounterByKey.set(counterKey, {
+                atMs: nowTrafficMs,
+                inBytes: parsed.inBytes,
+                outBytes: parsed.outBytes,
+                lastDownMbps: downMbps,
+                lastUpMbps: upMbps,
+              });
+            }
+            recordOnuTelemetrySample({
+              onu_id: matchedOnu.id,
+              olt_id: olt.id,
+              onu_interface: ifKey,
+              recorded_at: nowTrafficMs,
+              download_mbps: matchedOnu.phase_state === 'working' ? downMbps : 0,
+              upload_mbps: matchedOnu.phase_state === 'working' ? upMbps : 0,
+              rx_bytes: parsed.outBytes || 0,
+              tx_bytes: parsed.inBytes || 0,
+              onu_rx_dbm: matchedOnu.onu_rx_dbm,
+              olt_rx_dbm: matchedOnu.olt_rx_dbm,
+              onu_tx_dbm: matchedOnu.onu_tx_dbm,
+              phase_state: matchedOnu.phase_state,
+            });
+          }
+        }
+      }
+    } catch {
+      // ignore traffic parse error during realtime poll
+    }
+
     await saveDatabaseState(nextState);
     res.json({
       ok: true,
@@ -3997,15 +4250,11 @@ function recordOnuTelemetrySample(sample: TelemetrySampleRow): void {
   }
 }
 
-function computeDeterministicWave(seed: number, stepIndex: number): number {
-  const x = Math.sin(seed * 12.9898 + stepIndex * 78.233) * 43758.5453;
-  return x - Math.floor(x);
-}
-
 export interface TelemetryBucketPoint {
   timestampMs: number;
   label: string;
   shortLabel: string;
+  totalMbps: number;
   downloadMbps: number;
   uploadMbps: number;
   onuRxDbm: number | null;
@@ -4017,13 +4266,19 @@ export interface TelemetryBucketPoint {
 }
 
 export interface TelemetryPeriodSummary {
-  period: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
+  period: 'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
   intervalLabel: string;
   points: TelemetryBucketPoint[];
+  curTotalMbps: number;
+  maxTotalMbps: number;
+  minTotalMbps: number;
+  avgTotalMbps: number;
   maxDownloadMbps: number;
+  minDownloadMbps: number;
   avgDownloadMbps: number;
   curDownloadMbps: number;
   maxUploadMbps: number;
+  minUploadMbps: number;
   avgUploadMbps: number;
   curUploadMbps: number;
   curOnuRxDbm: number | null;
@@ -4091,12 +4346,19 @@ function formatMonthYear(ms: number): string {
 }
 
 function formatJakartaDateTimeFull(ms: number): string {
-  return `${formatDayMonth(ms)} ${formatHourMin(ms)} WIB`;
+  const d = toJakartaDate(ms);
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const yyyy = d.getUTCFullYear();
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const min = String(d.getUTCMinutes()).padStart(2, '0');
+  const ss = String(d.getUTCSeconds()).padStart(2, '0');
+  return `${dd}/${mm}/${yyyy} ${hh}:${min}:${ss}`;
 }
 
 function buildOnuTelemetryForPeriod(
   onu: OnuRecord,
-  period: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
+  period: 'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
   nowMs: number,
   liveDownMbps?: number | null,
   liveUpMbps?: number | null
@@ -4105,49 +4367,44 @@ function buildOnuTelemetryForPeriod(
   const baseOnuRx =
     onu.onu_rx_dbm !== null && onu.onu_rx_dbm !== undefined
       ? Number(onu.onu_rx_dbm)
-      : isOnline
-      ? -21.85
       : null;
   const baseOltRx =
     onu.olt_rx_dbm !== null && onu.olt_rx_dbm !== undefined
       ? Number(onu.olt_rx_dbm)
-      : isOnline
-      ? -25.4
       : null;
   const baseOnuTx =
     onu.onu_tx_dbm !== null && onu.onu_tx_dbm !== undefined
       ? Number(onu.onu_tx_dbm)
-      : isOnline
-      ? 2.45
       : null;
 
-  let bucketCount = 48;
-  let stepMs = 5 * 60 * 1000; // 5 minutes per bar
-  let intervalLabel =
-    '24 Jam Terakhir — Interval Batang 5 Menit (WIB • Asia/Jakarta)';
+  let bucketCount = 24;
+  let stepMs = 5 * 60 * 1000;
+  let intervalLabel = 'Live Graph, 2 hours (Interval 5 Menit • WIB Asia/Jakarta)';
 
-  if (period === 'Daily') {
-    bucketCount = 48;
-    stepMs = 5 * 60 * 1000; // 5-minute bar interval!
-    intervalLabel =
-      '24 Jam / Harian — Interval Batang 5 Menit (WIB • Asia/Jakarta)';
+  if (period === 'Live2h') {
+    bucketCount = 24;
+    stepMs = 5 * 60 * 1000; // 24 x 5m = 2 hours
+    intervalLabel = 'Live Graph, 2 hours (Interval 5 Menit • WIB Asia/Jakarta)';
+  } else if (period === 'Daily') {
+    bucketCount = 288;
+    stepMs = 5 * 60 * 1000; // 288 x 5m = 24 hours
+    intervalLabel = 'Live Graph, 24 hours (Interval 5 Menit • WIB Asia/Jakarta)';
   } else if (period === 'Weekly') {
-    bucketCount = 28;
-    stepMs = 6 * 3600 * 1000; // 28 x 6h = 7 days
-    intervalLabel = '7 Hari Terakhir / Mingguan — Interval 6 Jam (WIB • Asia/Jakarta)';
+    bucketCount = 56;
+    stepMs = 3 * 3600 * 1000; // 7 days @ 3h
+    intervalLabel = 'Weekly Graph, 7 days (Interval 3 Jam • WIB Asia/Jakarta)';
   } else if (period === 'Monthly') {
     bucketCount = 30;
-    stepMs = 24 * 3600 * 1000; // 30 x 1d = 30 days
-    intervalLabel = '30 Hari Terakhir / Bulanan — Interval Harian (WIB • Asia/Jakarta)';
+    stepMs = 24 * 3600 * 1000; // 30 days @ 1d
+    intervalLabel = 'Monthly Graph, 30 days (Interval Harian • WIB Asia/Jakarta)';
   } else if (period === 'Yearly') {
     bucketCount = 12;
-    stepMs = 30 * 24 * 3600 * 1000; // 12 x 30d = 12 months
-    intervalLabel = '12 Bulan Terakhir / Tahunan — Interval Bulanan (WIB • Asia/Jakarta)';
+    stepMs = 30 * 24 * 3600 * 1000; // 12 months
+    intervalLabel = 'Yearly Graph, 12 months (Interval Bulanan • WIB Asia/Jakarta)';
   }
 
-  // Align 5-minute buckets to exact 5-minute clock boundaries (:00, :05, :10, :15...)
   const alignedEndMs =
-    period === 'Daily'
+    period === 'Live2h' || period === 'Daily'
       ? Math.ceil(nowMs / (5 * 60 * 1000)) * (5 * 60 * 1000)
       : nowMs;
   const startMs = alignedEndMs - bucketCount * stepMs;
@@ -4159,23 +4416,21 @@ function buildOnuTelemetryForPeriod(
     )
     .all(onu.id, startMs) as TelemetrySampleRow[];
 
-  // Latest real sample from DB if any
   const latestSample = rows.length > 0 ? rows[rows.length - 1] : null;
+  const hasRecentSample =
+    latestSample !== null && nowMs - latestSample.recorded_at <= 15 * 60 * 1000;
+
   const effectiveLiveDown =
     liveDownMbps !== undefined && liveDownMbps !== null
-      ? liveDownMbps
-      : latestSample
-      ? latestSample.download_mbps
-      : isOnline
-      ? Number((3.4 + computeDeterministicWave(onu.id, Math.floor(nowMs / 10000)) * 8.5).toFixed(2))
+      ? Number(liveDownMbps.toFixed(2))
+      : hasRecentSample && latestSample
+      ? Number(Number(latestSample.download_mbps || 0).toFixed(2))
       : 0;
   const effectiveLiveUp =
     liveUpMbps !== undefined && liveUpMbps !== null
-      ? liveUpMbps
-      : latestSample
-      ? latestSample.upload_mbps
-      : isOnline
-      ? Number((effectiveLiveDown * 0.32).toFixed(2))
+      ? Number(liveUpMbps.toFixed(2))
+      : hasRecentSample && latestSample
+      ? Number(Number(latestSample.upload_mbps || 0).toFixed(2))
       : 0;
 
   const points: TelemetryBucketPoint[] = [];
@@ -4190,27 +4445,11 @@ function buildOnuTelemetryForPeriod(
         (isLast ? r.recorded_at <= nowMs + 60000 : r.recorded_at < bEnd)
     );
 
-    const jktDate = toJakartaDate(bEnd);
-    const hourOfDay = jktDate.getUTCHours();
-    // Natural diurnal ISP traffic curve in WIB (peak 19:00-23:00 WIB, low 02:00-06:00 WIB)
-    const diurnalFactor =
-      hourOfDay >= 19 && hourOfDay <= 23
-        ? 1.45
-        : hourOfDay >= 12 && hourOfDay <= 18
-        ? 1.1
-        : hourOfDay >= 2 && hourOfDay <= 6
-        ? 0.35
-        : 0.78;
-    const wave = computeDeterministicWave(
-      onu.id + period.charCodeAt(0) * 17,
-      Math.floor(bEnd / stepMs)
-    );
-
     let downMbps = 0;
     let upMbps = 0;
-    let onuRxDbm: number | null = baseOnuRx;
-    let oltRxDbm: number | null = baseOltRx;
-    let onuTxDbm: number | null = baseOnuTx;
+    let onuRxDbm: number | null = null;
+    let oltRxDbm: number | null = null;
+    let onuTxDbm: number | null = null;
     let phaseState: TelemetryBucketPoint['phaseState'] = onu.phase_state;
 
     if (bucketRows.length > 0) {
@@ -4228,10 +4467,16 @@ function buildOnuTelemetryForPeriod(
       );
 
       downMbps = Number(
-        (isLast ? effectiveLiveDown : Math.max(avgDown, maxDown * 0.85)).toFixed(2)
+        (isLast && liveDownMbps !== undefined && liveDownMbps !== null
+          ? effectiveLiveDown
+          : Math.max(avgDown, maxDown * 0.9)
+        ).toFixed(2)
       );
       upMbps = Number(
-        (isLast ? effectiveLiveUp : Math.max(avgUp, maxUp * 0.85)).toFixed(2)
+        (isLast && liveUpMbps !== undefined && liveUpMbps !== null
+          ? effectiveLiveUp
+          : Math.max(avgUp, maxUp * 0.9)
+        ).toFixed(2)
       );
 
       const validOnuRx = bucketRows
@@ -4241,6 +4486,11 @@ function buildOnuTelemetryForPeriod(
         );
       const validOltRx = bucketRows
         .map((r) => r.olt_rx_dbm)
+        .filter(
+          (v): v is number => v !== null && v !== undefined && !isNaN(Number(v))
+        );
+      const validOnuTx = bucketRows
+        .map((r) => r.onu_tx_dbm)
         .filter(
           (v): v is number => v !== null && v !== undefined && !isNaN(Number(v))
         );
@@ -4259,62 +4509,51 @@ function buildOnuTelemetryForPeriod(
           ).toFixed(2)
         );
       }
+      if (validOnuTx.length > 0) {
+        onuTxDbm = Number(
+          (
+            validOnuTx.reduce((a, b) => a + Number(b), 0) / validOnuTx.length
+          ).toFixed(2)
+        );
+      }
 
       const lastRow = bucketRows[bucketRows.length - 1];
       phaseState =
         (lastRow.phase_state as TelemetryBucketPoint['phaseState']) ||
         onu.phase_state;
     } else if (isLast) {
-      downMbps = isOnline ? Number(effectiveLiveDown.toFixed(2)) : 0;
-      upMbps = isOnline ? Number(effectiveLiveUp.toFixed(2)) : 0;
+      downMbps = isOnline ? effectiveLiveDown : 0;
+      upMbps = isOnline ? effectiveLiveUp : 0;
       onuRxDbm = isOnline ? baseOnuRx : null;
       oltRxDbm = isOnline ? baseOltRx : null;
+      onuTxDbm = isOnline ? baseOnuTx : null;
       phaseState = onu.phase_state;
     } else {
-      const anchorMbps = Math.max(
-        2.5,
-        effectiveLiveDown > 0.2 ? effectiveLiveDown : 8.4
-      );
-      downMbps = isOnline
-        ? Number(
-            Math.max(
-              0.35,
-              anchorMbps * diurnalFactor * (0.65 + wave * 0.7)
-            ).toFixed(2)
-          )
-        : 0;
-      upMbps = isOnline
-        ? Number(Math.max(0.12, downMbps * (0.26 + wave * 0.14)).toFixed(2))
-        : 0;
-      const thermalDrift = Number(((wave - 0.5) * 0.12).toFixed(2));
-      onuRxDbm =
-        baseOnuRx !== null
-          ? Number((baseOnuRx + thermalDrift).toFixed(2))
-          : -21.85;
-      oltRxDbm =
-        baseOltRx !== null
-          ? Number((baseOltRx + thermalDrift).toFixed(2))
-          : -25.4;
-      phaseState = 'working';
+      // 100% REAL TELEMETRY: No synthetic/dummy wave data for historical buckets without OLT samples
+      downMbps = 0;
+      upMbps = 0;
+      onuRxDbm = null;
+      oltRxDbm = null;
+      onuTxDbm = null;
+      phaseState = onu.phase_state;
     }
+
+    const totalMbps = Number((downMbps + upMbps).toFixed(2));
 
     let label = '';
     let shortLabel = '';
-    if (period === 'Daily') {
-      label = isLast
-        ? `Now (${formatHourMin(nowMs)} WIB)`
-        : `${formatHourMin(bStart)} - ${formatHourMin(bEnd)} WIB`;
-      shortLabel = isLast
-        ? 'Now'
-        : i % 6 === 0
-        ? formatHourMin(bEnd)
-        : '';
+    if (period === 'Live2h') {
+      label = `${formatHourMin(bEnd)} WIB`;
+      shortLabel = formatHourMin(bEnd);
+    } else if (period === 'Daily') {
+      label = `${formatHourMin(bStart)} - ${formatHourMin(bEnd)} WIB`;
+      shortLabel = i % 12 === 0 || isLast ? formatHourMin(bEnd) : '';
     } else if (period === 'Weekly') {
       label = `${formatDayMonth(bEnd)} ${formatHourMin(bEnd)} WIB`;
-      shortLabel = i % 4 === 0 || isLast ? formatDayMonth(bEnd) : '';
+      shortLabel = i % 4 === 0 || isLast ? `${formatDayMonth(bEnd)} ${formatHourMin(bEnd)}` : '';
     } else if (period === 'Monthly') {
       label = `${formatDayMonth(bEnd)} WIB`;
-      shortLabel = i % 5 === 0 || isLast ? formatDayMonth(bEnd) : '';
+      shortLabel = i % 2 === 0 || isLast ? formatDayMonth(bEnd) : '';
     } else {
       label = formatMonthYear(bEnd);
       shortLabel = formatMonthYear(bEnd);
@@ -4324,6 +4563,7 @@ function buildOnuTelemetryForPeriod(
       timestampMs: bEnd,
       label,
       shortLabel,
+      totalMbps,
       downloadMbps: downMbps,
       uploadMbps: upMbps,
       onuRxDbm,
@@ -4335,15 +4575,29 @@ function buildOnuTelemetryForPeriod(
     });
   }
 
-  const downVals = points.map((p) => p.downloadMbps);
-  const upVals = points.map((p) => p.uploadMbps);
+  const sampledPts = points.filter((p) => p.sampleCount > 0 || p.totalMbps > 0);
+  const statsPts = sampledPts.length > 0 ? sampledPts : points;
+
+  const totalVals = statsPts.map((p) => p.totalMbps);
+  const downVals = statsPts.map((p) => p.downloadMbps);
+  const upVals = statsPts.map((p) => p.uploadMbps);
+
+  const curTotalMbps = points[points.length - 1]?.totalMbps ?? 0;
+  const maxTotalMbps = Number(Math.max(0, ...totalVals).toFixed(2));
+  const minTotalMbps = Number(Math.min(...(totalVals.length ? totalVals : [0])).toFixed(2));
+  const avgTotalMbps = Number(
+    (totalVals.reduce((a, b) => a + b, 0) / Math.max(1, totalVals.length)).toFixed(2)
+  );
+
   const maxDownloadMbps = Number(Math.max(0, ...downVals).toFixed(2));
+  const minDownloadMbps = Number(Math.min(...(downVals.length ? downVals : [0])).toFixed(2));
   const avgDownloadMbps = Number(
     (downVals.reduce((a, b) => a + b, 0) / Math.max(1, downVals.length)).toFixed(2)
   );
   const curDownloadMbps = points[points.length - 1]?.downloadMbps ?? 0;
 
   const maxUploadMbps = Number(Math.max(0, ...upVals).toFixed(2));
+  const minUploadMbps = Number(Math.min(...(upVals.length ? upVals : [0])).toFixed(2));
   const avgUploadMbps = Number(
     (upVals.reduce((a, b) => a + b, 0) / Math.max(1, upVals.length)).toFixed(2)
   );
@@ -4356,35 +4610,41 @@ function buildOnuTelemetryForPeriod(
     .map((p) => p.oltRxDbm)
     .filter((v): v is number => v !== null && !isNaN(v));
 
-  const curOnuRxDbm = points[points.length - 1]?.onuRxDbm ?? baseOnuRx;
+  const curOnuRxDbm =
+    points[points.length - 1]?.onuRxDbm ?? (isOnline ? baseOnuRx : null);
   const minOnuRxDbm =
-    validOnuRxPts.length > 0 ? Number(Math.min(...validOnuRxPts).toFixed(2)) : null;
+    validOnuRxPts.length > 0 ? Number(Math.min(...validOnuRxPts).toFixed(2)) : curOnuRxDbm;
   const maxOnuRxDbm =
-    validOnuRxPts.length > 0 ? Number(Math.max(...validOnuRxPts).toFixed(2)) : null;
+    validOnuRxPts.length > 0 ? Number(Math.max(...validOnuRxPts).toFixed(2)) : curOnuRxDbm;
   const avgOnuRxDbm =
     validOnuRxPts.length > 0
       ? Number(
           (validOnuRxPts.reduce((a, b) => a + b, 0) / validOnuRxPts.length).toFixed(2)
         )
-      : null;
+      : curOnuRxDbm;
 
-  const curOltRxDbm = points[points.length - 1]?.oltRxDbm ?? baseOltRx;
+  const curOltRxDbm =
+    points[points.length - 1]?.oltRxDbm ?? (isOnline ? baseOltRx : null);
   const minOltRxDbm =
-    validOltRxPts.length > 0 ? Number(Math.min(...validOltRxPts).toFixed(2)) : null;
+    validOltRxPts.length > 0 ? Number(Math.min(...validOltRxPts).toFixed(2)) : curOltRxDbm;
   const maxOltRxDbm =
-    validOltRxPts.length > 0 ? Number(Math.max(...validOltRxPts).toFixed(2)) : null;
+    validOltRxPts.length > 0 ? Number(Math.max(...validOltRxPts).toFixed(2)) : curOltRxDbm;
   const avgOltRxDbm =
     validOltRxPts.length > 0
       ? Number(
           (validOltRxPts.reduce((a, b) => a + b, 0) / validOltRxPts.length).toFixed(2)
         )
-      : null;
+      : curOltRxDbm;
 
-  const losEventsCount = points.filter((p) => p.phaseState === 'LOS').length;
-  const powerFailEventsCount = points.filter((p) => p.phaseState === 'DyingGasp').length;
+  const losEventsCount = points.filter((p) => p.phaseState === 'LOS' && p.sampleCount > 0).length;
+  const powerFailEventsCount = points.filter(
+    (p) => p.phaseState === 'DyingGasp' && p.sampleCount > 0
+  ).length;
 
   const periodWindowText =
-    period === 'Daily'
+    period === 'Live2h'
+      ? 'last 2 hours'
+      : period === 'Daily'
       ? 'last 24 hours'
       : period === 'Weekly'
       ? 'last 7 days'
@@ -4392,25 +4652,29 @@ function buildOnuTelemetryForPeriod(
       ? 'last 30 days'
       : 'last 12 months';
 
-  let statusSummaryText = `Status: Working (No LOS in ${periodWindowText})`;
+  let statusSummaryText = `Status: Working (Real OLT Telemetry • ${periodWindowText})`;
   if (onu.phase_state === 'LOS') {
-    statusSummaryText = `Status: LOS — Loss of Signal (${losEventsCount} slot in ${periodWindowText})`;
+    statusSummaryText = `Status: LOS — Loss of Signal (${periodWindowText})`;
   } else if (onu.phase_state === 'DyingGasp') {
-    statusSummaryText = `Status: Power Fail / DyingGasp (${powerFailEventsCount} slot in ${periodWindowText})`;
+    statusSummaryText = `Status: Power Fail / DyingGasp (${periodWindowText})`;
   } else if (onu.phase_state !== 'working') {
     statusSummaryText = `Status: ${onu.phase_state} (${periodWindowText})`;
-  } else if (losEventsCount > 0 || powerFailEventsCount > 0) {
-    statusSummaryText = `Status: Working (${losEventsCount} LOS, ${powerFailEventsCount} Power Fail in ${periodWindowText})`;
   }
 
   return {
     period,
     intervalLabel,
     points,
+    curTotalMbps,
+    maxTotalMbps,
+    minTotalMbps,
+    avgTotalMbps,
     maxDownloadMbps,
+    minDownloadMbps,
     avgDownloadMbps,
     curDownloadMbps,
     maxUploadMbps,
+    minUploadMbps,
     avgUploadMbps,
     curUploadMbps,
     curOnuRxDbm,
@@ -4439,6 +4703,7 @@ function buildAllPeriodsTelemetry(
     onuInterface: `gpon-onu_1/${onu.board}/${onu.port}:${onu.onu_index || 1}`,
     polledAt: `${formatJakartaDateTimeFull(nowMs)} WIB`,
     periods: {
+      Live2h: buildOnuTelemetryForPeriod(onu, 'Live2h', nowMs, liveDownMbps, liveUpMbps),
       Daily: buildOnuTelemetryForPeriod(onu, 'Daily', nowMs, liveDownMbps, liveUpMbps),
       Weekly: buildOnuTelemetryForPeriod(onu, 'Weekly', nowMs, liveDownMbps, liveUpMbps),
       Monthly: buildOnuTelemetryForPeriod(onu, 'Monthly', nowMs, liveDownMbps, liveUpMbps),
@@ -4811,6 +5076,27 @@ function recordOltInterfaceSample(sample: OltInterfaceTelemetryRow): void {
         sample.in_bytes,
         sample.out_bytes
       );
+
+    if (pgPool && pgConnected) {
+      void pgPool
+        .query(
+          `INSERT INTO olt_interface_telemetry_samples (
+            olt_id, interface_name, interface_type, recorded_at,
+            download_mbps, upload_mbps, in_bytes, out_bytes
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [
+            sample.olt_id,
+            sample.interface_name.toLowerCase(),
+            sample.interface_type,
+            sample.recorded_at,
+            sample.download_mbps,
+            sample.upload_mbps,
+            sample.in_bytes,
+            sample.out_bytes,
+          ]
+        )
+        .catch(() => {});
+    }
   } catch (err) {
     console.warn('[OLT Interface Telemetry Warning]:', (err as Error).message);
   }
@@ -4822,7 +5108,7 @@ function buildOltInterfacePeriodSeries(params: {
   interfaceType: 'UPLINK' | 'PON';
   activeOnuCount: number;
   operStatus: string;
-  period: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
+  period: 'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
   nowMs: number;
   liveDownMbps?: number | null;
   liveUpMbps?: number | null;
@@ -4831,45 +5117,41 @@ function buildOltInterfacePeriodSeries(params: {
     oltId,
     interfaceName,
     interfaceType,
-    activeOnuCount,
-    operStatus,
     period,
     nowMs,
     liveDownMbps,
     liveUpMbps,
   } = params;
-  const isUp =
-    operStatus.toLowerCase() === 'up' ||
-    operStatus.toLowerCase() === 'online' ||
-    activeOnuCount > 0 ||
-    interfaceType === 'UPLINK';
 
-  let bucketCount = 48;
-  let stepMs = 5 * 60 * 1000; // 5-minute bar interval!
-  let intervalLabel =
-    '24 Jam (Real-Time OLT — Interval Batang 5 Menit • WIB Asia/Jakarta)';
+  let bucketCount = 24;
+  let stepMs = 5 * 60 * 1000;
+  let intervalLabel = 'Live Graph, 2 hours (Interval 5 Menit • WIB Asia/Jakarta)';
 
-  if (period === 'Daily') {
-    bucketCount = 48;
-    stepMs = 5 * 60 * 1000; // 5 menit per batang
+  if (period === 'Live2h') {
+    bucketCount = 24;
+    stepMs = 5 * 60 * 1000; // 24 x 5m = 2 hours
+    intervalLabel = 'Live Graph, 2 hours (Interval 5 Menit • WIB Asia/Jakarta)';
+  } else if (period === 'Daily') {
+    bucketCount = 288;
+    stepMs = 5 * 60 * 1000; // 288 x 5m = 24 hours (5-minute intervals)
     intervalLabel =
-      '24 Jam / Harian (Interval Batang 5 Menit • WIB Asia/Jakarta)';
+      'Live Graph, 24 hours (Interval 5 Menit • WIB Asia/Jakarta)';
   } else if (period === 'Weekly') {
-    bucketCount = 28;
-    stepMs = 6 * 3600 * 1000; // 7 hari (per 6 jam)
-    intervalLabel = 'Mingguan / 7 Hari Terakhir (Interval 6 Jam • WIB Asia/Jakarta)';
+    bucketCount = 56;
+    stepMs = 3 * 3600 * 1000; // 7 hari @ 3 jam
+    intervalLabel = 'Weekly Graph, 7 days (Interval 3 Jam • WIB Asia/Jakarta)';
   } else if (period === 'Monthly') {
     bucketCount = 30;
-    stepMs = 24 * 3600 * 1000; // 30 hari (per 1 hari)
-    intervalLabel = 'Bulanan / 30 Hari Terakhir (Interval Harian • WIB Asia/Jakarta)';
+    stepMs = 24 * 3600 * 1000; // 30 hari @ 1 hari
+    intervalLabel = 'Monthly Graph, 30 days (Interval Harian • WIB Asia/Jakarta)';
   } else {
     bucketCount = 12;
     stepMs = 30 * 24 * 3600 * 1000; // 12 bulan
-    intervalLabel = 'Tahunan / 12 Bulan Terakhir (Interval Bulanan • WIB Asia/Jakarta)';
+    intervalLabel = 'Yearly Graph, 12 months (Interval Bulanan • WIB Asia/Jakarta)';
   }
 
   const alignedEndMs =
-    period === 'Daily'
+    period === 'Live2h' || period === 'Daily'
       ? Math.ceil(nowMs / (5 * 60 * 1000)) * (5 * 60 * 1000)
       : nowMs;
   const startMs = alignedEndMs - bucketCount * stepMs;
@@ -4882,51 +5164,47 @@ function buildOltInterfacePeriodSeries(params: {
     )
     .all(oltId, interfaceName.toLowerCase(), startMs) as OltInterfaceTelemetryRow[];
 
-  const latestRow = rows.length > 0 ? rows[rows.length - 1] : null;
-  const seedNum =
-    interfaceName
-      .split('')
-      .reduce((acc, ch, idx) => acc + ch.charCodeAt(0) * (idx + 3), 0) +
-    oltId * 31;
+  // If this is a PON port (`gpon-olt_1/B/P`), also load any real ONU telemetry samples on that port
+  // in case the OLT firmware reports traffic at the `gpon-onu_1/B/P:I` level
+  let onuPortRows: TelemetrySampleRow[] = [];
+  const ponMatch =
+    interfaceType === 'PON'
+      ? interfaceName.match(/gpon-olt_(\d+\/\d+\/\d+)/i)
+      : null;
+  if (ponMatch) {
+    const prefix = `gpon-onu_${ponMatch[1].toLowerCase()}:%`;
+    onuPortRows = sqliteDb
+      .prepare(
+        `SELECT * FROM onu_telemetry_samples
+         WHERE olt_id = ? AND lower(onu_interface) LIKE ? AND recorded_at >= ?
+         ORDER BY recorded_at ASC`
+      )
+      .all(oltId, prefix, startMs) as TelemetrySampleRow[];
+  }
 
-  // Baseline traffic scale: Uplink aggregates all PON ports; PON port scales with active ONUs
-  const defaultAnchorMbps =
-    interfaceType === 'UPLINK'
-      ? Math.max(45, activeOnuCount * 16.5)
-      : activeOnuCount > 0
-      ? Math.max(12, activeOnuCount * 14.2)
-      : isUp
-      ? 6.5
-      : 0;
+  const latestRow = rows.length > 0 ? rows[rows.length - 1] : null;
+  const hasRecentRow =
+    latestRow !== null && nowMs - latestRow.recorded_at <= 15 * 60 * 1000;
 
   const effectiveLiveDown =
     liveDownMbps !== undefined && liveDownMbps !== null
-      ? liveDownMbps
-      : latestRow
-      ? latestRow.download_mbps
-      : isUp
-      ? Number(
-          (
-            defaultAnchorMbps *
-            (0.75 +
-              computeDeterministicWave(seedNum, Math.floor(nowMs / 30000)) * 0.5)
-          ).toFixed(2)
-        )
+      ? Number(liveDownMbps.toFixed(2))
+      : hasRecentRow && latestRow
+      ? Number(Number(latestRow.download_mbps || 0).toFixed(2))
       : 0;
 
   const effectiveLiveUp =
     liveUpMbps !== undefined && liveUpMbps !== null
-      ? liveUpMbps
-      : latestRow
-      ? latestRow.upload_mbps
-      : isUp
-      ? Number((effectiveLiveDown * 0.34).toFixed(2))
+      ? Number(liveUpMbps.toFixed(2))
+      : hasRecentRow && latestRow
+      ? Number(Number(latestRow.upload_mbps || 0).toFixed(2))
       : 0;
 
   const points: Array<{
     timestampMs: number;
     label: string;
     shortLabel: string;
+    totalMbps: number;
     downloadMbps: number;
     uploadMbps: number;
     sampleCount: number;
@@ -4942,24 +5220,15 @@ function buildOltInterfacePeriodSeries(params: {
         r.recorded_at >= bStart &&
         (isLast ? r.recorded_at <= nowMs + 60000 : r.recorded_at < bEnd)
     );
-
-    const jktDate = toJakartaDate(bEnd);
-    const hourOfDay = jktDate.getUTCHours();
-    const diurnalFactor =
-      hourOfDay >= 19 && hourOfDay <= 23
-        ? 1.48
-        : hourOfDay >= 12 && hourOfDay <= 18
-        ? 1.12
-        : hourOfDay >= 2 && hourOfDay <= 6
-        ? 0.38
-        : 0.82;
-    const wave = computeDeterministicWave(
-      seedNum + period.charCodeAt(0) * 19,
-      Math.floor(bEnd / stepMs)
+    const bucketOnuRows = onuPortRows.filter(
+      (r) =>
+        r.recorded_at >= bStart &&
+        (isLast ? r.recorded_at <= nowMs + 60000 : r.recorded_at < bEnd)
     );
 
     let downMbps = 0;
     let upMbps = 0;
+    let sampleCount = bucketRows.length;
 
     if (bucketRows.length > 0) {
       const avgDown =
@@ -4975,47 +5244,59 @@ function buildOltInterfacePeriodSeries(params: {
         ...bucketRows.map((r) => Number(r.upload_mbps || 0))
       );
       downMbps = Number(
-        (isLast ? effectiveLiveDown : Math.max(avgDown, maxDown * 0.85)).toFixed(2)
+        (isLast && liveDownMbps !== undefined && liveDownMbps !== null
+          ? effectiveLiveDown
+          : Math.max(avgDown, maxDown * 0.9)
+        ).toFixed(2)
       );
       upMbps = Number(
-        (isLast ? effectiveLiveUp : Math.max(avgUp, maxUp * 0.85)).toFixed(2)
+        (isLast && liveUpMbps !== undefined && liveUpMbps !== null
+          ? effectiveLiveUp
+          : Math.max(avgUp, maxUp * 0.9)
+        ).toFixed(2)
       );
-    } else if (isLast) {
-      downMbps = isUp ? Number(effectiveLiveDown.toFixed(2)) : 0;
-      upMbps = isUp ? Number(effectiveLiveUp.toFixed(2)) : 0;
-    } else {
-      const baseScale =
-        effectiveLiveDown > 0.5 ? effectiveLiveDown : defaultAnchorMbps;
-      downMbps = isUp
-        ? Number(
-            Math.max(
-              0.2,
-              baseScale * diurnalFactor * (0.62 + wave * 0.72)
-            ).toFixed(2)
-          )
-        : 0;
-      upMbps = isUp
-        ? Number(Math.max(0.08, downMbps * (0.28 + wave * 0.14)).toFixed(2))
-        : 0;
     }
+
+    // If PON port counter was 0 in this bucket, check if child ONUs on this PON port recorded real traffic
+    if (downMbps === 0 && upMbps === 0 && bucketOnuRows.length > 0) {
+      const latestByOnu = new Map<number, { d: number; u: number }>();
+      for (const r of bucketOnuRows) {
+        const prev = latestByOnu.get(r.onu_id);
+        latestByOnu.set(r.onu_id, {
+          d: Math.max(prev?.d || 0, Number(r.download_mbps || 0)),
+          u: Math.max(prev?.u || 0, Number(r.upload_mbps || 0)),
+        });
+      }
+      let sumD = 0;
+      let sumU = 0;
+      for (const v of latestByOnu.values()) {
+        sumD += v.d;
+        sumU += v.u;
+      }
+      downMbps = Number(sumD.toFixed(2));
+      upMbps = Number(sumU.toFixed(2));
+      sampleCount += bucketOnuRows.length;
+    } else if (bucketRows.length === 0 && isLast) {
+      downMbps = effectiveLiveDown;
+      upMbps = effectiveLiveUp;
+    }
+
+    const totalMbps = Number((downMbps + upMbps).toFixed(2));
 
     let label = '';
     let shortLabel = '';
-    if (period === 'Daily') {
-      label = isLast
-        ? `Now (${formatHourMin(nowMs)} WIB)`
-        : `${formatHourMin(bStart)} - ${formatHourMin(bEnd)} WIB`;
-      shortLabel = isLast
-        ? 'Now'
-        : i % 6 === 0
-        ? formatHourMin(bEnd)
-        : '';
+    if (period === 'Live2h') {
+      label = `${formatHourMin(bEnd)} WIB`;
+      shortLabel = formatHourMin(bEnd);
+    } else if (period === 'Daily') {
+      label = `${formatHourMin(bStart)} - ${formatHourMin(bEnd)} WIB`;
+      shortLabel = i % 12 === 0 || isLast ? formatHourMin(bEnd) : '';
     } else if (period === 'Weekly') {
       label = `${formatDayMonth(bEnd)} ${formatHourMin(bEnd)} WIB`;
-      shortLabel = i % 4 === 0 || isLast ? formatDayMonth(bEnd) : '';
+      shortLabel = i % 4 === 0 || isLast ? `${formatDayMonth(bEnd)} ${formatHourMin(bEnd)}` : '';
     } else if (period === 'Monthly') {
       label = `${formatDayMonth(bEnd)} WIB`;
-      shortLabel = i % 5 === 0 || isLast ? formatDayMonth(bEnd) : '';
+      shortLabel = i % 2 === 0 || isLast ? formatDayMonth(bEnd) : '';
     } else {
       label = formatMonthYear(bEnd);
       shortLabel = formatMonthYear(bEnd);
@@ -5025,27 +5306,40 @@ function buildOltInterfacePeriodSeries(params: {
       timestampMs: bEnd,
       label,
       shortLabel,
+      totalMbps,
       downloadMbps: downMbps,
       uploadMbps: upMbps,
-      sampleCount: bucketRows.length,
+      sampleCount,
       isLive: isLast,
     });
   }
 
-  const downVals = points.map((p) => p.downloadMbps);
-  const upVals = points.map((p) => p.uploadMbps);
+  const sampledPts = points.filter((p) => p.sampleCount > 0 || p.totalMbps > 0);
+  const statsPts = sampledPts.length > 0 ? sampledPts : points;
+
+  const totalVals = statsPts.map((p) => p.totalMbps);
+  const downVals = statsPts.map((p) => p.downloadMbps);
+  const upVals = statsPts.map((p) => p.uploadMbps);
 
   return {
     period,
     intervalLabel,
     points,
+    curTotalMbps: points[points.length - 1]?.totalMbps ?? 0,
+    maxTotalMbps: Number(Math.max(0, ...totalVals).toFixed(2)),
+    minTotalMbps: Number(Math.min(...(totalVals.length ? totalVals : [0])).toFixed(2)),
+    avgTotalMbps: Number(
+      (totalVals.reduce((a, b) => a + b, 0) / Math.max(1, totalVals.length)).toFixed(2)
+    ),
     curDownloadMbps: points[points.length - 1]?.downloadMbps ?? 0,
     maxDownloadMbps: Number(Math.max(0, ...downVals).toFixed(2)),
+    minDownloadMbps: Number(Math.min(...(downVals.length ? downVals : [0])).toFixed(2)),
     avgDownloadMbps: Number(
       (downVals.reduce((a, b) => a + b, 0) / Math.max(1, downVals.length)).toFixed(2)
     ),
     curUploadMbps: points[points.length - 1]?.uploadMbps ?? 0,
     maxUploadMbps: Number(Math.max(0, ...upVals).toFixed(2)),
+    minUploadMbps: Number(Math.min(...(upVals.length ? upVals : [0])).toFixed(2)),
     avgUploadMbps: Number(
       (upVals.reduce((a, b) => a + b, 0) / Math.max(1, upVals.length)).toFixed(2)
     ),
@@ -5127,12 +5421,23 @@ function buildFullOltGraphsPayload(
       id: u.id || idx + 1,
       interfaceName: ifName,
       interfaceType: 'UPLINK' as const,
-      title: `Uplink ${ifName} (${u.description || u.tagged_vlans || 'Core Router'})`,
+      title: `${ifName} - ${u.description || u.tagged_vlans || 'Core Router Uplink'}`,
       subtitle: `${u.status || 'Up'} • ${u.tagged_vlans || 'Trunk'} • ${totalOnlineOnus} Active ONUs`,
       status: u.status || 'Up',
       activeOnus: totalOnlineOnus,
       totalOnus: oltConfiguredOnus.length,
       periods: {
+        Live2h: buildOltInterfacePeriodSeries({
+          oltId: effectiveOltId,
+          interfaceName: ifName,
+          interfaceType: 'UPLINK',
+          activeOnuCount: totalOnlineOnus,
+          operStatus: u.status || 'Up',
+          period: 'Live2h',
+          nowMs,
+          liveDownMbps: live?.downMbps,
+          liveUpMbps: live?.upMbps,
+        }),
         Daily: buildOltInterfacePeriodSeries({
           oltId: effectiveOltId,
           interfaceName: ifName,
@@ -5212,12 +5517,23 @@ function buildFullOltGraphsPayload(
       portNumber: portNum,
       interfaceName: ifName,
       interfaceType: 'PON' as const,
-      title: `PON Port ${ifName} (${p.description || `Slot ${p.slot || 3} Port ${portNum}`})`,
+      title: `${ifName} - ${p.description || `Slot ${p.slot || 3} Port ${portNum}`}`,
       subtitle: `${onlineCount}/${totalCount} ONUs Online • ${p.board_model || 'GTGH'} • Tx ${txDbm.toFixed(2)} dBm`,
       status: effectiveStatus,
       activeOnus: onlineCount,
       totalOnus: totalCount,
       periods: {
+        Live2h: buildOltInterfacePeriodSeries({
+          oltId: effectiveOltId,
+          interfaceName: ifName,
+          interfaceType: 'PON',
+          activeOnuCount: onlineCount,
+          operStatus: effectiveStatus,
+          period: 'Live2h',
+          nowMs,
+          liveDownMbps: live?.downMbps,
+          liveUpMbps: live?.upMbps,
+        }),
         Daily: buildOltInterfacePeriodSeries({
           oltId: effectiveOltId,
           interfaceName: ifName,

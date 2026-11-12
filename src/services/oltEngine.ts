@@ -628,7 +628,7 @@ export function parseZteInterfaceTraffic(
   rawOutput: string,
   isUplinkDirection = false
 ): InterfaceTrafficParsed {
-  const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const cleaned = cleanZteCliText(rawOutput);
   const ifSectionIdx = cleaned.search(/show\s+interface\s+/i);
   const section = ifSectionIdx >= 0 ? cleaned.slice(ifSectionIdx) : cleaned;
 
@@ -636,19 +636,19 @@ export function parseZteInterfaceTraffic(
     const val = parseFloat(valStr);
     if (isNaN(val) || val < 0) return 0;
     const u = unitRaw.trim();
-    if (/^Gbps$/i.test(u)) {
+    if (/^Gbps$/i.test(u) || /^Gbit\/s$/i.test(u)) {
       return Number((val * 1000).toFixed(3));
     }
     if (/^MBps$/i.test(u) && u.includes('B')) {
       return Number((val * 8).toFixed(3));
     }
-    if (/^Mbps$/i.test(u)) {
+    if (/^Mbps$/i.test(u) || /^Mbit\/s$/i.test(u)) {
       return Number(val.toFixed(3));
     }
     if (/^KBps$/i.test(u) && u.includes('B')) {
       return Number(((val * 8) / 1000).toFixed(3));
     }
-    if (/^Kbps$/i.test(u)) {
+    if (/^Kbps$/i.test(u) || /^Kbit\/s$/i.test(u)) {
       return Number((val / 1000).toFixed(3));
     }
     // ZTE C300/C320 uses `Bps` (capital B = Bytes per second) vs `bps` / `bits/sec`
@@ -659,12 +659,22 @@ export function parseZteInterfaceTraffic(
     return Number((val / 1_000_000).toFixed(3));
   };
 
-  const inRateMatch = section.match(
-    /input\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Mbps|MBps|Gbps)/i
-  );
-  const outRateMatch = section.match(
-    /output\s+rate\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Mbps|MBps|Gbps)/i
-  );
+  // Match ZTE "120 seconds input rate : 45812940 Bps" or "5 minutes input rate 48291000 bits/sec"
+  // Exclude "Input peak rate :" by requiring either "seconds/minutes" before "input rate" or start-of-line "input rate"
+  const inRateMatch =
+    section.match(
+      /(?:seconds|minutes|sec|min)\s+input\s+rate\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Kbit\/s|Mbps|MBps|Mbit\/s|Gbps|Gbit\/s)/i
+    ) ||
+    section.match(
+      /(?:^|[\r\n])\s*input\s+rate\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Kbit\/s|Mbps|MBps|Mbit\/s|Gbps|Gbit\/s)/i
+    );
+  const outRateMatch =
+    section.match(
+      /(?:seconds|minutes|sec|min)\s+output\s+rate\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Kbit\/s|Mbps|MBps|Mbit\/s|Gbps|Gbit\/s)/i
+    ) ||
+    section.match(
+      /(?:^|[\r\n])\s*output\s+rate\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*(Bps|bps|bits\/sec|bytes\/sec|Kbps|KBps|Kbit\/s|Mbps|MBps|Mbit\/s|Gbps|Gbit\/s)/i
+    );
 
   // Extract cumulative Input Bytes & Output Bytes
   const inputBlockMatch = section.match(
@@ -681,6 +691,9 @@ export function parseZteInterfaceTraffic(
     const bm = inputBlockMatch[1].match(/Bytes\s*:\s*(\d+)/i);
     if (pm) inPackets = parseInt(pm[1], 10);
     if (bm) inBytes = parseInt(bm[1], 10);
+  } else {
+    const octIn = section.match(/(?:InOctets|Input\s+Bytes|Rx\s+Bytes)\s*[:=]\s*(\d+)/i);
+    if (octIn) inBytes = parseInt(octIn[1], 10);
   }
 
   let outBytes: number | null = null;
@@ -690,6 +703,9 @@ export function parseZteInterfaceTraffic(
     const bm = outputBlockMatch[1].match(/Bytes\s*:\s*(\d+)/i);
     if (pm) outPackets = parseInt(pm[1], 10);
     if (bm) outBytes = parseInt(bm[1], 10);
+  } else {
+    const octOut = section.match(/(?:OutOctets|Output\s+Bytes|Tx\s+Bytes)\s*[:=]\s*(\d+)/i);
+    if (octOut) outBytes = parseInt(octOut[1], 10);
   }
 
   const inRateMbps = inRateMatch
@@ -721,16 +737,30 @@ export function parseZteMultiInterfaceTraffic(
   rawOutput: string
 ): Map<string, InterfaceTrafficParsed> {
   const map = new Map<string, InterfaceTrafficParsed>();
-  const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const cleaned = cleanZteCliText(rawOutput);
   const regex =
     /show\s+interface\s+([A-Za-z0-9_\-\/:.]+)([\s\S]*?)(?=show\s+interface\s+|$)/gi;
   let m: RegExpExecArray | null;
   while ((m = regex.exec(cleaned)) !== null) {
     const ifName = m[1].trim().toLowerCase();
-    const isUplink = /^(?:x?gei|smartgroup)/i.test(ifName);
+    const isUplink = /^(?:x?gei|smartgroup|eth|vlan)/i.test(ifName);
     const parsed = parseZteInterfaceTraffic(`show interface ${ifName}\n${m[2]}`, isUplink);
     map.set(ifName, parsed);
   }
+
+  // Fallback: also match blocks starting with `<ifName> is up/down` if command echo was omitted
+  const headerRegex =
+    /(?:^|[\r\n])\s*((?:x?gei|smartgroup|gpon-olt|gpon-onu)[A-Za-z0-9_\-\/:.]+)\s+is\s+(?:up|down|administratively\s+down)([\s\S]*?)(?=(?:^|[\r\n])\s*(?:x?gei|smartgroup|gpon-olt|gpon-onu)[A-Za-z0-9_\-\/:.]+\s+is\s+|show\s+interface\s+|$)/gi;
+  let hm: RegExpExecArray | null;
+  while ((hm = headerRegex.exec(cleaned)) !== null) {
+    const ifName = hm[1].trim().toLowerCase();
+    if (!map.has(ifName)) {
+      const isUplink = /^(?:x?gei|smartgroup|eth|vlan)/i.test(ifName);
+      const parsed = parseZteInterfaceTraffic(`show interface ${ifName}\n${hm[2]}`, isUplink);
+      map.set(ifName, parsed);
+    }
+  }
+
   return map;
 }
 
