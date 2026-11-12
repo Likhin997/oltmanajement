@@ -67,8 +67,13 @@ let activeDbEngine = `PostgreSQL (${currentPgConfig.host}:${currentPgConfig.port
 let pgConnected = false;
 let pgLastError: string | null = null;
 
-// Local SQLite fallback when running inside cloud preview where user's localhost:5435 is not present
-const dataDir = path.resolve(process.cwd(), 'data');
+// Local SQLite fallback when running inside cloud preview where user's localhost:5435 is not present.
+// When running inside the AI Studio workspace (/app/applet), store runtime SQLite files in /tmp
+// so binary .sqlite / .sqlite-shm / .sqlite-wal files are never committed to GitHub.
+const isAiStudioWorkspace = process.cwd() === '/app/applet';
+const dataDir = isAiStudioWorkspace
+  ? '/tmp/smartolt_data'
+  : path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
