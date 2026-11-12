@@ -2,18 +2,21 @@ import express from 'express';
 import net from 'net';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import pg from 'pg';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import {
   INITIAL_DB_STATE,
+  DEFAULT_APP_USERS,
   SmartOltDatabaseState,
   PonPortRecord,
   UplinkPortRecord,
   OltCardRecord,
   VlanRecord,
   OnuRecord,
+  AppUserRecord,
 } from './src/services/mockDatabase.js';
 import {
   parseZteRunningConfig,
@@ -111,6 +114,21 @@ sqliteDb.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_olt_if_telemetry_time
     ON olt_interface_telemetry_samples (olt_id, interface_name, recorded_at);
+
+  CREATE TABLE IF NOT EXISTS auth_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    role TEXT NOT NULL,
+    ip_address TEXT NOT NULL,
+    user_agent TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires
+    ON auth_sessions (expires_at);
 `);
 
 const POSTGRES_SCHEMA_SQL = `
@@ -601,7 +619,11 @@ async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
         `SELECT json_payload FROM smartolt_relational_store WHERE store_key = 'MAIN_STATE' LIMIT 1`
       );
       if (res.rows.length > 0 && res.rows[0].json_payload) {
-        return JSON.parse(res.rows[0].json_payload);
+        const parsed = JSON.parse(res.rows[0].json_payload) as SmartOltDatabaseState;
+        if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
+          parsed.users = DEFAULT_APP_USERS;
+        }
+        return parsed;
       }
       await saveDatabaseState(INITIAL_DB_STATE);
       return INITIAL_DB_STATE;
@@ -617,7 +639,11 @@ async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
     .get() as { json_payload: string } | undefined;
 
   if (row && row.json_payload) {
-    return JSON.parse(row.json_payload);
+    const parsed = JSON.parse(row.json_payload) as SmartOltDatabaseState;
+    if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
+      parsed.users = DEFAULT_APP_USERS;
+    }
+    return parsed;
   }
 
   await saveDatabaseState(INITIAL_DB_STATE);
@@ -1587,12 +1613,455 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
 }
 
 // ============================================================================
-// 3. REST API ENDPOINTS (/api/*)
+// 3. CRYPTOGRAPHIC SESSION & AUTHENTICATION ENGINE + API GUARD (/api/*)
 // ============================================================================
+const SESSION_COOKIE_NAME = 'smartolt_sid';
+const SESSION_TTL_MS = 8 * 3600 * 1000; // 8 hours active session TTL
+const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+const LOGIN_LOCKOUT_MS = 60 * 1000; // 60-second lockout after 5 failed attempts
+
+interface LoginAttemptRecord {
+  count: number;
+  firstFailedAt: number;
+  lockedUntil: number;
+}
+
+const loginAttemptsByIp = new Map<string, LoginAttemptRecord>();
+
+function hashSessionToken(rawToken: string): string {
+  return crypto.createHash('sha256').update(rawToken).digest('hex');
+}
+
+function timingSafePasswordEqual(inputPwd: string, storedPwd: string): boolean {
+  const hashA = crypto.createHash('sha256').update(String(inputPwd)).digest();
+  const hashB = crypto.createHash('sha256').update(String(storedPwd)).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
+function parseCookies(cookieHeader?: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx > 0) {
+      const k = part.slice(0, idx).trim();
+      const v = part.slice(idx + 1).trim();
+      out[k] = decodeURIComponent(v);
+    }
+  }
+  return out;
+}
+
+function extractSessionToken(req: express.Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
+    const bearer = authHeader.slice(7).trim();
+    if (bearer.length >= 32) return bearer;
+  }
+  const headerToken = req.headers['x-session-token'];
+  if (typeof headerToken === 'string' && headerToken.trim().length >= 32) {
+    return headerToken.trim();
+  }
+  const cookies = parseCookies(req.headers.cookie);
+  if (cookies[SESSION_COOKIE_NAME] && cookies[SESSION_COOKIE_NAME].length >= 32) {
+    return cookies[SESSION_COOKIE_NAME];
+  }
+  return null;
+}
+
+function setSessionCookie(res: express.Response, rawToken: string): void {
+  const maxAgeSec = Math.floor(SESSION_TTL_MS / 1000);
+  res.setHeader(
+    'Set-Cookie',
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAgeSec}`
+  );
+}
+
+function clearSessionCookie(res: express.Response): void {
+  res.setHeader(
+    'Set-Cookie',
+    `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`
+  );
+}
+
+interface AuthSessionRow {
+  token_hash: string;
+  user_id: number;
+  username: string;
+  role: string;
+  ip_address: string;
+  user_agent: string;
+  created_at: number;
+  last_seen_at: number;
+  expires_at: number;
+}
+
+function createServerSessionForUser(
+  user: AppUserRecord,
+  req: express.Request
+): { rawToken: string; sessionRow: AuthSessionRow } {
+  const now = Date.now();
+  // Clean expired sessions opportunistically
+  sqliteDb
+    .prepare(`DELETE FROM auth_sessions WHERE expires_at <= ?`)
+    .run(now);
+
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashSessionToken(rawToken);
+  const ip =
+    (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+    req.socket.remoteAddress ||
+    'unknown';
+  const ua = String(req.headers['user-agent'] || 'unknown').slice(0, 250);
+  const expiresAt = now + SESSION_TTL_MS;
+
+  const sessionRow: AuthSessionRow = {
+    token_hash: tokenHash,
+    user_id: user.id,
+    username: user.username,
+    role: user.role,
+    ip_address: ip,
+    user_agent: ua,
+    created_at: now,
+    last_seen_at: now,
+    expires_at: expiresAt,
+  };
+
+  sqliteDb
+    .prepare(
+      `INSERT INTO auth_sessions (
+        token_hash, user_id, username, role, ip_address, user_agent, created_at, last_seen_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      sessionRow.token_hash,
+      sessionRow.user_id,
+      sessionRow.username,
+      sessionRow.role,
+      sessionRow.ip_address,
+      sessionRow.user_agent,
+      sessionRow.created_at,
+      sessionRow.last_seen_at,
+      sessionRow.expires_at
+    );
+
+  return { rawToken, sessionRow };
+}
+
+async function resolveActiveSessionUser(req: express.Request): Promise<{
+  sessionRow: AuthSessionRow;
+  user: AppUserRecord;
+  state: SmartOltDatabaseState;
+} | null> {
+  const rawToken = extractSessionToken(req);
+  if (!rawToken) return null;
+
+  const now = Date.now();
+  const tokenHash = hashSessionToken(rawToken);
+
+  const row = sqliteDb
+    .prepare(
+      `SELECT * FROM auth_sessions WHERE token_hash = ? AND expires_at > ?`
+    )
+    .get(tokenHash, now) as AuthSessionRow | undefined;
+
+  if (!row) {
+    sqliteDb
+      .prepare(`DELETE FROM auth_sessions WHERE token_hash = ?`)
+      .run(tokenHash);
+    return null;
+  }
+
+  const state = await loadDatabaseState();
+  const users =
+    Array.isArray(state.users) && state.users.length > 0
+      ? state.users
+      : DEFAULT_APP_USERS;
+  const user = users.find((u) => u.id === row.user_id && u.is_active);
+  if (!user) {
+    sqliteDb
+      .prepare(`DELETE FROM auth_sessions WHERE token_hash = ?`)
+      .run(tokenHash);
+    return null;
+  }
+
+  const nextExpires = now + SESSION_TTL_MS;
+  sqliteDb
+    .prepare(
+      `UPDATE auth_sessions SET last_seen_at = ?, expires_at = ?, role = ?, username = ? WHERE token_hash = ?`
+    )
+    .run(now, nextExpires, user.role, user.username, tokenHash);
+
+  row.last_seen_at = now;
+  row.expires_at = nextExpires;
+  row.role = user.role;
+  row.username = user.username;
+
+  return { sessionRow: row, user, state };
+}
+
+function sanitizeUserForClient(u: AppUserRecord): Omit<AppUserRecord, 'password'> & { password: string } {
+  return {
+    ...u,
+    password: '••••••••',
+  };
+}
+
+// POST /api/auth/login — Authenticate user and issue cryptographic session token
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const ip =
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+      req.socket.remoteAddress ||
+      'unknown';
+    const now = Date.now();
+    const attempt = loginAttemptsByIp.get(ip);
+
+    if (attempt && attempt.lockedUntil > now) {
+      const waitSec = Math.ceil((attempt.lockedUntil - now) / 1000);
+      res.status(429).json({
+        ok: false,
+        error: `Terlalu banyak percobaan login gagal. Silakan tunggu ${waitSec} detik sebelum mencoba kembali.`,
+      });
+      return;
+    }
+
+    const { username, password } = (req.body || {}) as {
+      username?: string;
+      password?: string;
+    };
+    const q = String(username || '').trim().toLowerCase();
+    const pwd = String(password || '');
+
+    if (!q || !pwd) {
+      res.status(400).json({
+        ok: false,
+        error: 'Username/Email dan Password wajib diisi.',
+      });
+      return;
+    }
+
+    const state = await loadDatabaseState();
+    const users =
+      Array.isArray(state.users) && state.users.length > 0
+        ? state.users
+        : DEFAULT_APP_USERS;
+
+    const candidate = users.find(
+      (u) => u.username.toLowerCase() === q || u.email.toLowerCase() === q
+    );
+
+    const passwordMatched = candidate
+      ? timingSafePasswordEqual(pwd, candidate.password)
+      : false;
+
+    if (!candidate || !passwordMatched) {
+      const prev =
+        attempt && now - attempt.firstFailedAt < 5 * 60 * 1000
+          ? attempt
+          : { count: 0, firstFailedAt: now, lockedUntil: 0 };
+      const nextCount = prev.count + 1;
+      const lockedUntil =
+        nextCount >= MAX_FAILED_LOGIN_ATTEMPTS ? now + LOGIN_LOCKOUT_MS : 0;
+      loginAttemptsByIp.set(ip, {
+        count: nextCount >= MAX_FAILED_LOGIN_ATTEMPTS ? 0 : nextCount,
+        firstFailedAt: prev.firstFailedAt,
+        lockedUntil,
+      });
+
+      res.status(401).json({
+        ok: false,
+        error:
+          lockedUntil > 0
+            ? 'Terlalu banyak percobaan login gagal. Akun dikunci sementara selama 60 detik.'
+            : 'Username/Email atau Password tidak sesuai.',
+      });
+      return;
+    }
+
+    if (!candidate.is_active) {
+      res.status(403).json({
+        ok: false,
+        error: 'Akun user ini sedang dinonaktifkan oleh Administrator.',
+      });
+      return;
+    }
+
+    // Clear failed attempts on success
+    loginAttemptsByIp.delete(ip);
+
+    const jkt = new Date(now + 7 * 3600 * 1000);
+    const nowWib = `${jkt.getUTCFullYear()}-${String(
+      jkt.getUTCMonth() + 1
+    ).padStart(2, '0')}-${String(jkt.getUTCDate()).padStart(2, '0')} ${String(
+      jkt.getUTCHours()
+    ).padStart(2, '0')}:${String(jkt.getUTCMinutes()).padStart(2, '0')}:${String(
+      jkt.getUTCSeconds()
+    ).padStart(2, '0')} WIB`;
+
+    const updatedUser: AppUserRecord = {
+      ...candidate,
+      last_login_at: nowWib,
+    };
+
+    const nextState: SmartOltDatabaseState = {
+      ...state,
+      users: users.map((u) => (u.id === candidate.id ? updatedUser : u)),
+    };
+    await saveDatabaseState(nextState);
+
+    const { rawToken, sessionRow } = createServerSessionForUser(
+      updatedUser,
+      req
+    );
+    setSessionCookie(res, rawToken);
+
+    res.json({
+      ok: true,
+      authenticated: true,
+      token: rawToken,
+      sessionId: sessionRow.token_hash.slice(0, 12).toUpperCase(),
+      expiresAt: sessionRow.expires_at,
+      user: sanitizeUserForClient(updatedUser),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// GET /api/auth/session — Verify current session token & return active user
+app.get('/api/auth/session', async (req, res) => {
+  try {
+    const resolved = await resolveActiveSessionUser(req);
+    if (!resolved) {
+      clearSessionCookie(res);
+      res.status(401).json({
+        ok: false,
+        authenticated: false,
+        error: 'Sesi tidak ditemukan atau telah berakhir.',
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      authenticated: true,
+      sessionId: resolved.sessionRow.token_hash.slice(0, 12).toUpperCase(),
+      expiresAt: resolved.sessionRow.expires_at,
+      user: sanitizeUserForClient(resolved.user),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// POST /api/auth/logout — Destroy active server session & clear cookie
+app.post('/api/auth/logout', (req, res) => {
+  try {
+    const rawToken = extractSessionToken(req);
+    if (rawToken) {
+      const tokenHash = hashSessionToken(rawToken);
+      sqliteDb
+        .prepare(`DELETE FROM auth_sessions WHERE token_hash = ?`)
+        .run(tokenHash);
+    }
+    clearSessionCookie(res);
+    res.json({ ok: true, authenticated: false });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// POST /api/auth/switch-user — Admin-only session switch to preview/impersonate an active user securely
+app.post('/api/auth/switch-user', async (req, res) => {
+  try {
+    const resolved = await resolveActiveSessionUser(req);
+    if (!resolved || resolved.user.role !== 'ADMIN') {
+      res.status(403).json({
+        ok: false,
+        error: 'Hanya Administrator yang memiliki izin untuk Switch User.',
+      });
+      return;
+    }
+
+    const { targetUserId } = (req.body || {}) as { targetUserId?: number };
+    const users =
+      Array.isArray(resolved.state.users) && resolved.state.users.length > 0
+        ? resolved.state.users
+        : DEFAULT_APP_USERS;
+    const targetUser = users.find(
+      (u) => u.id === Number(targetUserId) && u.is_active
+    );
+    if (!targetUser) {
+      res.status(404).json({
+        ok: false,
+        error: 'Target user tidak ditemukan atau tidak aktif.',
+      });
+      return;
+    }
+
+    // Revoke previous session token and issue a fresh token for targetUser
+    sqliteDb
+      .prepare(`DELETE FROM auth_sessions WHERE token_hash = ?`)
+      .run(resolved.sessionRow.token_hash);
+
+    const { rawToken, sessionRow } = createServerSessionForUser(
+      targetUser,
+      req
+    );
+    setSessionCookie(res, rawToken);
+
+    res.json({
+      ok: true,
+      authenticated: true,
+      token: rawToken,
+      sessionId: sessionRow.token_hash.slice(0, 12).toUpperCase(),
+      expiresAt: sessionRow.expires_at,
+      user: sanitizeUserForClient(targetUser),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// Global API Authentication Guard Middleware:
+// Every /api/* endpoint below requires a valid cryptographic session token!
+app.use('/api', async (req, res, next) => {
+  if (
+    req.path === '/auth/login' ||
+    req.path === '/auth/session' ||
+    req.path === '/auth/logout' ||
+    req.path === '/auth/switch-user'
+  ) {
+    next();
+    return;
+  }
+
+  try {
+    const resolved = await resolveActiveSessionUser(req);
+    if (!resolved) {
+      clearSessionCookie(res);
+      res.status(401).json({
+        ok: false,
+        authenticated: false,
+        error: 'Unauthorized: Sesi login wajib aktif untuk mengakses API.',
+      });
+      return;
+    }
+    (req as express.Request & { authUser?: AppUserRecord; authSession?: AuthSessionRow }).authUser =
+      resolved.user;
+    (req as express.Request & { authUser?: AppUserRecord; authSession?: AuthSessionRow }).authSession =
+      resolved.sessionRow;
+    next();
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
 
 // GET /api/state — Load live database state + PostgreSQL connection status
-app.get('/api/state', async (_req, res) => {
+app.get('/api/state', async (req, res) => {
   try {
+    const authUser = (req as express.Request & { authUser?: AppUserRecord }).authUser;
     const state = await loadDatabaseState();
     // Auto-repair any ONU whose pppoe_username or pppoe_password was polluted by OLT Telnet login banner
     let repaired = false;
@@ -1618,8 +2087,20 @@ app.get('/api/state', async (_req, res) => {
     if (repaired) {
       await saveDatabaseState(state);
     }
+
+    // Never expose raw user passwords to non-admin accounts
+    const safeUsers =
+      authUser?.role === 'ADMIN'
+        ? state.users
+        : (state.users || DEFAULT_APP_USERS)
+            .filter((u) => u.id === authUser?.id)
+            .map((u) => sanitizeUserForClient(u));
+
     res.json({
-      state,
+      state: {
+        ...state,
+        users: safeUsers,
+      },
       meta: {
         dbEngine: activeDbEngine,
         pgConnected,
@@ -1680,11 +2161,47 @@ app.post('/api/db/config', async (req, res) => {
 // POST /api/state/sync — Persist updated state to PostgreSQL (and SQLite cache)
 app.post('/api/state/sync', async (req, res) => {
   try {
+    const authUser = (req as express.Request & { authUser?: AppUserRecord }).authUser;
     const nextState = req.body.state as SmartOltDatabaseState;
     if (!nextState || !Array.isArray(nextState.olts)) {
       res.status(400).json({ error: 'Invalid database state payload' });
       return;
     }
+
+    const currentDbState = await loadDatabaseState();
+    const existingUsers =
+      Array.isArray(currentDbState.users) && currentDbState.users.length > 0
+        ? currentDbState.users
+        : DEFAULT_APP_USERS;
+
+    // Security enforcement: Only ADMIN can modify user accounts or permissions
+    if (authUser?.role !== 'ADMIN') {
+      nextState.users = existingUsers;
+    } else if (Array.isArray(nextState.users) && nextState.users.length > 0) {
+      // Preserve real passwords if masked placeholder ('••••••••') was sent back
+      nextState.users = nextState.users.map((u) => {
+        const prev = existingUsers.find((eu) => eu.id === u.id);
+        if (prev && (!u.password || u.password === '••••••••')) {
+          return { ...u, password: prev.password };
+        }
+        return u;
+      });
+
+      // Immediately revoke active sessions for any user that was deleted or deactivated!
+      const activeUserIds = new Set(
+        nextState.users.filter((u) => u.is_active).map((u) => u.id)
+      );
+      for (const prevUser of existingUsers) {
+        if (!activeUserIds.has(prevUser.id)) {
+          sqliteDb
+            .prepare(`DELETE FROM auth_sessions WHERE user_id = ?`)
+            .run(prevUser.id);
+        }
+      }
+    } else {
+      nextState.users = existingUsers;
+    }
+
     await saveDatabaseState(nextState);
     res.json({ ok: true, dbEngine: activeDbEngine, pgConnected });
   } catch (err) {

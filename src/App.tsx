@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   INITIAL_DB_STATE,
+  DEFAULT_APP_USERS,
   SmartOltDatabaseState,
   OltRecord,
   OnuRecord,
@@ -14,6 +15,7 @@ import {
   ZoneRecord,
   SectorRecord,
   OdbRecord,
+  AppUserRecord,
 } from './services/mockDatabase';
 import {
   parseZteUncfgOutput,
@@ -54,6 +56,14 @@ import {
   X,
 } from 'lucide-react';
 
+import {
+  AUTH_SESSION_TOKEN_KEY,
+  LEGACY_AUTH_USER_ID_KEY,
+  IDLE_SESSION_TIMEOUT_MS,
+  setOnUnauthorizedHandler,
+  apiFetch as fetch,
+} from './services/authSession';
+
 type NavigationView =
   | 'DASHBOARD'
   | 'UNCONFIGURED'
@@ -67,6 +77,7 @@ type NavigationView =
   | 'ZONES'
   | 'SECTORS'
   | 'SPLITTERS'
+  | 'USERS'
   | 'SPEED_PROFILES'
   | 'VPN_TR069'
   | 'DIAG_PARSER'
@@ -78,6 +89,12 @@ const STORAGE_KEY = 'smartolt_jetcybernet_live_sql_cache';
 export default function App() {
   const [db, setDb] = useState<SmartOltDatabaseState>(INITIAL_DB_STATE);
   const [dbLoaded, setDbLoaded] = useState(false);
+  const [authChecking, setAuthChecking] = useState<boolean>(true);
+  const [authenticatedUser, setAuthenticatedUser] =
+    useState<AppUserRecord | null>(null);
+  const [sessionTokenId, setSessionTokenId] = useState<string | null>(null);
+  const [loggedInUserId, setLoggedInUserId] = useState<number | null>(null);
+
   const [dbMeta, setDbMeta] = useState<{
     dbEngine: string;
     pgConnected?: boolean;
@@ -113,32 +130,73 @@ export default function App() {
   const [manualUncfgSn, setManualUncfgSn] = useState<string>('ZTEGC6A394D4');
   const [manualUncfgType, setManualUncfgType] = useState<string>('ALL');
 
-  // 1. Load live state from Backend SQL Database (/api/state) on mount
+  const loadAuthorizedDatabaseState = async () => {
+    try {
+      const r = await fetch('/api/state');
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data && data.state) {
+        setDb(data.state);
+      }
+      if (data && data.meta) {
+        setDbMeta(data.meta);
+      }
+      setDbLoaded(true);
+    } catch {
+      // ignore network error
+    }
+  };
+
+  // 1. Verify Server Session on mount before allowing access to main application
   useEffect(() => {
     let mounted = true;
-    fetch('/api/state')
-      .then((r) => r.json())
-      .then((data) => {
+    try {
+      window.localStorage.removeItem(LEGACY_AUTH_USER_ID_KEY);
+    } catch {
+      // ignore
+    }
+
+    fetch('/api/auth/session')
+      .then(async (r) => {
+        if (!r.ok) return null;
+        return r.json();
+      })
+      .then(async (data) => {
         if (!mounted) return;
-        if (data && data.state) {
-          setDb(data.state);
+        if (data && data.ok && data.authenticated && data.user) {
+          setAuthenticatedUser(data.user);
+          setLoggedInUserId(data.user.id);
+          setSessionTokenId(data.sessionId || null);
+          await loadAuthorizedDatabaseState();
+        } else {
+          try {
+            window.sessionStorage.removeItem(AUTH_SESSION_TOKEN_KEY);
+          } catch {
+            // ignore
+          }
+          setAuthenticatedUser(null);
+          setLoggedInUserId(null);
+          setSessionTokenId(null);
+          setDbLoaded(false);
         }
-        if (data && data.meta) {
-          setDbMeta(data.meta);
-        }
-        setDbLoaded(true);
+        setAuthChecking(false);
       })
       .catch(() => {
-        setDbLoaded(true);
+        if (!mounted) return;
+        setAuthenticatedUser(null);
+        setLoggedInUserId(null);
+        setSessionTokenId(null);
+        setAuthChecking(false);
       });
+
     return () => {
       mounted = false;
     };
   }, []);
 
-  // 2. Sync state changes to Backend SQL Database (/api/state/sync)
+  // 2. Sync state changes to Backend SQL Database (/api/state/sync) ONLY when authenticated
   useEffect(() => {
-    if (!dbLoaded) return;
+    if (!dbLoaded || !loggedInUserId) return;
     fetch('/api/state/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -146,7 +204,7 @@ export default function App() {
     }).catch(() => {
       // ignore transient network error
     });
-  }, [db, dbLoaded]);
+  }, [db, dbLoaded, loggedInUserId]);
 
   const [activeView, setActiveView] = useState<NavigationView>('DASHBOARD');
   const [selectedOltId, setSelectedOltId] = useState<number>(1);
@@ -205,6 +263,8 @@ export default function App() {
         return '#/settings/sectors';
       case 'SPLITTERS':
         return '#/settings/splitters';
+      case 'USERS':
+        return '#/settings/users';
       case 'SPEED_PROFILES':
         return '#/settings/speed-profiles';
       case 'VPN_TR069':
@@ -220,9 +280,12 @@ export default function App() {
     }
   };
 
+  const loggedInUserIdRef = useRef<number | null>(loggedInUserId);
   useEffect(() => {
-    // 1. Setup Root Guard entry so pressing Back at the root of the app stays on DASHBOARD
-    //    instead of exiting to the previous website in the browser tab!
+    loggedInUserIdRef.current = loggedInUserId;
+  }, [loggedInUserId]);
+
+  useEffect(() => {
     const rootGuardState = {
       smartOltRootGuard: true,
       activeView: 'DASHBOARD' as NavigationView,
@@ -243,23 +306,45 @@ export default function App() {
       updatingModeOnuId: null as number | null,
     };
 
-    try {
-      window.history.replaceState(rootGuardState, '', '#/dashboard');
-      window.history.pushState(initialNavState, '', '#/dashboard');
-      lastPushedSignatureRef.current = JSON.stringify({
-        v: 'DASHBOARD',
-        olt: 1,
-        tab: 'OLT_DETAILS',
-        onu: 1,
-        auth: null,
-        upd: null,
-      });
-    } catch {
-      // Ignore if running in restricted environment
+    if (loggedInUserIdRef.current !== null) {
+      try {
+        window.history.replaceState(rootGuardState, '', '#/dashboard');
+        window.history.pushState(initialNavState, '', '#/dashboard');
+        lastPushedSignatureRef.current = JSON.stringify({
+          v: 'DASHBOARD',
+          olt: 1,
+          tab: 'OLT_DETAILS',
+          onu: 1,
+          auth: null,
+          upd: null,
+        });
+      } catch {
+        // Ignore if running in restricted environment
+      }
+    } else {
+      try {
+        window.history.replaceState({ smartOltLoginGuard: true }, '', '#/login');
+      } catch {
+        // Ignore
+      }
     }
     historyReadyRef.current = true;
 
     const handlePopState = (event: PopStateEvent) => {
+      // Strictly block any navigation to main views when not logged in
+      if (loggedInUserIdRef.current === null) {
+        try {
+          window.history.replaceState(
+            { smartOltLoginGuard: true },
+            '',
+            '#/login'
+          );
+        } catch {
+          // Ignore
+        }
+        return;
+      }
+
       const st = event.state;
       isHandlingPopStateRef.current = true;
       setOpenDropdown(null);
@@ -296,7 +381,6 @@ export default function App() {
           upd: nextUpdId,
         });
       } else {
-        // Hit the root guard (or empty state at start of tab): stay on DASHBOARD and re-arm guard
         setActiveView('DASHBOARD');
         setAuthorizingOnu(null);
         setUpdatingModeOnu(null);
@@ -321,9 +405,25 @@ export default function App() {
       }, 0);
     };
 
+    const handleHashChange = () => {
+      if (loggedInUserIdRef.current === null && window.location.hash !== '#/login') {
+        try {
+          window.history.replaceState(
+            { smartOltLoginGuard: true },
+            '',
+            '#/login'
+          );
+        } catch {
+          // Ignore
+        }
+      }
+    };
+
     window.addEventListener('popstate', handlePopState);
+    window.addEventListener('hashchange', handleHashChange);
     return () => {
       window.removeEventListener('popstate', handlePopState);
+      window.removeEventListener('hashchange', handleHashChange);
     };
   }, []);
 
@@ -331,6 +431,20 @@ export default function App() {
   useEffect(() => {
     if (!historyReadyRef.current) return;
     if (isHandlingPopStateRef.current) return;
+
+    // Always force #/login when unauthenticated so the user can never enter #/dashboard without login
+    if (loggedInUserId === null) {
+      try {
+        window.history.replaceState(
+          { smartOltLoginGuard: true },
+          '',
+          '#/login'
+        );
+      } catch {
+        // Ignore
+      }
+      return;
+    }
 
     const authId = authorizingOnu?.id ?? null;
     const updId = updatingModeOnu?.id ?? null;
@@ -371,6 +485,7 @@ export default function App() {
       // Ignore
     }
   }, [
+    loggedInUserId,
     activeView,
     selectedOltId,
     initialOltTab,
@@ -675,8 +790,309 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     return created;
   };
 
-  const unconfiguredOnus = db.onus.filter((o) => !o.is_authorized);
-  const configuredOnus = db.onus.filter((o) => o.is_authorized);
+  // ==========================================================================
+  // LOGIN & USER MANAGEMENT STATE (SERVER SESSION + OLT, ZONE & RK ACCESS)
+  // ==========================================================================
+  const [loginUsername, setLoginUsername] = useState<string>('');
+  const [loginPassword, setLoginPassword] = useState<string>('');
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginLoading, setLoginLoading] = useState<boolean>(false);
+  const [showLoginPassword, setShowLoginPassword] = useState<boolean>(false);
+
+  const [userSearch, setUserSearch] = useState<string>('');
+  const [showUserModal, setShowUserModal] = useState<boolean>(false);
+  const [editingUser, setEditingUser] = useState<AppUserRecord | null>(null);
+  const [userFormUsername, setUserFormUsername] = useState<string>('');
+  const [userFormFullName, setUserFormFullName] = useState<string>('');
+  const [userFormEmail, setUserFormEmail] = useState<string>('');
+  const [userFormPassword, setUserFormPassword] = useState<string>('');
+  const [userFormRole, setUserFormRole] = useState<
+    'ADMIN' | 'OPERATOR' | 'TECHNICIAN' | 'VIEWER'
+  >('OPERATOR');
+  const [userFormActive, setUserFormActive] = useState<boolean>(true);
+  const [userFormAllOlts, setUserFormAllOlts] = useState<boolean>(false);
+  const [userFormOltIds, setUserFormOltIds] = useState<number[]>([]);
+  const [userFormAllZones, setUserFormAllZones] = useState<boolean>(false);
+  const [userFormZoneIds, setUserFormZoneIds] = useState<number[]>([]);
+  const [userFormAllRks, setUserFormAllRks] = useState<boolean>(false);
+  const [userFormSectorIds, setUserFormSectorIds] = useState<number[]>([]);
+  const [userFormOdbIds, setUserFormOdbIds] = useState<number[]>([]);
+
+  const appUsers: AppUserRecord[] =
+    Array.isArray(db.users) && db.users.length > 0
+      ? db.users
+      : DEFAULT_APP_USERS;
+
+  const currentUser: AppUserRecord | null =
+    loggedInUserId !== null
+      ? appUsers.find((u) => u.id === loggedInUserId && u.is_active) ||
+        (authenticatedUser &&
+        authenticatedUser.id === loggedInUserId &&
+        authenticatedUser.is_active
+          ? authenticatedUser
+          : null)
+      : null;
+
+  const isAdminUser = currentUser?.role === 'ADMIN';
+
+  const forceClientLogout = (reasonMsg?: string) => {
+    try {
+      window.sessionStorage.removeItem(AUTH_SESSION_TOKEN_KEY);
+      window.localStorage.removeItem(LEGACY_AUTH_USER_ID_KEY);
+    } catch {
+      // Ignore
+    }
+    setAuthenticatedUser(null);
+    setLoggedInUserId(null);
+    setSessionTokenId(null);
+    setDbLoaded(false);
+    setOpenDropdown(null);
+    setAuthorizingOnu(null);
+    setUpdatingModeOnu(null);
+    if (reasonMsg) {
+      setLoginError(reasonMsg);
+    }
+    try {
+      window.history.replaceState({ smartOltLoginGuard: true }, '', '#/login');
+    } catch {
+      // Ignore
+    }
+  };
+
+  useEffect(() => {
+    setOnUnauthorizedHandler(() => {
+      forceClientLogout('Sesi Anda telah berakhir atau tidak valid. Silakan login kembali.');
+    });
+    return () => {
+      setOnUnauthorizedHandler(null);
+    };
+  }, []);
+
+  // Periodic server session heartbeat & 30-minute idle timeout enforcement
+  useEffect(() => {
+    if (!loggedInUserId) return;
+
+    let lastActivityAt = Date.now();
+    const recordActivity = () => {
+      lastActivityAt = Date.now();
+    };
+
+    window.addEventListener('mousemove', recordActivity, { passive: true });
+    window.addEventListener('keydown', recordActivity, { passive: true });
+    window.addEventListener('click', recordActivity, { passive: true });
+    window.addEventListener('touchstart', recordActivity, { passive: true });
+
+    const interval = setInterval(async () => {
+      if (Date.now() - lastActivityAt > IDLE_SESSION_TIMEOUT_MS) {
+        try {
+          await fetch('/api/auth/logout', { method: 'POST' });
+        } catch {
+          // ignore
+        }
+        forceClientLogout(
+          'Sesi berakhir otomatis karena tidak ada aktivitas selama 30 menit.'
+        );
+        return;
+      }
+
+      try {
+        const resp = await fetch('/api/auth/session');
+        if (!resp.ok) {
+          forceClientLogout(
+            'Sesi login Anda telah berakhir. Silakan login kembali.'
+          );
+          return;
+        }
+        const data = await resp.json();
+        if (!data || !data.authenticated || !data.user) {
+          forceClientLogout(
+            'Sesi login Anda tidak lagi aktif. Silakan login kembali.'
+          );
+        } else {
+          setAuthenticatedUser(data.user);
+          setSessionTokenId(data.sessionId || null);
+        }
+      } catch {
+        // ignore transient network glitch
+      }
+    }, 30000);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('mousemove', recordActivity);
+      window.removeEventListener('keydown', recordActivity);
+      window.removeEventListener('click', recordActivity);
+      window.removeEventListener('touchstart', recordActivity);
+    };
+  }, [loggedInUserId]);
+
+  const handleLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError(null);
+    setLoginLoading(true);
+    try {
+      const resp = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: loginUsername.trim(),
+          password: loginPassword,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data || !data.ok || !data.user || !data.token) {
+        setLoginError(
+          data?.error || 'Username/Email atau Password tidak sesuai.'
+        );
+        return;
+      }
+
+      try {
+        window.sessionStorage.setItem(AUTH_SESSION_TOKEN_KEY, data.token);
+        window.localStorage.removeItem(LEGACY_AUTH_USER_ID_KEY);
+      } catch {
+        // Ignore
+      }
+
+      setAuthenticatedUser(data.user);
+      setLoggedInUserId(data.user.id);
+      setSessionTokenId(data.sessionId || null);
+      setLoginPassword('');
+      setActiveView('DASHBOARD');
+
+      await loadAuthorizedDatabaseState();
+
+      const nowWib = formatJakartaDateTime();
+      showToast(
+        `✓ Selamat datang, ${data.user.full_name} (${data.user.role}) — Sesi #${data.sessionId || 'AKTIF'} (${nowWib} WIB)`
+      );
+    } catch {
+      setLoginError('Gagal terhubung ke server autentikasi. Coba lagi.');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network error
+    }
+    forceClientLogout();
+  };
+
+  const handleAdminSwitchUser = async (targetUser: AppUserRecord) => {
+    try {
+      const resp = await fetch('/api/auth/switch-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUserId: targetUser.id }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data || !data.ok || !data.user || !data.token) {
+        showToast(data?.error || 'Gagal beralih sesi user.');
+        return;
+      }
+      try {
+        window.sessionStorage.setItem(AUTH_SESSION_TOKEN_KEY, data.token);
+      } catch {
+        // Ignore
+      }
+      setAuthenticatedUser(data.user);
+      setLoggedInUserId(data.user.id);
+      setSessionTokenId(data.sessionId || null);
+      setActiveView('DASHBOARD');
+      await loadAuthorizedDatabaseState();
+      showToast(
+        `✓ Sesi beralih ke "${data.user.username}" (${data.user.role}) — menampilkan OLT, Zone & RK sesuai hak akses user ini.`
+      );
+    } catch {
+      showToast('Gagal menghubungi server untuk Switch User.');
+    }
+  };
+
+  // Scoped visibility based on logged-in user's assigned OLTs, Zones, and RKs (Sectors & Splitters)
+  const visibleOlts = !currentUser || currentUser.access_all_olts
+    ? db.olts
+    : db.olts.filter((o) => (currentUser.allowed_olt_ids || []).includes(o.id));
+  const visibleOltIds = new Set(visibleOlts.map((o) => o.id));
+
+  const visibleZones = !currentUser || currentUser.access_all_zones
+    ? db.zones
+    : db.zones.filter((z) => (currentUser.allowed_zone_ids || []).includes(z.id));
+  const visibleZoneIds = new Set(visibleZones.map((z) => z.id));
+
+  const visibleSectors = (db.sectors || []).filter((s) => {
+    if (!currentUser) return true;
+    const zoneOk =
+      currentUser.access_all_zones ||
+      s.zone_id === null ||
+      visibleZoneIds.has(s.zone_id);
+    const rkOk =
+      currentUser.access_all_rks ||
+      (currentUser.allowed_sector_ids || []).includes(s.id);
+    return zoneOk && rkOk;
+  });
+  const visibleSectorIds = new Set(visibleSectors.map((s) => s.id));
+
+  const visibleOdbs = db.odbs.filter((o) => {
+    if (!currentUser) return true;
+    const zoneOk =
+      currentUser.access_all_zones || visibleZoneIds.has(o.zone_id);
+    const rkOk =
+      currentUser.access_all_rks ||
+      (currentUser.allowed_odb_ids || []).includes(o.id) ||
+      (o.sector_id !== null &&
+        o.sector_id !== undefined &&
+        visibleSectorIds.has(o.sector_id));
+    return zoneOk && rkOk;
+  });
+  const visibleOdbIds = new Set(visibleOdbs.map((o) => o.id));
+
+  const visibleOnus = db.onus.filter((u) => {
+    if (!currentUser) return true;
+    // 1. Check OLT assignment
+    if (!currentUser.access_all_olts && !visibleOltIds.has(u.olt_id)) {
+      return false;
+    }
+    // Unconfigured ONUs only have OLT & PON Port, so OLT check suffices
+    if (!u.is_authorized) {
+      return true;
+    }
+    // 2. Check Zone assignment for configured ONUs
+    if (!currentUser.access_all_zones) {
+      const onuOdb = u.odb_id ? db.odbs.find((o) => o.id === u.odb_id) : null;
+      const effectiveZoneId = u.zone_id ?? onuOdb?.zone_id ?? null;
+      if (effectiveZoneId === null || !visibleZoneIds.has(effectiveZoneId)) {
+        return false;
+      }
+    }
+    // 3. Check RK (Sector / Splitter ODP) assignment for configured ONUs
+    if (!currentUser.access_all_rks) {
+      const matchSector =
+        u.sector_id !== null &&
+        u.sector_id !== undefined &&
+        visibleSectorIds.has(u.sector_id);
+      const matchOdb = u.odb_id !== null && visibleOdbIds.has(u.odb_id);
+      if (!matchSector && !matchOdb) {
+        return false;
+      }
+    }
+    return true;
+  });
+
+  const scopedDb: SmartOltDatabaseState = {
+    ...db,
+    olts: visibleOlts,
+    zones: visibleZones,
+    sectors: visibleSectors,
+    odbs: visibleOdbs,
+    onus: visibleOnus,
+  };
+
+  const unconfiguredOnus = visibleOnus.filter((o) => !o.is_authorized);
+  const configuredOnus = visibleOnus.filter((o) => o.is_authorized);
   const onlineOnus = configuredOnus.filter((o) => o.phase_state === 'working');
   const losOnus = configuredOnus.filter((o) => o.phase_state === 'LOS');
   const pwrFailOnus = configuredOnus.filter((o) => o.phase_state === 'DyingGasp');
@@ -1278,9 +1694,118 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   };
 
   const selectedOlt =
-    db.olts.find((o) => o.id === selectedOltId) || db.olts[db.olts.length - 1];
+    visibleOlts.find((o) => o.id === selectedOltId) ||
+    visibleOlts[visibleOlts.length - 1] ||
+    db.olts.find((o) => o.id === selectedOltId) ||
+    db.olts[db.olts.length - 1];
   const selectedOnu =
-    db.onus.find((o) => o.id === selectedOnuId) || configuredOnus[1] || configuredOnus[0];
+    visibleOnus.find((o) => o.id === selectedOnuId) ||
+    configuredOnus[1] ||
+    configuredOnus[0];
+
+  // ==========================================================================
+  // FULL-SCREEN LOGIN PAGE WHEN NOT AUTHENTICATED (NO QUICK-LOGIN LEAKS)
+  // ==========================================================================
+  if (authChecking) {
+    return (
+      <div
+        className="flex min-h-screen flex-col items-center justify-center bg-[#081526] px-4 py-8 text-slate-100"
+        style={{
+          backgroundImage: `radial-gradient(circle at 75% 20%, rgba(16, 52, 96, 0.55) 0%, transparent 55%), linear-gradient(135deg, #071220 0%, #0b1d35 50%, #071426 100%)`,
+        }}
+      >
+        <div className="flex items-center gap-3 rounded-xl border border-[#1e3a5f] bg-[#0b1a2e]/95 px-6 py-4 text-xs font-semibold text-sky-300 shadow-2xl">
+          <RefreshCw className="h-4 w-4 animate-spin text-sky-400" />
+          <span>Memverifikasi keamanan sesi...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <div
+        className="flex min-h-screen flex-col items-center justify-center bg-[#081526] px-4 py-8 text-slate-100"
+        style={{
+          backgroundImage: `radial-gradient(circle at 75% 20%, rgba(16, 52, 96, 0.55) 0%, transparent 55%), linear-gradient(135deg, #071220 0%, #0b1d35 50%, #071426 100%)`,
+        }}
+      >
+        <div className="w-full max-w-md overflow-hidden rounded-xl border border-[#1e3a5f] bg-[#0b1a2e]/95 shadow-2xl">
+          {/* Top Brand Header */}
+          <div className="border-b border-[#193354] bg-[#091526] px-6 py-5 text-center">
+            <div className="inline-flex items-center gap-2 rounded-full border border-sky-500/30 bg-sky-950/60 px-3 py-1 font-mono text-[11px] font-semibold text-sky-300">
+              <Wifi className="h-3.5 w-3.5 text-emerald-400" />
+              GPON / XGPON OLT MANAGEMENT SYSTEM
+            </div>
+            <h1 className="mt-2.5 text-2xl font-extrabold tracking-wider text-white">
+              JETCYBERNET
+            </h1>
+            <p className="mt-1 text-xs text-slate-400">
+              Masuk untuk mengelola OLT, ONU, Zone &amp; Distribusi RK / ODP
+            </p>
+          </div>
+
+          {/* Login Form */}
+          <form onSubmit={handleLoginSubmit} className="space-y-4 p-6 text-xs" autoComplete="off">
+            {loginError && (
+              <div className="flex items-center gap-2 rounded border border-red-500/50 bg-red-950/60 px-3.5 py-2.5 text-xs font-semibold text-red-200">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-red-400" />
+                <span>{loginError}</span>
+              </div>
+            )}
+
+            <div>
+              <label className="block font-bold text-slate-200">
+                Username atau Email
+              </label>
+              <input
+                type="text"
+                required
+                autoFocus
+                autoComplete="username"
+                value={loginUsername}
+                onChange={(e) => setLoginUsername(e.target.value)}
+                placeholder="Masukkan username atau email"
+                className="mt-1.5 w-full rounded border border-[#284870] bg-[#10233a] px-3.5 py-2.5 text-xs text-white placeholder-slate-400 focus:border-sky-400 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between">
+                <label className="block font-bold text-slate-200">
+                  Password
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowLoginPassword((v) => !v)}
+                  className="text-[11px] text-sky-400 hover:underline"
+                >
+                  {showLoginPassword ? 'Sembunyikan' : 'Tampilkan'}
+                </button>
+              </div>
+              <input
+                type={showLoginPassword ? 'text' : 'password'}
+                required
+                autoComplete="current-password"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                placeholder="Masukkan password"
+                className="mt-1.5 w-full rounded border border-[#284870] bg-[#10233a] px-3.5 py-2.5 text-xs text-white placeholder-slate-400 focus:border-sky-400 focus:outline-none"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loginLoading}
+              className="w-full rounded bg-[#0275d8] py-2.5 text-xs font-bold text-white shadow-lg transition hover:bg-[#025aa5] disabled:opacity-60"
+            >
+              {loginLoading ? 'Memverifikasi Kredensial...' : 'Sign In ke Dashboard'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1498,6 +2023,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   activeView === 'ZONES' ||
                   activeView === 'SECTORS' ||
                   activeView === 'SPLITTERS' ||
+                  activeView === 'USERS' ||
                   activeView === 'OLTS_LIST' ||
                   activeView === 'OLT_DETAIL'
                     ? 'bg-[#163052] text-white'
@@ -1507,11 +2033,19 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 Settings <ChevronDown className="h-3 w-3" />
               </button>
               {openDropdown === 'SETTINGS' && (
-                <div className="absolute left-0 mt-1 w-44 rounded border border-slate-700 bg-[#111c2d] py-1.5 text-xs shadow-2xl">
+                <div className="absolute left-0 mt-1 w-48 rounded border border-slate-700 bg-[#111c2d] py-1.5 text-xs shadow-2xl">
                   {[
                     { label: 'Zones', view: 'ZONES' as NavigationView },
-                    { label: 'Sectors', view: 'SECTORS' as NavigationView },
-                    { label: 'Splitters', view: 'SPLITTERS' as NavigationView },
+                    { label: 'Sectors (RK)', view: 'SECTORS' as NavigationView },
+                    { label: 'Splitters (ODP)', view: 'SPLITTERS' as NavigationView },
+                    ...(isAdminUser
+                      ? [
+                          {
+                            label: 'Users & Hak Akses',
+                            view: 'USERS' as NavigationView,
+                          },
+                        ]
+                      : []),
                     { label: 'ONU types', view: 'SPEED_PROFILES' as NavigationView },
                     {
                       label: 'Speed profiles',
@@ -1545,7 +2079,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           </div>
 
           {/* Right Utility Icons + Live PostgreSQL (:5435) & Docker Port 3004 Indicator */}
-          <div className="flex items-center gap-3 text-slate-200">
+          <div className="flex items-center gap-2.5 text-slate-200">
             <button
               type="button"
               onClick={() => setShowPgConfigModal(true)}
@@ -1588,31 +2122,78 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               type="button"
               onClick={() => setActiveView('SOURCE_CODE')}
               title="View Complete SQL Schema, Dockerfile (Port 3004) & Backend Code"
-              className="flex items-center gap-1 rounded bg-emerald-600/20 px-2 py-1 text-[11px] font-semibold text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/30"
+              className="hidden md:flex items-center gap-1 rounded bg-emerald-600/20 px-2 py-1 text-[11px] font-semibold text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/30"
             >
               <FileCode className="h-3.5 w-3.5" />
               Docker :3004 &amp; SQL
             </button>
-            <button type="button" className="hover:text-white" title="Admin Account">
-              <User className="h-4 w-4" />
-            </button>
+
+            {/* Logged-in User Profile & User Management Button */}
             <button
               type="button"
-              onClick={async () => {
-                localStorage.removeItem(STORAGE_KEY);
-                const resp = await fetch('/api/database/reset', {
-                  method: 'POST',
-                });
-                const data = await resp.json();
-                if (data.state) setDb(data.state);
-                showToast('Database SQL berhasil dikosongkan (0 OLT, 0 ONU).');
+              onClick={() => {
+                if (isAdminUser) {
+                  setActiveView('USERS');
+                } else {
+                  showToast(
+                    `Login sebagai ${currentUser.full_name} (${currentUser.role}) — Akses: ${
+                      currentUser.access_all_olts
+                        ? 'Semua OLT'
+                        : `${visibleOlts.length} OLT`
+                    }, ${
+                      currentUser.access_all_zones
+                        ? 'Semua Zone'
+                        : `${visibleZones.length} Zone`
+                    }, ${
+                      currentUser.access_all_rks
+                        ? 'Semua RK'
+                        : `${visibleSectors.length} RK/Sector & ${visibleOdbs.length} ODP`
+                    }`
+                  );
+                }
               }}
-              title="Reset / Empty SQL Database"
-              className="flex items-center gap-1 text-xs font-medium text-red-300 hover:text-red-200"
+              title={
+                isAdminUser
+                  ? `Klik untuk membuka User Management (Sesi #${sessionTokenId || 'AKTIF'})`
+                  : `Logged in as ${currentUser.full_name} (Sesi #${sessionTokenId || 'AKTIF'})`
+              }
+              className="inline-flex items-center gap-1.5 rounded border border-[#284870] bg-[#132842] px-2.5 py-1 text-xs font-semibold text-white hover:border-sky-400"
             >
-              <Power className="h-3.5 w-3.5" />
-              Reset DB
+              <User className="h-3.5 w-3.5 text-sky-400" />
+              <span>{currentUser.username}</span>
+              <span className="rounded bg-sky-500/20 px-1.5 py-0.2 font-mono text-[10px] text-sky-300">
+                {currentUser.role}
+              </span>
             </button>
+
+            <button
+              type="button"
+              onClick={handleLogout}
+              title="Keluar (Logout)"
+              className="rounded border border-amber-500/40 bg-amber-950/40 px-2.5 py-1 text-xs font-semibold text-amber-300 hover:bg-amber-900/60 hover:text-white"
+            >
+              Logout
+            </button>
+
+            {isAdminUser && (
+              <button
+                type="button"
+                onClick={async () => {
+                  localStorage.removeItem(STORAGE_KEY);
+                  const resp = await fetch('/api/database/reset', {
+                    method: 'POST',
+                  });
+                  const data = await resp.json();
+                  if (data.state) setDb(data.state);
+                  showToast('Database SQL berhasil dikosongkan (0 OLT, 0 ONU).');
+                }}
+                title="Reset / Empty SQL Database"
+                className="flex items-center gap-1 text-xs font-medium text-red-300 hover:text-red-200"
+              >
+                <Power className="h-3.5 w-3.5" />
+                Reset DB
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -1777,40 +2358,48 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold text-white">OLTs</span>
                     <span className="rounded bg-[#28a745] px-2 py-0.5 text-[11px] font-bold text-white">
-                      {db.olts.filter((o) => o.status === 'ONLINE').length}/
-                      {db.olts.length} online
+                      {visibleOlts.filter((o) => o.status === 'ONLINE').length}/
+                      {visibleOlts.length} online
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveView('ADD_OLT')}
-                    className="flex items-center gap-1 rounded bg-[#5cb85c] px-2.5 py-1 text-xs font-bold text-white hover:bg-[#4cae4c]"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                    Add OLT
-                  </button>
-                </div>
-
-                {db.olts.length === 0 ? (
-                  <div className="rounded border border-dashed border-[#284870] bg-[#0c1c30]/60 p-6 text-center text-xs text-slate-300">
-                    <p className="font-semibold text-white">
-                      Belum ada OLT terdaftar di Database ({dbMeta.dbEngine}).
-                    </p>
-                    <p className="mt-1 text-slate-400">
-                      Klik tombol <strong>+ Add OLT</strong> untuk menghubungkan OLT baru atau mengimpor <code>#show running-config</code>.
-                    </p>
+                  {isAdminUser && (
                     <button
                       type="button"
                       onClick={() => setActiveView('ADD_OLT')}
-                      className="mt-3 inline-flex items-center gap-1.5 rounded bg-[#0275d8] px-4 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+                      className="flex items-center gap-1 rounded bg-[#5cb85c] px-2.5 py-1 text-xs font-bold text-white hover:bg-[#4cae4c]"
                     >
                       <Plus className="h-3.5 w-3.5" />
-                      Add Your First OLT
+                      Add OLT
                     </button>
+                  )}
+                </div>
+
+                {visibleOlts.length === 0 ? (
+                  <div className="rounded border border-dashed border-[#284870] bg-[#0c1c30]/60 p-6 text-center text-xs text-slate-300">
+                    <p className="font-semibold text-white">
+                      {db.olts.length === 0
+                        ? `Belum ada OLT terdaftar di Database (${dbMeta.dbEngine}).`
+                        : 'Tidak ada OLT yang di-assign ke akun Anda.'}
+                    </p>
+                    <p className="mt-1 text-slate-400">
+                      {db.olts.length === 0
+                        ? 'Klik tombol + Add OLT untuk menghubungkan OLT baru atau mengimpor #show running-config.'
+                        : 'Hubungi Administrator untuk memberikan akses OLT pada akun Anda.'}
+                    </p>
+                    {isAdminUser && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveView('ADD_OLT')}
+                        className="mt-3 inline-flex items-center gap-1.5 rounded bg-[#0275d8] px-4 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        Add Your First OLT
+                      </button>
+                    )}
                   </div>
                 ) : (
                   <div className="divide-y divide-[#1e3a5f]/70 text-xs">
-                    {db.olts.map((o) => (
+                    {visibleOlts.map((o) => (
                       <div
                         key={o.id}
                         className="flex flex-wrap items-center justify-between py-2 hover:bg-[#132842]/50 px-2 rounded"
@@ -1990,8 +2579,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-bold text-white">OLT</span>
                 <select className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white">
-                  <option>All selected ({db.olts.length})</option>
-                  {db.olts.map((o) => (
+                  <option>All selected ({visibleOlts.length})</option>
+                  {visibleOlts.map((o) => (
                     <option key={o.id} value={o.id}>
                       {o.id} - {o.name}
                     </option>
@@ -2000,11 +2589,11 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 <button
                   type="button"
                   onClick={async () => {
-                    if (db.olts.length === 0) {
-                      showToast('Tambahkan OLT terlebih dahulu di menu Settings -> OLTs.');
+                    if (visibleOlts.length === 0) {
+                      showToast('Tidak ada OLT yang tersedia untuk di-poll.');
                       return;
                     }
-                    for (const o of db.olts) {
+                    for (const o of visibleOlts) {
                       await syncOltFromTelnetLive(o.id, o);
                     }
                   }}
@@ -2016,12 +2605,12 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 <button
                   type="button"
                   onClick={() => {
-                    if (db.olts.length === 0) {
+                    if (visibleOlts.length === 0) {
                       showToast('Tambahkan OLT terlebih dahulu sebelum mendeteksi ONU.');
                       setActiveView('ADD_OLT');
                       return;
                     }
-                    setManualUncfgOltId(db.olts[0].id);
+                    setManualUncfgOltId(visibleOlts[0].id);
                     setShowAddUncfgModal(true);
                   }}
                   className="flex items-center gap-1 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
@@ -2073,7 +2662,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
             {/* Per-OLT Unconfigured Sections matching Screenshot _C1DBB18F */}
             <div className="space-y-4">
-              {db.olts.map((oltItem) => {
+              {visibleOlts.map((oltItem) => {
                 const oltUncfg = unconfiguredOnus.filter(
                   (u) => u.olt_id === oltItem.id
                 );
@@ -2148,7 +2737,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         {activeView === 'AUTHORIZE_FORM' && authorizingOnu && (
           <AuthorizeOnuModal
             onu={authorizingOnu}
-            db={db}
+            db={scopedDb}
             onClose={() => setActiveView('UNCONFIGURED')}
             onConfirmAuthorize={handleConfirmAuthorize}
             onQuickAddZone={handleQuickAddZone}
@@ -2184,7 +2773,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white"
                   >
                     <option value="ANY">Any</option>
-                    {db.olts.map((o) => (
+                    {visibleOlts.map((o) => (
                       <option key={o.id} value={o.id}>
                         {o.id} - {o.name}
                       </option>
@@ -2227,7 +2816,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white"
                   >
                     <option value="ANY">Any</option>
-                    {db.zones.map((z) => (
+                    {visibleZones.map((z) => (
                       <option key={z.id} value={z.id}>
                         {z.name}
                       </option>
@@ -2242,7 +2831,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white"
                   >
                     <option value="ANY">Any</option>
-                    {db.odbs.map((o) => (
+                    {visibleOdbs.map((o) => (
                       <option key={o.id} value={o.id}>
                         {o.name}
                       </option>
@@ -2710,7 +3299,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#1e3a5f]/70">
-                  {db.olts.map((o) => (
+                  {visibleOlts.map((o) => (
                     <tr key={o.id} className="hover:bg-[#132842]/60">
                       <td className="px-4 py-3">
                         <button
@@ -3670,13 +4259,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         {(activeView === 'ZONES' ||
           activeView === 'SECTORS' ||
           activeView === 'SPLITTERS' ||
+          activeView === 'USERS' ||
           activeView === 'SPEED_PROFILES' ||
           activeView === 'GRAPHS') && (
           <div className="space-y-4 text-xs">
-            {/* Synchronized Sub-Navigation Tabs for Settings -> Zones / Sectors / Splitters */}
+            {/* Synchronized Sub-Navigation Tabs for Settings -> Zones / Sectors / Splitters / Users */}
             {(activeView === 'ZONES' ||
               activeView === 'SECTORS' ||
-              activeView === 'SPLITTERS') && (
+              activeView === 'SPLITTERS' ||
+              activeView === 'USERS') && (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-[#1e3a5f] bg-[#0c1c30]/95 p-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <button
@@ -3688,7 +4279,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         : 'bg-[#132842] text-slate-300 hover:text-white'
                     }`}
                   >
-                    Zones ({db.zones.length})
+                    Zones ({visibleZones.length})
                   </button>
                   <button
                     type="button"
@@ -3699,7 +4290,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         : 'bg-[#132842] text-slate-300 hover:text-white'
                     }`}
                   >
-                    Sectors ({(db.sectors || []).length})
+                    Sectors / RK ({visibleSectors.length})
                   </button>
                   <button
                     type="button"
@@ -3710,12 +4301,25 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         : 'bg-[#132842] text-slate-300 hover:text-white'
                     }`}
                   >
-                    Splitters / ODP ({db.odbs.length})
+                    Splitters / ODP ({visibleOdbs.length})
                   </button>
+                  {isAdminUser && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveView('USERS')}
+                      className={`rounded px-3.5 py-2 text-xs font-bold transition ${
+                        activeView === 'USERS'
+                          ? 'bg-[#0275d8] text-white shadow'
+                          : 'bg-[#132842] text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      Users &amp; Hak Akses ({appUsers.length})
+                    </button>
+                  )}
                 </div>
 
                 <div className="text-[11px] text-emerald-300">
-                  ✓ Otomatis tersinkronisasi ke Database SQL &amp; Menu Authorize (Add) ONU
+                  ✓ Otomatis tersinkronisasi ke Database SQL &amp; Hak Akses User
                 </div>
               </div>
             )}
@@ -3774,7 +4378,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#1e3a5f]/70">
-                      {db.zones.filter((z) => {
+                      {visibleZones.filter((z) => {
                         if (!zoneSearch.trim()) return true;
                         const q = zoneSearch.toLowerCase();
                         return (
@@ -3788,13 +4392,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             colSpan={9}
                             className="px-4 py-8 text-center text-slate-400"
                           >
-                            Belum ada Zone terdaftar. Klik tombol{' '}
+                            Belum ada Zone terdaftar atau di-assign. Klik tombol{' '}
                             <strong className="text-emerald-400">+ Add Zone</strong>{' '}
-                            untuk membuat Zone pertama Anda.
+                            untuk membuat Zone baru.
                           </td>
                         </tr>
                       ) : (
-                        db.zones
+                        visibleZones
                           .filter((z) => {
                             if (!zoneSearch.trim()) return true;
                             const q = zoneSearch.toLowerCase();
@@ -4136,7 +4740,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#1e3a5f]/70">
-                      {(db.sectors || []).filter((s) => {
+                      {visibleSectors.filter((s) => {
                         if (!sectorSearch.trim()) return true;
                         const q = sectorSearch.toLowerCase();
                         return (
@@ -4149,13 +4753,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             colSpan={9}
                             className="px-4 py-8 text-center text-slate-400"
                           >
-                            Belum ada Sector terdaftar. Klik tombol{' '}
+                            Belum ada Sector / RK terdaftar atau di-assign. Klik tombol{' '}
                             <strong className="text-emerald-400">+ Add Sector</strong>{' '}
                             untuk membuat Sector baru.
                           </td>
                         </tr>
                       ) : (
-                        (db.sectors || [])
+                        visibleSectors
                           .filter((s) => {
                             if (!sectorSearch.trim()) return true;
                             const q = sectorSearch.toLowerCase();
@@ -4550,7 +5154,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#1e3a5f]/70">
-                      {db.odbs.filter((o) => {
+                      {visibleOdbs.filter((o) => {
                         if (!splitterSearch.trim()) return true;
                         const q = splitterSearch.toLowerCase();
                         return (
@@ -4563,7 +5167,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             colSpan={9}
                             className="px-4 py-8 text-center text-slate-400"
                           >
-                            Belum ada Splitter (ODP/ODB) terdaftar. Klik tombol{' '}
+                            Belum ada Splitter (ODP/ODB) terdaftar atau di-assign. Klik tombol{' '}
                             <strong className="text-emerald-400">
                               + Add Splitter (ODP)
                             </strong>{' '}
@@ -4571,7 +5175,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           </td>
                         </tr>
                       ) : (
-                        db.odbs
+                        visibleOdbs
                           .filter((o) => {
                             if (!splitterSearch.trim()) return true;
                             const q = splitterSearch.toLowerCase();
@@ -4937,6 +5541,851 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             className="rounded bg-[#5cb85c] px-4 py-1.5 font-bold text-white hover:bg-[#4cae4c]"
                           >
                             Save Splitter (ODP)
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ===============================================================
+                10D: USER MANAGEMENT & ACCESS ASSIGNMENT (OLT, ZONE & RK/ODP)
+               =============================================================== */}
+            {activeView === 'USERS' && (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-bold text-white">
+                      User Management &amp; Hak Akses (OLT, Zone &amp; RK / Splitter)
+                    </h2>
+                    <p className="text-xs text-slate-300">
+                      Kelola akun pengguna dan tentukan OLT mana saja, Zone mana saja, serta RK (Sector &amp; Splitter/ODP) mana saja yang ditampilkan untuk setiap user.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      value={userSearch}
+                      onChange={(e) => setUserSearch(e.target.value)}
+                      placeholder="Cari Username, Nama, Role..."
+                      className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                    />
+                    {isAdminUser && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingUser(null);
+                          setUserFormUsername('');
+                          setUserFormFullName('');
+                          setUserFormEmail('');
+                          setUserFormPassword('jetcyber123');
+                          setUserFormRole('OPERATOR');
+                          setUserFormActive(true);
+                          setUserFormAllOlts(false);
+                          setUserFormOltIds(
+                            db.olts[0]?.id ? [db.olts[0].id] : []
+                          );
+                          setUserFormAllZones(false);
+                          setUserFormZoneIds(
+                            db.zones[0]?.id ? [db.zones[0].id] : []
+                          );
+                          setUserFormAllRks(false);
+                          setUserFormSectorIds([]);
+                          setUserFormOdbIds([]);
+                          setShowUserModal(true);
+                        }}
+                        className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        Add User &amp; Assign Akses
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+                  <table className="w-full text-left text-xs">
+                    <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
+                      <tr>
+                        <th className="px-4 py-3">ID</th>
+                        <th className="px-4 py-3">Username &amp; Nama</th>
+                        <th className="px-4 py-3">Role &amp; Status</th>
+                        <th className="px-4 py-3">Assigned OLTs</th>
+                        <th className="px-4 py-3">Assigned Zones</th>
+                        <th className="px-4 py-3">
+                          Assigned RK (Sector &amp; Splitter/ODP)
+                        </th>
+                        <th className="px-4 py-3">Last Login (WIB)</th>
+                        <th className="px-4 py-3 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#1e3a5f]/70">
+                      {appUsers
+                        .filter((u) => {
+                          if (!userSearch.trim()) return true;
+                          const q = userSearch.toLowerCase();
+                          return (
+                            u.username.toLowerCase().includes(q) ||
+                            u.full_name.toLowerCase().includes(q) ||
+                            u.email.toLowerCase().includes(q) ||
+                            u.role.toLowerCase().includes(q)
+                          );
+                        })
+                        .map((u) => {
+                          const assignedOltNames = u.access_all_olts
+                            ? ['Semua OLT']
+                            : db.olts
+                                .filter((o) =>
+                                  (u.allowed_olt_ids || []).includes(o.id)
+                                )
+                                .map((o) => o.name);
+                          const assignedZoneNames = u.access_all_zones
+                            ? ['Semua Zone']
+                            : db.zones
+                                .filter((z) =>
+                                  (u.allowed_zone_ids || []).includes(z.id)
+                                )
+                                .map((z) => z.name);
+                          const assignedSectorNames = (db.sectors || [])
+                            .filter((s) =>
+                              (u.allowed_sector_ids || []).includes(s.id)
+                            )
+                            .map((s) => s.name);
+                          const assignedOdbNames = db.odbs
+                            .filter((o) =>
+                              (u.allowed_odb_ids || []).includes(o.id)
+                            )
+                            .map((o) => o.name);
+                          const combinedRkNames = [
+                            ...assignedSectorNames.map((n) => `RK: ${n}`),
+                            ...assignedOdbNames.map((n) => `ODP: ${n}`),
+                          ];
+
+                          return (
+                            <tr key={u.id} className="hover:bg-[#132842]/60">
+                              <td className="px-4 py-3 font-mono text-white">
+                                {u.id}
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="font-bold text-white">
+                                  {u.username}{' '}
+                                  {u.id === currentUser.id && (
+                                    <span className="ml-1 rounded bg-emerald-500/20 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
+                                      Aktif (Anda)
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-slate-300">
+                                  {u.full_name} · {u.email}
+                                </div>
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span
+                                    className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold ${
+                                      u.role === 'ADMIN'
+                                        ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                                        : u.role === 'OPERATOR'
+                                        ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                                        : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                    }`}
+                                  >
+                                    {u.role}
+                                  </span>
+                                  <span
+                                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                      u.is_active
+                                        ? 'bg-emerald-950 text-emerald-300 border border-emerald-600/40'
+                                        : 'bg-red-950 text-red-300 border border-red-600/40'
+                                    }`}
+                                  >
+                                    {u.is_active ? 'Active' : 'Disabled'}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="px-4 py-3">
+                                {u.access_all_olts ? (
+                                  <span className="rounded bg-emerald-950/90 border border-emerald-600/40 px-2 py-0.5 font-mono text-[11px] text-emerald-300">
+                                    Semua OLT ({db.olts.length})
+                                  </span>
+                                ) : assignedOltNames.length === 0 ? (
+                                  <span className="text-red-400">
+                                    0 OLT (Belum di-assign)
+                                  </span>
+                                ) : (
+                                  <div className="flex flex-wrap gap-1">
+                                    {assignedOltNames.map((n, idx) => (
+                                      <span
+                                        key={idx}
+                                        className="rounded bg-sky-950/90 border border-sky-600/40 px-2 py-0.5 font-mono text-[10px] text-sky-300"
+                                      >
+                                        {n}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-4 py-3">
+                                {u.access_all_zones ? (
+                                  <span className="rounded bg-emerald-950/90 border border-emerald-600/40 px-2 py-0.5 font-mono text-[11px] text-emerald-300">
+                                    Semua Zone ({db.zones.length})
+                                  </span>
+                                ) : assignedZoneNames.length === 0 ? (
+                                  <span className="text-red-400">
+                                    0 Zone (Belum di-assign)
+                                  </span>
+                                ) : (
+                                  <div className="flex flex-wrap gap-1">
+                                    {assignedZoneNames.map((n, idx) => (
+                                      <span
+                                        key={idx}
+                                        className="rounded bg-amber-950/90 border border-amber-600/40 px-2 py-0.5 font-mono text-[10px] text-amber-300"
+                                      >
+                                        {n}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-4 py-3">
+                                {u.access_all_rks ? (
+                                  <span className="rounded bg-emerald-950/90 border border-emerald-600/40 px-2 py-0.5 font-mono text-[11px] text-emerald-300">
+                                    Semua RK / Sector &amp; ODP
+                                  </span>
+                                ) : combinedRkNames.length === 0 ? (
+                                  <span className="text-red-400">
+                                    0 RK / ODP (Belum di-assign)
+                                  </span>
+                                ) : (
+                                  <div className="flex flex-wrap gap-1">
+                                    {combinedRkNames.slice(0, 4).map((n, idx) => (
+                                      <span
+                                        key={idx}
+                                        className="rounded bg-indigo-950/90 border border-indigo-500/40 px-2 py-0.5 font-mono text-[10px] text-indigo-300"
+                                      >
+                                        {n}
+                                      </span>
+                                    ))}
+                                    {combinedRkNames.length > 4 && (
+                                      <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-300">
+                                        +{combinedRkNames.length - 4} lainnya
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-4 py-3 font-mono text-[11px] text-slate-300">
+                                {u.last_login_at || '-'}
+                              </td>
+                              <td className="px-4 py-3 text-right">
+                                <div className="inline-flex items-center gap-1.5">
+                                  {u.id !== currentUser.id && u.is_active && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        void handleAdminSwitchUser(u);
+                                      }}
+                                      className="rounded bg-emerald-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-emerald-600"
+                                      title="Uji tampilan aplikasi menggunakan akun user ini"
+                                    >
+                                      Switch User
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingUser(u);
+                                      setUserFormUsername(u.username);
+                                      setUserFormFullName(u.full_name);
+                                      setUserFormEmail(u.email);
+                                      setUserFormPassword(u.password);
+                                      setUserFormRole(u.role);
+                                      setUserFormActive(u.is_active);
+                                      setUserFormAllOlts(u.access_all_olts);
+                                      setUserFormOltIds(u.allowed_olt_ids || []);
+                                      setUserFormAllZones(u.access_all_zones);
+                                      setUserFormZoneIds(
+                                        u.allowed_zone_ids || []
+                                      );
+                                      setUserFormAllRks(u.access_all_rks);
+                                      setUserFormSectorIds(
+                                        u.allowed_sector_ids || []
+                                      );
+                                      setUserFormOdbIds(u.allowed_odb_ids || []);
+                                      setShowUserModal(true);
+                                    }}
+                                    className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#025aa5]"
+                                  >
+                                    Edit &amp; Assign
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (u.id === currentUser.id) {
+                                        showToast(
+                                          '⚠ Tidak dapat menghapus akun yang sedang digunakan untuk login!'
+                                        );
+                                        return;
+                                      }
+                                      setDb((prev) => ({
+                                        ...prev,
+                                        users: (
+                                          prev.users || DEFAULT_APP_USERS
+                                        ).filter((item) => item.id !== u.id),
+                                      }));
+                                      showToast(`User "${u.username}" dihapus.`);
+                                    }}
+                                    className={`rounded p-1 transition ${
+                                      u.id === currentUser.id
+                                        ? 'cursor-not-allowed bg-slate-700/70 text-slate-400'
+                                        : 'bg-[#d9534f] text-white hover:bg-[#c9302c]'
+                                    }`}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Add / Edit User & Assign OLT / Zone / RK Modal */}
+                {showUserModal && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
+                    <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+                      <div className="mb-4 flex items-center justify-between border-b border-slate-700 pb-3">
+                        <div>
+                          <h3 className="text-base font-bold text-white">
+                            {editingUser
+                              ? `Edit User & Assign Hak Akses — ${editingUser.username}`
+                              : 'Tambah User Baru & Assign OLT, Zone, RK'}
+                          </h3>
+                          <p className="text-[11px] text-slate-400">
+                            Pilih OLT, Zone, dan RK (Sector / Splitter ODP) yang diizinkan tampil untuk user ini.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShowUserModal(false)}
+                          className="text-slate-400 hover:text-white"
+                        >
+                          <X className="h-5 w-5" />
+                        </button>
+                      </div>
+
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          if (!userFormUsername.trim()) return;
+                          const cleanUsername = userFormUsername
+                            .trim()
+                            .toLowerCase();
+                          const nowWib = formatJakartaDateTime();
+
+                          if (editingUser) {
+                            setDb((prev) => {
+                              const currentList =
+                                Array.isArray(prev.users) &&
+                                prev.users.length > 0
+                                  ? prev.users
+                                  : DEFAULT_APP_USERS;
+                              return {
+                                ...prev,
+                                users: currentList.map((u) =>
+                                  u.id === editingUser.id
+                                    ? {
+                                        ...u,
+                                        username: cleanUsername,
+                                        full_name:
+                                          userFormFullName.trim() ||
+                                          cleanUsername,
+                                        email:
+                                          userFormEmail.trim() ||
+                                          `${cleanUsername}@jetcybernet.id`,
+                                        password:
+                                          userFormPassword || u.password,
+                                        role: userFormRole,
+                                        is_active: userFormActive,
+                                        access_all_olts: userFormAllOlts,
+                                        allowed_olt_ids: userFormOltIds,
+                                        access_all_zones: userFormAllZones,
+                                        allowed_zone_ids: userFormZoneIds,
+                                        access_all_rks: userFormAllRks,
+                                        allowed_sector_ids: userFormSectorIds,
+                                        allowed_odb_ids: userFormOdbIds,
+                                      }
+                                    : u
+                                ),
+                              };
+                            });
+                            showToast(
+                              `✓ Hak akses OLT, Zone & RK untuk user "${cleanUsername}" berhasil diperbarui!`
+                            );
+                          } else {
+                            const nextId =
+                              Math.max(0, ...appUsers.map((u) => u.id)) + 1;
+                            const newUser: AppUserRecord = {
+                              id: nextId,
+                              username: cleanUsername,
+                              full_name:
+                                userFormFullName.trim() || cleanUsername,
+                              email:
+                                userFormEmail.trim() ||
+                                `${cleanUsername}@jetcybernet.id`,
+                              password: userFormPassword || 'jetcyber123',
+                              role: userFormRole,
+                              is_active: userFormActive,
+                              access_all_olts: userFormAllOlts,
+                              allowed_olt_ids: userFormOltIds,
+                              access_all_zones: userFormAllZones,
+                              allowed_zone_ids: userFormZoneIds,
+                              access_all_rks: userFormAllRks,
+                              allowed_sector_ids: userFormSectorIds,
+                              allowed_odb_ids: userFormOdbIds,
+                              last_login_at: null,
+                              created_at: `${nowWib} WIB`,
+                            };
+                            setDb((prev) => {
+                              const currentList =
+                                Array.isArray(prev.users) &&
+                                prev.users.length > 0
+                                  ? prev.users
+                                  : DEFAULT_APP_USERS;
+                              return {
+                                ...prev,
+                                users: [...currentList, newUser],
+                              };
+                            });
+                            showToast(
+                              `✓ User "${cleanUsername}" berhasil ditambahkan beserta hak akses OLT, Zone & RK!`
+                            );
+                          }
+                          setShowUserModal(false);
+                        }}
+                        className="space-y-4"
+                      >
+                        {/* Basic Account Details */}
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Username *
+                            </label>
+                            <input
+                              type="text"
+                              required
+                              value={userFormUsername}
+                              onChange={(e) =>
+                                setUserFormUsername(e.target.value)
+                              }
+                              placeholder="contoh: teknisi_lebak"
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Nama Lengkap *
+                            </label>
+                            <input
+                              type="text"
+                              required
+                              value={userFormFullName}
+                              onChange={(e) =>
+                                setUserFormFullName(e.target.value)
+                              }
+                              placeholder="contoh: Teknisi Area Lebak"
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Email
+                            </label>
+                            <input
+                              type="text"
+                              value={userFormEmail}
+                              onChange={(e) => setUserFormEmail(e.target.value)}
+                              placeholder="teknisi@jetcybernet.id"
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Password *
+                            </label>
+                            <input
+                              type="text"
+                              required
+                              value={userFormPassword}
+                              onChange={(e) =>
+                                setUserFormPassword(e.target.value)
+                              }
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-emerald-300"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-bold text-slate-200">
+                              Role
+                            </label>
+                            <select
+                              value={userFormRole}
+                              onChange={(e) => {
+                                const nextRole = e.target.value as
+                                  | 'ADMIN'
+                                  | 'OPERATOR'
+                                  | 'TECHNICIAN'
+                                  | 'VIEWER';
+                                setUserFormRole(nextRole);
+                                if (nextRole === 'ADMIN') {
+                                  setUserFormAllOlts(true);
+                                  setUserFormAllZones(true);
+                                  setUserFormAllRks(true);
+                                }
+                              }}
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-bold text-white"
+                            >
+                              <option value="ADMIN">ADMIN (Full Access)</option>
+                              <option value="OPERATOR">
+                                OPERATOR (NOC / Provisioning)
+                              </option>
+                              <option value="TECHNICIAN">
+                                TECHNICIAN (Teknisi Area / RK)
+                              </option>
+                              <option value="VIEWER">
+                                VIEWER (Monitoring Saja)
+                              </option>
+                            </select>
+                          </div>
+                          <div className="flex items-end pb-1.5">
+                            <label className="flex cursor-pointer items-center gap-2 font-bold text-white">
+                              <input
+                                type="checkbox"
+                                checked={userFormActive}
+                                onChange={(e) =>
+                                  setUserFormActive(e.target.checked)
+                                }
+                                className="h-4 w-4 rounded border-slate-600"
+                              />
+                              Akun Aktif (Dapat Login)
+                            </label>
+                          </div>
+                        </div>
+
+                        {/* 1. ASSIGN OLT */}
+                        <div className="rounded-lg border border-sky-500/40 bg-[#0d192b] p-3.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/80 pb-2">
+                            <div>
+                              <span className="font-bold text-sky-300">
+                                1. Assign OLT yang Ditampilkan
+                              </span>
+                              <p className="text-[11px] text-slate-400">
+                                Pilih OLT mana saja yang boleh dilihat dan dikelola oleh user ini.
+                              </p>
+                            </div>
+                            <label className="flex cursor-pointer items-center gap-2 rounded bg-sky-950/80 border border-sky-500/40 px-2.5 py-1 font-bold text-sky-200">
+                              <input
+                                type="checkbox"
+                                checked={userFormAllOlts}
+                                onChange={(e) =>
+                                  setUserFormAllOlts(e.target.checked)
+                                }
+                              />
+                              Tampilkan Semua OLT
+                            </label>
+                          </div>
+
+                          {!userFormAllOlts && (
+                            <div className="mt-2.5 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                              {db.olts.length === 0 ? (
+                                <div className="text-slate-400">
+                                  Belum ada OLT terdaftar di database.
+                                </div>
+                              ) : (
+                                db.olts.map((o) => {
+                                  const checked = userFormOltIds.includes(o.id);
+                                  return (
+                                    <label
+                                      key={o.id}
+                                      className={`flex cursor-pointer items-center gap-2 rounded border px-3 py-2 transition ${
+                                        checked
+                                          ? 'border-sky-500 bg-sky-950/60 text-white'
+                                          : 'border-slate-700 bg-[#132238] text-slate-300'
+                                      }`}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={(e) => {
+                                          if (e.target.checked) {
+                                            setUserFormOltIds((prev) => [
+                                              ...prev,
+                                              o.id,
+                                            ]);
+                                          } else {
+                                            setUserFormOltIds((prev) =>
+                                              prev.filter((id) => id !== o.id)
+                                            );
+                                          }
+                                        }}
+                                      />
+                                      <div>
+                                        <div className="font-bold">
+                                          {o.id} - {o.name}
+                                        </div>
+                                        <div className="font-mono text-[10px] text-slate-400">
+                                          {o.ip_address} · {o.hardware_model}
+                                        </div>
+                                      </div>
+                                    </label>
+                                  );
+                                })
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 2. ASSIGN ZONE */}
+                        <div className="rounded-lg border border-amber-500/40 bg-[#0d192b] p-3.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/80 pb-2">
+                            <div>
+                              <span className="font-bold text-amber-300">
+                                2. Assign Zone yang Ditampilkan
+                              </span>
+                              <p className="text-[11px] text-slate-400">
+                                Pilih area Zone mana saja yang akan ditampilkan pada akun user ini.
+                              </p>
+                            </div>
+                            <label className="flex cursor-pointer items-center gap-2 rounded bg-amber-950/80 border border-amber-500/40 px-2.5 py-1 font-bold text-amber-200">
+                              <input
+                                type="checkbox"
+                                checked={userFormAllZones}
+                                onChange={(e) =>
+                                  setUserFormAllZones(e.target.checked)
+                                }
+                              />
+                              Tampilkan Semua Zone
+                            </label>
+                          </div>
+
+                          {!userFormAllZones && (
+                            <div className="mt-2.5 grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3">
+                              {db.zones.length === 0 ? (
+                                <div className="text-slate-400">
+                                  Belum ada Zone terdaftar. Tambahkan Zone terlebih dahulu di menu Settings -&gt; Zones.
+                                </div>
+                              ) : (
+                                db.zones.map((z) => {
+                                  const checked = userFormZoneIds.includes(
+                                    z.id
+                                  );
+                                  return (
+                                    <label
+                                      key={z.id}
+                                      className={`flex cursor-pointer items-center gap-2 rounded border px-3 py-2 transition ${
+                                        checked
+                                          ? 'border-amber-500 bg-amber-950/60 text-white'
+                                          : 'border-slate-700 bg-[#132238] text-slate-300'
+                                      }`}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={(e) => {
+                                          if (e.target.checked) {
+                                            setUserFormZoneIds((prev) => [
+                                              ...prev,
+                                              z.id,
+                                            ]);
+                                          } else {
+                                            setUserFormZoneIds((prev) =>
+                                              prev.filter((id) => id !== z.id)
+                                            );
+                                          }
+                                        }}
+                                      />
+                                      <div>
+                                        <div className="font-bold">{z.name}</div>
+                                        <div className="font-mono text-[10px] text-slate-400">
+                                          {z.code} · {z.city_district}
+                                        </div>
+                                      </div>
+                                    </label>
+                                  );
+                                })
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 3. ASSIGN RK (SECTOR & SPLITTER / ODP) */}
+                        <div className="rounded-lg border border-emerald-500/40 bg-[#0d192b] p-3.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/80 pb-2">
+                            <div>
+                              <span className="font-bold text-emerald-300">
+                                3. Assign RK (Sector &amp; Splitter / ODP) yang Ditampilkan
+                              </span>
+                              <p className="text-[11px] text-slate-400">
+                                Pilih titik RK / Sector atau Splitter (ODP) spesifik yang akan ditampilkan untuk user ini.
+                              </p>
+                            </div>
+                            <label className="flex cursor-pointer items-center gap-2 rounded bg-emerald-950/80 border border-emerald-500/40 px-2.5 py-1 font-bold text-emerald-200">
+                              <input
+                                type="checkbox"
+                                checked={userFormAllRks}
+                                onChange={(e) =>
+                                  setUserFormAllRks(e.target.checked)
+                                }
+                              />
+                              Tampilkan Semua RK / Sector &amp; ODP
+                            </label>
+                          </div>
+
+                          {!userFormAllRks && (
+                            <div className="mt-2.5 space-y-3">
+                              {/* RK / Sectors */}
+                              <div>
+                                <div className="mb-1.5 font-bold text-slate-300">
+                                  A. Pilih RK / Sector ({(db.sectors || []).length}):
+                                </div>
+                                {(db.sectors || []).length === 0 ? (
+                                  <div className="text-slate-400">
+                                    Belum ada Sector / RK terdaftar.
+                                  </div>
+                                ) : (
+                                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3">
+                                    {(db.sectors || []).map((s) => {
+                                      const checked =
+                                        userFormSectorIds.includes(s.id);
+                                      const zObj = db.zones.find(
+                                        (z) => z.id === s.zone_id
+                                      );
+                                      return (
+                                        <label
+                                          key={s.id}
+                                          className={`flex cursor-pointer items-center gap-2 rounded border px-2.5 py-1.5 transition ${
+                                            checked
+                                              ? 'border-emerald-500 bg-emerald-950/60 text-white'
+                                              : 'border-slate-700 bg-[#132238] text-slate-300'
+                                          }`}
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={checked}
+                                            onChange={(e) => {
+                                              if (e.target.checked) {
+                                                setUserFormSectorIds((prev) => [
+                                                  ...prev,
+                                                  s.id,
+                                                ]);
+                                              } else {
+                                                setUserFormSectorIds((prev) =>
+                                                  prev.filter(
+                                                    (id) => id !== s.id
+                                                  )
+                                                );
+                                              }
+                                            }}
+                                          />
+                                          <div>
+                                            <div className="font-bold">
+                                              {s.name}
+                                            </div>
+                                            <div className="font-mono text-[10px] text-slate-400">
+                                              {s.code} · Zone:{' '}
+                                              {zObj ? zObj.name : 'All'}
+                                            </div>
+                                          </div>
+                                        </label>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Splitters / ODP */}
+                              <div>
+                                <div className="mb-1.5 font-bold text-slate-300">
+                                  B. Pilih Splitter / ODP ({db.odbs.length}):
+                                </div>
+                                {db.odbs.length === 0 ? (
+                                  <div className="text-slate-400">
+                                    Belum ada Splitter / ODP terdaftar.
+                                  </div>
+                                ) : (
+                                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3">
+                                    {db.odbs.map((o) => {
+                                      const checked = userFormOdbIds.includes(
+                                        o.id
+                                      );
+                                      const zObj = db.zones.find(
+                                        (z) => z.id === o.zone_id
+                                      );
+                                      return (
+                                        <label
+                                          key={o.id}
+                                          className={`flex cursor-pointer items-center gap-2 rounded border px-2.5 py-1.5 transition ${
+                                            checked
+                                              ? 'border-emerald-500 bg-emerald-950/60 text-white'
+                                              : 'border-slate-700 bg-[#132238] text-slate-300'
+                                          }`}
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={checked}
+                                            onChange={(e) => {
+                                              if (e.target.checked) {
+                                                setUserFormOdbIds((prev) => [
+                                                  ...prev,
+                                                  o.id,
+                                                ]);
+                                              } else {
+                                                setUserFormOdbIds((prev) =>
+                                                  prev.filter(
+                                                    (id) => id !== o.id
+                                                  )
+                                                );
+                                              }
+                                            }}
+                                          />
+                                          <div>
+                                            <div className="font-bold">
+                                              {o.name} ({o.splitter_ratio})
+                                            </div>
+                                            <div className="font-mono text-[10px] text-slate-400">
+                                              {o.pole_number} · Zone:{' '}
+                                              {zObj ? zObj.name : '-'}
+                                            </div>
+                                          </div>
+                                        </label>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex justify-end gap-2 border-t border-slate-700 pt-3">
+                          <button
+                            type="button"
+                            onClick={() => setShowUserModal(false)}
+                            className="px-3 py-1.5 text-slate-300 hover:text-white"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            className="rounded bg-[#5cb85c] px-4 py-1.5 font-bold text-white hover:bg-[#4cae4c]"
+                          >
+                            Simpan User &amp; Hak Akses
                           </button>
                         </div>
                       </form>

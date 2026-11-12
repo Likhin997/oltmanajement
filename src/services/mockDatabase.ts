@@ -282,6 +282,64 @@ export interface ProvisioningLogRecord {
   created_at: string;
 }
 
+export interface AppUserRecord {
+  id: number;
+  username: string;
+  full_name: string;
+  email: string;
+  password: string;
+  role: 'ADMIN' | 'OPERATOR' | 'TECHNICIAN' | 'VIEWER';
+  is_active: boolean;
+  access_all_olts: boolean;
+  allowed_olt_ids: number[];
+  access_all_zones: boolean;
+  allowed_zone_ids: number[];
+  access_all_rks: boolean;
+  allowed_sector_ids: number[];
+  allowed_odb_ids: number[];
+  last_login_at: string | null;
+  created_at: string;
+}
+
+export const DEFAULT_APP_USERS: AppUserRecord[] = [
+  {
+    id: 1,
+    username: 'admin',
+    full_name: 'Super Administrator',
+    email: 'admin@jetcybernet.id',
+    password: 'admin',
+    role: 'ADMIN',
+    is_active: true,
+    access_all_olts: true,
+    allowed_olt_ids: [],
+    access_all_zones: true,
+    allowed_zone_ids: [],
+    access_all_rks: true,
+    allowed_sector_ids: [],
+    allowed_odb_ids: [],
+    last_login_at: null,
+    created_at: '2025-01-01 00:00:00',
+  },
+  {
+    id: 2,
+    username: 'likhin',
+    full_name: 'Mohammad Muslikhin (Admin)',
+    email: 'mohammadmuslikhin97@gmail.com',
+    password: '11013009',
+    role: 'ADMIN',
+    is_active: true,
+    access_all_olts: true,
+    allowed_olt_ids: [],
+    access_all_zones: true,
+    allowed_zone_ids: [],
+    access_all_rks: true,
+    allowed_sector_ids: [],
+    allowed_odb_ids: [],
+    last_login_at: null,
+    created_at: '2025-01-01 00:00:00',
+  },
+];
+
 export interface SmartOltDatabaseState {
   olts: OltRecord[];
   olt_cards: OltCardRecord[];
@@ -297,6 +355,7 @@ export interface SmartOltDatabaseState {
   tasks: TaskRecord[];
   onus: OnuRecord[];
   provisioning_logs: ProvisioningLogRecord[];
+  users?: AppUserRecord[];
 }
 
 /**
@@ -391,6 +450,7 @@ export const INITIAL_DB_STATE: SmartOltDatabaseState = {
   tasks: [],
   onus: [],
   provisioning_logs: [],
+  users: DEFAULT_APP_USERS,
 };
 
 /**
