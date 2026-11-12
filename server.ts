@@ -129,6 +129,21 @@ sqliteDb.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires
     ON auth_sessions (expires_at);
+
+  CREATE TABLE IF NOT EXISTS backup_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at_wib TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    olts_count INTEGER NOT NULL DEFAULT 0,
+    onus_count INTEGER NOT NULL DEFAULT 0,
+    zones_count INTEGER NOT NULL DEFAULT 0,
+    rks_count INTEGER NOT NULL DEFAULT 0,
+    users_count INTEGER NOT NULL DEFAULT 0,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    json_payload TEXT NOT NULL
+  );
 `);
 
 const POSTGRES_SCHEMA_SQL = `
@@ -2216,6 +2231,338 @@ app.post('/api/database/reset', async (_req, res) => {
     res.json({ ok: true, state: INITIAL_DB_STATE });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ============================================================================
+// BACKUP & RESTORE ENGINE (/api/backup/*)
+// ============================================================================
+interface BackupSnapshotRow {
+  id: number;
+  label: string;
+  created_by: string;
+  created_at_wib: string;
+  created_at_ms: number;
+  olts_count: number;
+  onus_count: number;
+  zones_count: number;
+  rks_count: number;
+  users_count: number;
+  size_bytes: number;
+  json_payload?: string;
+}
+
+function getBackupSnapshotsMetaList(): Omit<BackupSnapshotRow, 'json_payload'>[] {
+  return sqliteDb
+    .prepare(
+      `SELECT id, label, created_by, created_at_wib, created_at_ms,
+              olts_count, onus_count, zones_count, rks_count, users_count, size_bytes
+       FROM backup_snapshots
+       ORDER BY created_at_ms DESC
+       LIMIT 50`
+    )
+    .all() as Omit<BackupSnapshotRow, 'json_payload'>[];
+}
+
+function insertBackupSnapshot(
+  state: SmartOltDatabaseState,
+  label: string,
+  createdBy: string
+): Omit<BackupSnapshotRow, 'json_payload'> {
+  const nowMs = Date.now();
+  const jkt = new Date(nowMs + 7 * 3600 * 1000);
+  const nowWib = `${jkt.getUTCFullYear()}-${String(
+    jkt.getUTCMonth() + 1
+  ).padStart(2, '0')}-${String(jkt.getUTCDate()).padStart(2, '0')} ${String(
+    jkt.getUTCHours()
+  ).padStart(2, '0')}:${String(jkt.getUTCMinutes()).padStart(2, '0')}:${String(
+    jkt.getUTCSeconds()
+  ).padStart(2, '0')} WIB`;
+
+  const payloadStr = JSON.stringify(state);
+  const sizeBytes = Buffer.byteLength(payloadStr, 'utf8');
+  const oltsCount = Array.isArray(state.olts) ? state.olts.length : 0;
+  const onusCount = Array.isArray(state.onus) ? state.onus.length : 0;
+  const zonesCount = Array.isArray(state.zones) ? state.zones.length : 0;
+  const rksCount =
+    (Array.isArray(state.sectors) ? state.sectors.length : 0) +
+    (Array.isArray(state.odbs) ? state.odbs.length : 0);
+  const usersCount = Array.isArray(state.users)
+    ? state.users.length
+    : DEFAULT_APP_USERS.length;
+
+  const info = sqliteDb
+    .prepare(
+      `INSERT INTO backup_snapshots (
+        label, created_by, created_at_wib, created_at_ms,
+        olts_count, onus_count, zones_count, rks_count, users_count, size_bytes, json_payload
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      label,
+      createdBy,
+      nowWib,
+      nowMs,
+      oltsCount,
+      onusCount,
+      zonesCount,
+      rksCount,
+      usersCount,
+      sizeBytes,
+      payloadStr
+    );
+
+  return {
+    id: Number(info.lastInsertRowid),
+    label,
+    created_by: createdBy,
+    created_at_wib: nowWib,
+    created_at_ms: nowMs,
+    olts_count: oltsCount,
+    onus_count: onusCount,
+    zones_count: zonesCount,
+    rks_count: rksCount,
+    users_count: usersCount,
+    size_bytes: sizeBytes,
+  };
+}
+
+// GET /api/backup/snapshots — List server backup snapshots
+app.get('/api/backup/snapshots', async (_req, res) => {
+  try {
+    let snapshots = getBackupSnapshotsMetaList();
+    if (snapshots.length === 0) {
+      const currentState = await loadDatabaseState();
+      insertBackupSnapshot(
+        currentState,
+        'Initial System Snapshot (Auto)',
+        'system'
+      );
+      snapshots = getBackupSnapshotsMetaList();
+    }
+    res.json({ ok: true, snapshots });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// POST /api/backup/snapshots — Create a new server backup snapshot
+app.post('/api/backup/snapshots', async (req, res) => {
+  try {
+    const authUser = (req as express.Request & { authUser?: AppUserRecord }).authUser;
+    const { label } = (req.body || {}) as { label?: string };
+    const state = await loadDatabaseState();
+    const cleanLabel =
+      (label || '').trim() || 'Manual Backup Snapshot';
+    const created = insertBackupSnapshot(
+      state,
+      cleanLabel,
+      authUser?.username || 'admin'
+    );
+    const snapshots = getBackupSnapshotsMetaList();
+    res.json({ ok: true, created, snapshots });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// GET /api/backup/snapshots/:id/download — Download full JSON of a specific snapshot
+app.get('/api/backup/snapshots/:id/download', (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const row = sqliteDb
+      .prepare(`SELECT * FROM backup_snapshots WHERE id = ?`)
+      .get(id) as BackupSnapshotRow | undefined;
+    if (!row || !row.json_payload) {
+      res.status(404).json({ ok: false, error: 'Snapshot tidak ditemukan.' });
+      return;
+    }
+    const state = JSON.parse(row.json_payload) as SmartOltDatabaseState;
+    res.json({
+      ok: true,
+      backup: {
+        app: 'JETCYBERNET-SMARTOLT',
+        version: '2.4',
+        snapshotId: row.id,
+        label: row.label,
+        createdBy: row.created_by,
+        exportedAtWib: row.created_at_wib,
+        state,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// DELETE /api/backup/snapshots/:id — Delete a server backup snapshot
+app.delete('/api/backup/snapshots/:id', (req, res) => {
+  try {
+    const authUser = (req as express.Request & { authUser?: AppUserRecord }).authUser;
+    if (authUser?.role !== 'ADMIN') {
+      res.status(403).json({
+        ok: false,
+        error: 'Hanya Administrator yang dapat menghapus snapshot backup.',
+      });
+      return;
+    }
+    const id = Number(req.params.id);
+    sqliteDb.prepare(`DELETE FROM backup_snapshots WHERE id = ?`).run(id);
+    const snapshots = getBackupSnapshotsMetaList();
+    res.json({ ok: true, snapshots });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// POST /api/backup/restore — Restore database from uploaded backup JSON or server snapshot
+app.post('/api/backup/restore', async (req, res) => {
+  try {
+    const authUser = (req as express.Request & { authUser?: AppUserRecord }).authUser;
+    if (authUser?.role !== 'ADMIN') {
+      res.status(403).json({
+        ok: false,
+        error: 'Hanya Administrator yang memiliki izin untuk melakukan Restore Database.',
+      });
+      return;
+    }
+
+    const { snapshotId, state: uploadedState, mode = 'OVERWRITE' } = (req.body ||
+      {}) as {
+      snapshotId?: number;
+      state?: SmartOltDatabaseState;
+      mode?: 'OVERWRITE' | 'MERGE';
+    };
+
+    const currentState = await loadDatabaseState();
+    let incomingState: SmartOltDatabaseState | null = null;
+
+    if (snapshotId) {
+      const row = sqliteDb
+        .prepare(`SELECT * FROM backup_snapshots WHERE id = ?`)
+        .get(Number(snapshotId)) as BackupSnapshotRow | undefined;
+      if (!row || !row.json_payload) {
+        res.status(404).json({ ok: false, error: 'Snapshot tidak ditemukan.' });
+        return;
+      }
+      incomingState = JSON.parse(row.json_payload) as SmartOltDatabaseState;
+    } else if (uploadedState && Array.isArray(uploadedState.olts)) {
+      incomingState = uploadedState;
+    }
+
+    if (!incomingState || !Array.isArray(incomingState.olts)) {
+      res.status(400).json({
+        ok: false,
+        error: 'Format data backup tidak valid (tabel OLT tidak ditemukan).',
+      });
+      return;
+    }
+
+    // Create automatic safety snapshot before restoring
+    insertBackupSnapshot(
+      currentState,
+      `Auto-Backup sebelum Restore (${mode})`,
+      authUser.username
+    );
+
+    const mergeById = <T extends { id: number }>(
+      existing: T[] = [],
+      incoming: T[] = []
+    ): T[] => {
+      const map = new Map<number, T>();
+      for (const item of existing) map.set(item.id, item);
+      for (const item of incoming) map.set(item.id, item);
+      return Array.from(map.values());
+    };
+
+    const existingUsers =
+      Array.isArray(currentState.users) && currentState.users.length > 0
+        ? currentState.users
+        : DEFAULT_APP_USERS;
+
+    let restoredUsers: AppUserRecord[] = existingUsers;
+    if (Array.isArray(incomingState.users) && incomingState.users.length > 0) {
+      const sanitizedIncomingUsers = incomingState.users.map((u) => {
+        const prev = existingUsers.find((eu) => eu.id === u.id);
+        if (prev && (!u.password || u.password === '••••••••')) {
+          return { ...u, password: prev.password };
+        }
+        return u;
+      });
+      restoredUsers =
+        mode === 'MERGE'
+          ? mergeById(existingUsers, sanitizedIncomingUsers)
+          : sanitizedIncomingUsers;
+    }
+
+    // Ensure the currently logged-in Admin account remains active so they don't lock themselves out
+    if (!restoredUsers.some((u) => u.id === authUser.id && u.is_active)) {
+      restoredUsers = [
+        ...restoredUsers.filter((u) => u.id !== authUser.id),
+        { ...authUser, is_active: true },
+      ];
+    }
+
+    const finalState: SmartOltDatabaseState =
+      mode === 'MERGE'
+        ? {
+            ...currentState,
+            olts: mergeById(currentState.olts, incomingState.olts),
+            olt_cards: mergeById(
+              currentState.olt_cards,
+              incomingState.olt_cards || []
+            ),
+            pon_ports: mergeById(
+              currentState.pon_ports,
+              incomingState.pon_ports || []
+            ),
+            uplink_ports: mergeById(
+              currentState.uplink_ports,
+              incomingState.uplink_ports || []
+            ),
+            vlans: mergeById(currentState.vlans, incomingState.vlans || []),
+            zones: mergeById(currentState.zones, incomingState.zones || []),
+            sectors: mergeById(
+              currentState.sectors || [],
+              incomingState.sectors || []
+            ),
+            odbs: mergeById(currentState.odbs, incomingState.odbs || []),
+            speed_profiles: mergeById(
+              currentState.speed_profiles,
+              incomingState.speed_profiles || []
+            ),
+            onus: mergeById(currentState.onus, incomingState.onus || []),
+            users: restoredUsers,
+            provisioning_logs: mergeById(
+              currentState.provisioning_logs,
+              incomingState.provisioning_logs || []
+            ),
+          }
+        : {
+            ...INITIAL_DB_STATE,
+            ...incomingState,
+            sectors: incomingState.sectors || [],
+            users: restoredUsers,
+          };
+
+    await saveDatabaseState(finalState);
+    const snapshots = getBackupSnapshotsMetaList();
+
+    res.json({
+      ok: true,
+      state: finalState,
+      snapshots,
+      summary: {
+        olts: finalState.olts.length,
+        onus: finalState.onus.length,
+        zones: finalState.zones.length,
+        sectors: (finalState.sectors || []).length,
+        odbs: finalState.odbs.length,
+        users: (finalState.users || []).length,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
 

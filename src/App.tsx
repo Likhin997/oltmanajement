@@ -16,6 +16,7 @@ import {
   SectorRecord,
   OdbRecord,
   AppUserRecord,
+  buildLiveZteRunningConfig,
 } from './services/mockDatabase';
 import {
   parseZteUncfgOutput,
@@ -54,6 +55,22 @@ import {
   Radio,
   Code2,
   X,
+  LayoutDashboard,
+  Server,
+  MapPin,
+  Layers,
+  GitBranch,
+  BarChart3,
+  Activity,
+  ShieldCheck,
+  Users,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Menu,
+  Lock,
+  LogOut,
+  Clock,
+  Database,
 } from 'lucide-react';
 
 import {
@@ -213,10 +230,30 @@ export default function App() {
   const [authorizingOnu, setAuthorizingOnu] = useState<OnuRecord | null>(null);
   const [updatingModeOnu, setUpdatingModeOnu] = useState<OnuRecord | null>(null);
 
-  // Dropdown menus in Top Navbar
+  // Dropdown menus in Top Navbar & Collapsible Sidebar State
   const [openDropdown, setOpenDropdown] = useState<
     'MAP' | 'TASKS' | 'REPORTS' | 'SETTINGS' | null
   >(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('smartolt_sidebar_collapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
+
+  const toggleSidebarCollapse = () => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('smartolt_sidebar_collapsed', next ? '1' : '0');
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
 
   // ==========================================================================
   // BROWSER BACK / FORWARD HISTORY ENGINE (HTML5 pushState + popstate + Root Guard)
@@ -1012,6 +1049,279 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     }
   };
 
+  // ==========================================================================
+  // BACKUP & RESTORE STATE & HANDLERS
+  // ==========================================================================
+  interface BackupSnapshotMeta {
+    id: number;
+    label: string;
+    created_by: string;
+    created_at_wib: string;
+    created_at_ms: number;
+    olts_count: number;
+    onus_count: number;
+    zones_count: number;
+    rks_count: number;
+    users_count: number;
+    size_bytes: number;
+  }
+
+  const [showBackupModal, setShowBackupModal] = useState<boolean>(false);
+  const [backupSnapshots, setBackupSnapshots] = useState<BackupSnapshotMeta[]>([]);
+  const [backupSnapshotLabel, setBackupSnapshotLabel] = useState<string>('');
+  const [backupBusy, setBackupBusy] = useState<boolean>(false);
+  const [restoreMode, setRestoreMode] = useState<'OVERWRITE' | 'MERGE'>('OVERWRITE');
+  const [uploadedBackupState, setUploadedBackupState] =
+    useState<SmartOltDatabaseState | null>(null);
+  const [uploadedBackupFileName, setUploadedBackupFileName] =
+    useState<string>('');
+  const [uploadedBackupMeta, setUploadedBackupMeta] = useState<{
+    exportedAtWib?: string;
+    label?: string;
+  } | null>(null);
+
+  const loadBackupSnapshots = async () => {
+    try {
+      const resp = await fetch('/api/backup/snapshots');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data && Array.isArray(data.snapshots)) {
+        setBackupSnapshots(data.snapshots);
+      }
+    } catch {
+      // Ignore network error
+    }
+  };
+
+  const openBackupRestoreModal = () => {
+    setShowBackupModal(true);
+    void loadBackupSnapshots();
+  };
+
+  const handleDownloadFullBackupJson = () => {
+    const nowWib = formatJakartaDateTime();
+    const safeStamp = nowWib.replace(/[:\s]/g, '-');
+    const payload = {
+      app: 'JETCYBERNET-SMARTOLT',
+      version: '2.4',
+      exportedAtWib: `${nowWib} WIB`,
+      exportedBy: currentUser?.username || 'admin',
+      summary: {
+        olts: db.olts.length,
+        onus: db.onus.length,
+        zones: db.zones.length,
+        sectors: (db.sectors || []).length,
+        odbs: db.odbs.length,
+        vlans: db.vlans.length,
+        users: (db.users || []).length,
+      },
+      state: db,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `jetcybernet-smartolt-backup-${safeStamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(`✓ File Full Backup (.json) berhasil diunduh (${nowWib} WIB).`);
+  };
+
+  const handleDownloadOltCliConfig = (olt: OltRecord) => {
+    const nowWib = formatJakartaDateTime();
+    const safeStamp = nowWib.replace(/[:\s]/g, '-');
+    const safeName = olt.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const cliText = buildLiveZteRunningConfig(db, olt.id);
+    const blob = new Blob([cliText], {
+      type: 'text/plain;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `olt-${safeName}-running-config-${safeStamp}.cfg`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(
+      `✓ Running-Config CLI OLT "${olt.name}" (.cfg) berhasil diunduh.`
+    );
+  };
+
+  const handleCreateServerSnapshot = async () => {
+    setBackupBusy(true);
+    try {
+      const resp = await fetch('/api/backup/snapshots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          label:
+            backupSnapshotLabel.trim() ||
+            `Backup Manual (${formatJakartaDateTime()} WIB)`,
+        }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data && data.ok) {
+        if (Array.isArray(data.snapshots)) {
+          setBackupSnapshots(data.snapshots);
+        }
+        setBackupSnapshotLabel('');
+        showToast('✓ Titik Backup (Snapshot Server) berhasil dibuat!');
+      } else {
+        showToast(data?.error || 'Gagal membuat snapshot backup.');
+      }
+    } catch {
+      showToast('Gagal menghubungi server untuk membuat snapshot.');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleDownloadSnapshotFile = async (snap: BackupSnapshotMeta) => {
+    try {
+      const resp = await fetch(`/api/backup/snapshots/${snap.id}/download`);
+      const data = await resp.json();
+      if (!resp.ok || !data || !data.ok || !data.backup) {
+        showToast(data?.error || 'Gagal mengunduh snapshot.');
+        return;
+      }
+      const blob = new Blob([JSON.stringify(data.backup, null, 2)], {
+        type: 'application/json;charset=utf-8',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `jetcybernet-snapshot-${snap.id}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast(`✓ Snapshot #${snap.id} ("${snap.label}") berhasil diunduh.`);
+    } catch {
+      showToast('Gagal mengunduh file snapshot dari server.');
+    }
+  };
+
+  const handleRestoreFromSnapshot = async (snap: BackupSnapshotMeta) => {
+    setBackupBusy(true);
+    try {
+      const resp = await fetch('/api/backup/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          snapshotId: snap.id,
+          mode: restoreMode,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data || !data.ok || !data.state) {
+        showToast(data?.error || 'Gagal melakukan restore dari snapshot.');
+        return;
+      }
+      setDb(data.state);
+      if (Array.isArray(data.snapshots)) {
+        setBackupSnapshots(data.snapshots);
+      }
+      showToast(
+        `✓ Database berhasil di-restore dari Snapshot "${snap.label}" (${data.summary?.olts || 0} OLT, ${data.summary?.onus || 0} ONU, ${data.summary?.zones || 0} Zone).`
+      );
+    } catch {
+      showToast('Gagal melakukan restore dari server.');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleDeleteSnapshot = async (snapId: number) => {
+    try {
+      const resp = await fetch(`/api/backup/snapshots/${snapId}`, {
+        method: 'DELETE',
+      });
+      const data = await resp.json();
+      if (resp.ok && data && Array.isArray(data.snapshots)) {
+        setBackupSnapshots(data.snapshots);
+        showToast(`Snapshot #${snapId} telah dihapus.`);
+      }
+    } catch {
+      showToast('Gagal menghapus snapshot.');
+    }
+  };
+
+  const handleBackupFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const raw = JSON.parse(String(reader.result || '{}'));
+        const candidateState: SmartOltDatabaseState | null =
+          raw && raw.state && Array.isArray(raw.state.olts)
+            ? raw.state
+            : raw && Array.isArray(raw.olts)
+            ? raw
+            : null;
+        if (!candidateState) {
+          showToast(
+            '✗ File JSON tidak valid: struktur data OLT/ONU tidak ditemukan.'
+          );
+          setUploadedBackupState(null);
+          return;
+        }
+        setUploadedBackupState(candidateState);
+        setUploadedBackupFileName(file.name);
+        setUploadedBackupMeta({
+          exportedAtWib: raw.exportedAtWib || undefined,
+          label: raw.label || undefined,
+        });
+        showToast(
+          `✓ File backup "${file.name}" siap di-restore (${candidateState.olts.length} OLT, ${candidateState.onus?.length || 0} ONU).`
+        );
+      } catch {
+        showToast('✗ Gagal membaca file backup: pastikan format JSON valid.');
+        setUploadedBackupState(null);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleConfirmFileRestore = async () => {
+    if (!uploadedBackupState) return;
+    setBackupBusy(true);
+    try {
+      const resp = await fetch('/api/backup/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          state: uploadedBackupState,
+          mode: restoreMode,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data || !data.ok || !data.state) {
+        showToast(data?.error || 'Gagal melakukan restore database.');
+        return;
+      }
+      setDb(data.state);
+      if (Array.isArray(data.snapshots)) {
+        setBackupSnapshots(data.snapshots);
+      }
+      setUploadedBackupState(null);
+      setUploadedBackupFileName('');
+      setUploadedBackupMeta(null);
+      showToast(
+        `✓ Restore berhasil (${restoreMode === 'MERGE' ? 'Gabung Data' : 'Full Restore'}): ${data.summary?.olts || 0} OLT, ${data.summary?.onus || 0} ONU, ${data.summary?.zones || 0} Zone!`
+      );
+    } catch {
+      showToast('Gagal menghubungi server saat proses Restore.');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
   // Scoped visibility based on logged-in user's assigned OLTs, Zones, and RKs (Sectors & Splitters)
   const visibleOlts = !currentUser || currentUser.access_all_olts
     ? db.olts
@@ -1709,14 +2019,19 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   if (authChecking) {
     return (
       <div
-        className="flex min-h-screen flex-col items-center justify-center bg-[#081526] px-4 py-8 text-slate-100"
+        className="flex min-h-screen flex-col items-center justify-center bg-[#060d18] px-4 py-8 text-slate-100"
         style={{
-          backgroundImage: `radial-gradient(circle at 75% 20%, rgba(16, 52, 96, 0.55) 0%, transparent 55%), linear-gradient(135deg, #071220 0%, #0b1d35 50%, #071426 100%)`,
+          backgroundImage: `radial-gradient(circle at 50% 0%, rgba(14, 165, 233, 0.14) 0%, transparent 55%), radial-gradient(circle at 85% 80%, rgba(16, 185, 129, 0.08) 0%, transparent 50%), linear-gradient(180deg, #060d18 0%, #0a1424 100%)`,
         }}
       >
-        <div className="flex items-center gap-3 rounded-xl border border-[#1e3a5f] bg-[#0b1a2e]/95 px-6 py-4 text-xs font-semibold text-sky-300 shadow-2xl">
-          <RefreshCw className="h-4 w-4 animate-spin text-sky-400" />
-          <span>Memverifikasi keamanan sesi...</span>
+        <div className="flex items-center gap-3.5 rounded-2xl border border-slate-800/90 bg-[#0b1526]/95 px-6 py-4 text-xs font-semibold text-sky-300 shadow-2xl backdrop-blur-md">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/10 ring-1 ring-sky-500/30">
+            <RefreshCw className="h-4 w-4 animate-spin text-sky-400" />
+          </div>
+          <div>
+            <div className="text-sm font-bold text-white">Memverifikasi Sesi Keamanan</div>
+            <div className="text-[11px] font-normal text-slate-400">Menghubungkan ke server autentikasi...</div>
+          </div>
         </div>
       </div>
     );
@@ -1725,374 +2040,681 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   if (!currentUser) {
     return (
       <div
-        className="flex min-h-screen flex-col items-center justify-center bg-[#081526] px-4 py-8 text-slate-100"
+        className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-[#060d18] px-4 py-10 text-slate-100"
         style={{
-          backgroundImage: `radial-gradient(circle at 75% 20%, rgba(16, 52, 96, 0.55) 0%, transparent 55%), linear-gradient(135deg, #071220 0%, #0b1d35 50%, #071426 100%)`,
+          backgroundImage: `radial-gradient(circle at 50% 0%, rgba(14, 165, 233, 0.16) 0%, transparent 55%), radial-gradient(circle at 80% 85%, rgba(16, 185, 129, 0.10) 0%, transparent 50%), linear-gradient(180deg, #060d18 0%, #091322 100%)`,
         }}
       >
-        <div className="w-full max-w-md overflow-hidden rounded-xl border border-[#1e3a5f] bg-[#0b1a2e]/95 shadow-2xl">
-          {/* Top Brand Header */}
-          <div className="border-b border-[#193354] bg-[#091526] px-6 py-5 text-center">
-            <div className="inline-flex items-center gap-2 rounded-full border border-sky-500/30 bg-sky-950/60 px-3 py-1 font-mono text-[11px] font-semibold text-sky-300">
-              <Wifi className="h-3.5 w-3.5 text-emerald-400" />
-              GPON / XGPON OLT MANAGEMENT SYSTEM
-            </div>
-            <h1 className="mt-2.5 text-2xl font-extrabold tracking-wider text-white">
-              JETCYBERNET
-            </h1>
-            <p className="mt-1 text-xs text-slate-400">
-              Masuk untuk mengelola OLT, ONU, Zone &amp; Distribusi RK / ODP
-            </p>
-          </div>
+        {/* Subtle Architectural Grid Backdrop */}
+        <div
+          className="pointer-events-none absolute inset-0 opacity-20"
+          style={{
+            backgroundImage: `linear-gradient(to right, rgba(148, 163, 184, 0.08) 1px, transparent 1px), linear-gradient(to bottom, rgba(148, 163, 184, 0.08) 1px, transparent 1px)`,
+            backgroundSize: '40px 40px',
+          }}
+        />
 
-          {/* Login Form */}
-          <form onSubmit={handleLoginSubmit} className="space-y-4 p-6 text-xs" autoComplete="off">
-            {loginError && (
-              <div className="flex items-center gap-2 rounded border border-red-500/50 bg-red-950/60 px-3.5 py-2.5 text-xs font-semibold text-red-200">
-                <AlertTriangle className="h-4 w-4 shrink-0 text-red-400" />
-                <span>{loginError}</span>
+        <div className="relative z-10 w-full max-w-[420px]">
+          <div className="overflow-hidden rounded-2xl border border-slate-800/90 bg-[#0b1526]/95 shadow-[0_24px_60px_-15px_rgba(0,0,0,0.85)] backdrop-blur-xl">
+            {/* Top Brand Header */}
+            <div className="border-b border-slate-800/80 bg-gradient-to-b from-[#0f1e36]/80 to-[#0b1526] px-7 pt-7 pb-6 text-center">
+              <div className="mx-auto mb-3.5 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500/20 to-emerald-500/10 ring-1 ring-sky-400/30 shadow-inner">
+                <Wifi className="h-6 w-6 text-sky-400" />
               </div>
-            )}
-
-            <div>
-              <label className="block font-bold text-slate-200">
-                Username atau Email
-              </label>
-              <input
-                type="text"
-                required
-                autoFocus
-                autoComplete="username"
-                value={loginUsername}
-                onChange={(e) => setLoginUsername(e.target.value)}
-                placeholder="Masukkan username atau email"
-                className="mt-1.5 w-full rounded border border-[#284870] bg-[#10233a] px-3.5 py-2.5 text-xs text-white placeholder-slate-400 focus:border-sky-400 focus:outline-none"
-              />
+              <div className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/25 bg-sky-950/60 px-2.5 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-sky-300 uppercase">
+                <ShieldCheck className="h-3 w-3 text-emerald-400" />
+                GPON / XGPON OLT MANAGEMENT
+              </div>
+              <h1 className="mt-2.5 text-2xl font-extrabold tracking-tight text-white">
+                JETCYBERNET
+              </h1>
+              <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                Masuk untuk mengelola OLT, ONU, Zone &amp; Distribusi RK / ODP
+              </p>
             </div>
 
-            <div>
-              <div className="flex items-center justify-between">
-                <label className="block font-bold text-slate-200">
-                  Password
+            {/* Login Form */}
+            <form onSubmit={handleLoginSubmit} className="space-y-4 p-7 text-xs" autoComplete="off">
+              {loginError && (
+                <div className="flex items-start gap-2.5 rounded-xl border border-red-500/40 bg-red-950/50 px-3.5 py-3 text-xs font-medium text-red-200">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+                  <span>{loginError}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold text-slate-200">
+                  Username atau Email
                 </label>
-                <button
-                  type="button"
-                  onClick={() => setShowLoginPassword((v) => !v)}
-                  className="text-[11px] text-sky-400 hover:underline"
-                >
-                  {showLoginPassword ? 'Sembunyikan' : 'Tampilkan'}
-                </button>
+                <div className="relative">
+                  <User className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    required
+                    autoFocus
+                    autoComplete="username"
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    placeholder="Masukkan username atau email"
+                    className="w-full rounded-xl border border-slate-700/80 bg-[#0f1d32] py-2.5 pr-3.5 pl-10 text-xs text-white placeholder-slate-500 transition focus:border-sky-400 focus:bg-[#12233c] focus:outline-none"
+                  />
+                </div>
               </div>
-              <input
-                type={showLoginPassword ? 'text' : 'password'}
-                required
-                autoComplete="current-password"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                placeholder="Masukkan password"
-                className="mt-1.5 w-full rounded border border-[#284870] bg-[#10233a] px-3.5 py-2.5 text-xs text-white placeholder-slate-400 focus:border-sky-400 focus:outline-none"
-              />
-            </div>
 
-            <button
-              type="submit"
-              disabled={loginLoading}
-              className="w-full rounded bg-[#0275d8] py-2.5 text-xs font-bold text-white shadow-lg transition hover:bg-[#025aa5] disabled:opacity-60"
-            >
-              {loginLoading ? 'Memverifikasi Kredensial...' : 'Sign In ke Dashboard'}
-            </button>
-          </form>
+              <div>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-200">
+                    Password
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowLoginPassword((v) => !v)}
+                    className="text-[11px] font-medium text-sky-400 transition hover:text-sky-300"
+                  >
+                    {showLoginPassword ? 'Sembunyikan' : 'Tampilkan'}
+                  </button>
+                </div>
+                <div className="relative">
+                  <Lock className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type={showLoginPassword ? 'text' : 'password'}
+                    required
+                    autoComplete="current-password"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="Masukkan password"
+                    className="w-full rounded-xl border border-slate-700/80 bg-[#0f1d32] py-2.5 pr-3.5 pl-10 text-xs text-white placeholder-slate-500 transition focus:border-sky-400 focus:bg-[#12233c] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={loginLoading}
+                className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 py-2.5 text-xs font-bold text-white shadow-lg shadow-sky-950/60 transition hover:from-sky-400 hover:to-blue-500 disabled:opacity-60"
+              >
+                {loginLoading ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    <span>Memverifikasi Kredensial...</span>
+                  </>
+                ) : (
+                  <span>Sign In ke Dashboard</span>
+                )}
+              </button>
+            </form>
+
+            {/* Security Footer */}
+            <div className="flex items-center justify-between border-t border-slate-800/80 bg-[#08101e] px-7 py-3 text-[11px] text-slate-400">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                Enkripsi Sesi Aktif
+              </span>
+              <span className="font-mono text-[10px] text-slate-500">Asia/Jakarta (WIB)</span>
+            </div>
+          </div>
         </div>
       </div>
     );
   }
 
+  const sidebarCategories = [
+    {
+      title: 'Overview & Monitoring',
+      items: [
+        {
+          id: 'DASHBOARD',
+          label: 'Dashboard',
+          icon: LayoutDashboard,
+          active: activeView === 'DASHBOARD',
+          badge: null as string | number | null,
+          badgeColor: '',
+          onClick: () => setActiveView('DASHBOARD'),
+        },
+        {
+          id: 'GRAPHS',
+          label: 'Graphs (24h WIB)',
+          icon: BarChart3,
+          active: activeView === 'GRAPHS',
+          badge: '5m',
+          badgeColor: 'bg-sky-500/20 text-sky-300 border-sky-500/30',
+          onClick: () => setActiveView('GRAPHS'),
+        },
+      ],
+    },
+    {
+      title: 'ONU Provisioning',
+      items: [
+        {
+          id: 'UNCONFIGURED',
+          label: 'Unconfigured ONUs',
+          icon: Radio,
+          active: activeView === 'UNCONFIGURED' || activeView === 'AUTHORIZE_FORM',
+          badge: unconfiguredOnus.length > 0 ? unconfiguredOnus.length : null,
+          badgeColor: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
+          onClick: () => setActiveView('UNCONFIGURED'),
+        },
+        {
+          id: 'CONFIGURED',
+          label: 'Configured ONUs',
+          icon: Wifi,
+          active: activeView === 'CONFIGURED' || activeView === 'ONU_DETAIL',
+          badge: configuredOnus.length,
+          badgeColor: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
+          onClick: () => setActiveView('CONFIGURED'),
+        },
+      ],
+    },
+    {
+      title: 'Infrastruktur & Distribusi',
+      items: [
+        {
+          id: 'OLTS_LIST',
+          label: 'OLT Devices',
+          icon: Server,
+          active:
+            activeView === 'OLTS_LIST' ||
+            activeView === 'OLT_DETAIL' ||
+            activeView === 'ADD_OLT',
+          badge: visibleOlts.length,
+          badgeColor: 'bg-slate-700/80 text-slate-300 border-slate-600/50',
+          onClick: () => setActiveView('OLTS_LIST'),
+        },
+        {
+          id: 'ZONES',
+          label: 'Zones (Wilayah)',
+          icon: MapPin,
+          active: activeView === 'ZONES',
+          badge: visibleZones.length,
+          badgeColor: 'bg-slate-700/80 text-slate-300 border-slate-600/50',
+          onClick: () => setActiveView('ZONES'),
+        },
+        {
+          id: 'SECTORS',
+          label: 'Sectors / RK',
+          icon: Layers,
+          active: activeView === 'SECTORS',
+          badge: visibleSectors.length,
+          badgeColor: 'bg-slate-700/80 text-slate-300 border-slate-600/50',
+          onClick: () => setActiveView('SECTORS'),
+        },
+        {
+          id: 'SPLITTERS',
+          label: 'Splitters (ODP)',
+          icon: GitBranch,
+          active: activeView === 'SPLITTERS',
+          badge: visibleOdbs.length,
+          badgeColor: 'bg-slate-700/80 text-slate-300 border-slate-600/50',
+          onClick: () => setActiveView('SPLITTERS'),
+        },
+      ],
+    },
+    {
+      title: 'Sistem & Administrasi',
+      items: [
+        ...(isAdminUser
+          ? [
+              {
+                id: 'USERS',
+                label: 'Users & Hak Akses',
+                icon: Users,
+                active: activeView === 'USERS',
+                badge: db.users?.length || null,
+                badgeColor: 'bg-sky-500/20 text-sky-300 border-sky-500/30',
+                onClick: () => setActiveView('USERS'),
+              },
+            ]
+          : []),
+        {
+          id: 'SPEED_PROFILES',
+          label: 'Speed & ONU Types',
+          icon: Sliders,
+          active: activeView === 'SPEED_PROFILES',
+          badge: null,
+          badgeColor: '',
+          onClick: () => setActiveView('SPEED_PROFILES'),
+        },
+        {
+          id: 'VPN_TR069',
+          label: 'VPN & TR-069 ACS',
+          icon: Contrast,
+          active: activeView === 'VPN_TR069',
+          badge: null,
+          badgeColor: '',
+          onClick: () => setActiveView('VPN_TR069'),
+        },
+        {
+          id: 'TASKS',
+          label: 'Tasks & Log CLI',
+          icon: Activity,
+          active: activeView === 'TASKS',
+          badge: null,
+          badgeColor: '',
+          onClick: () => setActiveView('TASKS'),
+        },
+        {
+          id: 'DIAG_PARSER',
+          label: 'CLI Diagnostics',
+          icon: FileCode,
+          active: activeView === 'DIAG_PARSER',
+          badge: null,
+          badgeColor: '',
+          onClick: () => setActiveView('DIAG_PARSER'),
+        },
+        {
+          id: 'SOURCE_CODE',
+          label: 'SQL & Backend Code',
+          icon: Code2,
+          active: activeView === 'SOURCE_CODE',
+          badge: null,
+          badgeColor: '',
+          onClick: () => setActiveView('SOURCE_CODE'),
+        },
+      ],
+    },
+  ];
+
+  const currentViewMeta: Record<NavigationView, { title: string; subtitle: string }> = {
+    DASHBOARD: {
+      title: 'Network Operations Overview',
+      subtitle: 'Pemantauan real-time status OLT, ONU, sinyal optik, dan aktivitas jaringan (WIB).',
+    },
+    UNCONFIGURED: {
+      title: 'Unconfigured ONUs Discovery',
+      subtitle: 'Daftar ONU baru yang terdeteksi di port PON dan siap di-authorize.',
+    },
+    AUTHORIZE_FORM: {
+      title: 'Authorize ONU Baru',
+      subtitle: 'Konfigurasi profil layanan, VLAN, Zone, RK, dan ODP untuk ONU pelanggan.',
+    },
+    CONFIGURED: {
+      title: 'Configured ONUs Inventory',
+      subtitle: 'Manajemen seluruh ONU terdaftar, redaman sinyal optik, dan status operasional.',
+    },
+    ONU_DETAIL: {
+      title: 'Detail & Diagnostik ONU',
+      subtitle: 'Informasi lengkap antarmuka optik, WAN/PPPoE, VLAN, dan eksekusi perintah CLI.',
+    },
+    OLTS_LIST: {
+      title: 'Manajemen Perangkat OLT',
+      subtitle: 'Daftar perangkat ZTE C320/C300, koneksi Telnet/SSH, suhu, dan sinkronisasi konfigurasi.',
+    },
+    ADD_OLT: {
+      title: 'Tambah Perangkat OLT Baru',
+      subtitle: 'Registrasi perangkat OLT ZTE baru ke sistem manajemen.',
+    },
+    OLT_DETAIL: {
+      title: 'Konfigurasi & Port OLT',
+      subtitle: 'Manajemen kartu line-card, port PON, uplink, VLAN, dan running-config OLT.',
+    },
+    TASKS: {
+      title: 'Tasks & Riwayat Eksekusi CLI',
+      subtitle: 'Catatan audit log provisioning, otorisasi ONU, dan eksekusi script OLT.',
+    },
+    ZONES: {
+      title: 'Manajemen Zones (Wilayah)',
+      subtitle: 'Pengelompokan wilayah distribusi jaringan optik (dilindungi dari penghapusan jika masih memiliki ONU).',
+    },
+    SECTORS: {
+      title: 'Manajemen Sectors / Rumah Kabel (RK)',
+      subtitle: 'Pengelolaan titik distribusi RK/Sector dan penugasan hak akses operator.',
+    },
+    SPLITTERS: {
+      title: 'Manajemen Optical Distribution Point (ODP / Splitter)',
+      subtitle: 'Kapasitas port splitter optik dan keterkaitan ONU pelanggan.',
+    },
+    USERS: {
+      title: 'User Management & Hak Akses (RBAC)',
+      subtitle: 'Kelola akun pengguna serta pembatasan akses spesifik per OLT, Zone, dan RK/Sector.',
+    },
+    SPEED_PROFILES: {
+      title: 'Speed Profiles & ONU Types',
+      subtitle: 'Pengaturan profil bandwidth T-CONT/GEMPORT dan template perangkat ONU.',
+    },
+    VPN_TR069: {
+      title: 'VPN Tunnel & TR-069 CWMP ACS',
+      subtitle: 'Konfigurasi manajemen jarak jauh TR-069 dan konektivitas tunnel OLT.',
+    },
+    DIAG_PARSER: {
+      title: 'ZTE CLI Output Parser & Sandbox',
+      subtitle: 'Alat bantu uji coba parsing output CLI ZTE C320/C300 secara interaktif.',
+    },
+    GRAPHS: {
+      title: 'Grafik Trafik Uplink & PON (24 Jam WIB)',
+      subtitle: 'Visualisasi trafik jaringan dengan interval batang 5 menit serta rincian Harian, Mingguan, dan Tahunan.',
+    },
+    SOURCE_CODE: {
+      title: 'Arsitektur SQL & Kode Sumber Backend',
+      subtitle: 'Dokumentasi skema database dan modul integrasi Telnet/SSH.',
+    },
+  };
+
   return (
     <div
-      className="min-h-screen bg-[#081526] text-slate-100"
+      className="min-h-screen bg-[#060d18] text-slate-100"
       style={{
-        backgroundImage: `radial-gradient(circle at 75% 20%, rgba(16, 52, 96, 0.45) 0%, transparent 55%), linear-gradient(135deg, #071220 0%, #0b1d35 50%, #071426 100%)`,
+        backgroundImage: `radial-gradient(circle at 80% 0%, rgba(14, 165, 233, 0.09) 0%, transparent 50%), radial-gradient(circle at 20% 90%, rgba(16, 185, 129, 0.05) 0%, transparent 50%), linear-gradient(180deg, #060d18 0%, #091322 100%)`,
       }}
       onClick={() => {
         if (openDropdown) setOpenDropdown(null);
       }}
     >
-      {/* TOP NAVIGATION BAR (Identical to JETCYBERNET SmartOLT Screenshots) */}
-      <header className="sticky top-0 z-40 border-b border-[#193354] bg-[#0b1a2e]/95 backdrop-blur-xs">
-        <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between px-4 py-2.5">
-          {/* Left Brand + Primary Menu Links */}
-          <div className="flex flex-wrap items-center gap-1 sm:gap-4">
+      {/* MODERN TOP NAVIGATION BAR */}
+      <header className="sticky top-0 z-40 border-b border-slate-800/85 bg-[#091322]/90 backdrop-blur-md">
+        <div className="mx-auto flex h-14 max-w-[1600px] items-center justify-between gap-3 px-3 sm:px-5">
+          {/* Left: Mobile Drawer Trigger + Brand + Primary Quick Links */}
+          <div className="flex items-center gap-2 sm:gap-3">
             <button
               type="button"
-              onClick={() => setActiveView('DASHBOARD')}
-              className="mr-2 text-base font-bold tracking-wider text-white hover:text-sky-300"
+              onClick={() => setMobileSidebarOpen((v) => !v)}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/70 text-slate-300 transition hover:border-slate-700 hover:text-white lg:hidden"
+              title="Buka Menu Navigasi"
             >
-              JETCYBERNET
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveView('UNCONFIGURED')}
-              className={`rounded px-2.5 py-1.5 text-xs font-medium transition ${
-                activeView === 'UNCONFIGURED' || activeView === 'AUTHORIZE_FORM'
-                  ? 'bg-[#163052] text-white'
-                  : 'text-slate-200 hover:text-white'
-              }`}
-            >
-              Unconfigured
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveView('CONFIGURED')}
-              className={`rounded px-2.5 py-1.5 text-xs font-medium transition ${
-                activeView === 'CONFIGURED' || activeView === 'ONU_DETAIL'
-                  ? 'bg-[#163052] text-white'
-                  : 'text-slate-200 hover:text-white'
-              }`}
-            >
-              Configured
-            </button>
-
-            {/* Map Dropdown */}
-            <div className="relative" onClick={(e) => e.stopPropagation()}>
-              <button
-                type="button"
-                onClick={() =>
-                  setOpenDropdown(openDropdown === 'MAP' ? null : 'MAP')
-                }
-                className="flex items-center gap-1 rounded px-2 py-1.5 text-xs font-medium text-slate-200 hover:text-white"
-              >
-                Map <ChevronDown className="h-3 w-3" />
-              </button>
-              {openDropdown === 'MAP' && (
-                <div className="absolute left-0 mt-1 w-44 rounded border border-slate-700 bg-[#111c2d] py-1.5 text-xs shadow-2xl">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveView('ZONES');
-                      setOpenDropdown(null);
-                    }}
-                    className="block w-full px-4 py-1.5 text-left text-slate-200 hover:bg-[#1b2e4b]"
-                  >
-                    Zones & ODB Map
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveView('SECTORS');
-                      setOpenDropdown(null);
-                    }}
-                    className="block w-full px-4 py-1.5 text-left text-slate-200 hover:bg-[#1b2e4b]"
-                  >
-                    Sectors
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveView('SPLITTERS');
-                      setOpenDropdown(null);
-                    }}
-                    className="block w-full px-4 py-1.5 text-left text-slate-200 hover:bg-[#1b2e4b]"
-                  >
-                    Splitters (ODP)
-                  </button>
-                </div>
-              )}
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setActiveView('GRAPHS')}
-              className={`rounded px-2 py-1.5 text-xs font-medium ${
-                activeView === 'GRAPHS'
-                  ? 'bg-[#163052] text-white'
-                  : 'text-slate-200 hover:text-white'
-              }`}
-            >
-              Graphs
+              <Menu className="h-4 w-4" />
             </button>
 
             <button
               type="button"
               onClick={() => setActiveView('DASHBOARD')}
-              className="rounded px-2 py-1.5 text-xs font-medium text-slate-200 hover:text-white"
+              className="group flex items-center gap-2.5 pr-2 text-left"
             >
-              Events
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-sky-500 to-blue-600 text-white shadow-md shadow-sky-950/50 transition group-hover:scale-105">
+                <Wifi className="h-4 w-4" />
+              </div>
+              <div>
+                <div className="text-sm font-extrabold tracking-tight text-white group-hover:text-sky-300">
+                  JETCYBERNET
+                </div>
+                <div className="hidden font-mono text-[10px] text-slate-400 sm:block">
+                  OLT MANAGEMENT CONSOLE
+                </div>
+              </div>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setActiveView('DIAG_PARSER')}
-              className={`rounded px-2 py-1.5 text-xs font-medium ${
-                activeView === 'DIAG_PARSER'
-                  ? 'bg-[#163052] text-white'
-                  : 'text-slate-200 hover:text-white'
-              }`}
-            >
-              Diag
-            </button>
+            <div className="hidden h-5 w-px bg-slate-800 xl:block" />
 
-            {/* Tasks Dropdown (matching Screenshot image_fdf3e3de.png) */}
-            <div className="relative" onClick={(e) => e.stopPropagation()}>
+            {/* Top Quick Links (Preserving all original navbar shortcuts & dropdowns) */}
+            <nav className="hidden items-center gap-1 xl:flex">
               <button
                 type="button"
-                onClick={() =>
-                  setOpenDropdown(openDropdown === 'TASKS' ? null : 'TASKS')
-                }
-                className={`flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${
-                  activeView === 'TASKS' || openDropdown === 'TASKS'
-                    ? 'bg-[#163052] text-white'
-                    : 'text-slate-200 hover:text-white'
+                onClick={() => setActiveView('UNCONFIGURED')}
+                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                  activeView === 'UNCONFIGURED' || activeView === 'AUTHORIZE_FORM'
+                    ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
+                    : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
                 }`}
               >
-                Tasks <ChevronDown className="h-3 w-3" />
+                <span>Unconfigured</span>
+                {unconfiguredOnus.length > 0 && (
+                  <span className="rounded-md bg-amber-500/20 px-1.5 py-0.2 font-mono text-[10px] font-bold text-amber-300">
+                    {unconfiguredOnus.length}
+                  </span>
+                )}
               </button>
-              {openDropdown === 'TASKS' && (
-                <div className="absolute left-0 mt-1 w-36 rounded border border-slate-700 bg-[#111c2d] py-1.5 text-xs shadow-2xl">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveView('TASKS');
-                      setOpenDropdown(null);
-                    }}
-                    className="block w-full px-4 py-1.5 text-left text-white hover:bg-[#1b2e4b]"
-                  >
-                    Tasks
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveView('TASKS');
-                      setOpenDropdown(null);
-                    }}
-                    className="block w-full px-4 py-1.5 text-left text-slate-200 hover:bg-[#1b2e4b]"
-                  >
-                    Tickets
-                  </button>
-                </div>
-              )}
-            </div>
 
-            {/* Reports Dropdown */}
-            <div className="relative" onClick={(e) => e.stopPropagation()}>
               <button
                 type="button"
-                onClick={() =>
-                  setOpenDropdown(openDropdown === 'REPORTS' ? null : 'REPORTS')
-                }
-                className="flex items-center gap-1 rounded px-2 py-1.5 text-xs font-medium text-slate-200 hover:text-white"
-              >
-                Reports <ChevronDown className="h-3 w-3" />
-              </button>
-              {openDropdown === 'REPORTS' && (
-                <div className="absolute left-0 mt-1 w-44 rounded border border-slate-700 bg-[#111c2d] py-1.5 text-xs shadow-2xl">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveView('GRAPHS');
-                      setOpenDropdown(null);
-                    }}
-                    className="block w-full px-4 py-1.5 text-left text-slate-200 hover:bg-[#1b2e4b]"
-                  >
-                    Optical Signal Report
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveView('SOURCE_CODE');
-                      setOpenDropdown(null);
-                    }}
-                    className="block w-full px-4 py-1.5 text-left text-emerald-400 hover:bg-[#1b2e4b]"
-                  >
-                    Export SQL & Backend Code
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Settings Dropdown (Exact match to Screenshot 7) */}
-            <div className="relative" onClick={(e) => e.stopPropagation()}>
-              <button
-                type="button"
-                onClick={() =>
-                  setOpenDropdown(openDropdown === 'SETTINGS' ? null : 'SETTINGS')
-                }
-                className={`flex items-center gap-1 rounded px-2.5 py-1.5 text-xs font-medium ${
-                  openDropdown === 'SETTINGS' ||
-                  activeView === 'ZONES' ||
-                  activeView === 'SECTORS' ||
-                  activeView === 'SPLITTERS' ||
-                  activeView === 'USERS' ||
-                  activeView === 'OLTS_LIST' ||
-                  activeView === 'OLT_DETAIL'
-                    ? 'bg-[#163052] text-white'
-                    : 'text-slate-200 hover:text-white'
+                onClick={() => setActiveView('CONFIGURED')}
+                className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                  activeView === 'CONFIGURED' || activeView === 'ONU_DETAIL'
+                    ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
+                    : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
                 }`}
               >
-                Settings <ChevronDown className="h-3 w-3" />
+                Configured
               </button>
-              {openDropdown === 'SETTINGS' && (
-                <div className="absolute left-0 mt-1 w-48 rounded border border-slate-700 bg-[#111c2d] py-1.5 text-xs shadow-2xl">
-                  {[
-                    { label: 'Zones', view: 'ZONES' as NavigationView },
-                    { label: 'Sectors (RK)', view: 'SECTORS' as NavigationView },
-                    { label: 'Splitters (ODP)', view: 'SPLITTERS' as NavigationView },
-                    ...(isAdminUser
-                      ? [
-                          {
-                            label: 'Users & Hak Akses',
-                            view: 'USERS' as NavigationView,
-                          },
-                        ]
-                      : []),
-                    { label: 'ONU types', view: 'SPEED_PROFILES' as NavigationView },
-                    {
-                      label: 'Speed profiles',
-                      view: 'SPEED_PROFILES' as NavigationView,
-                    },
-                    { label: 'OLTs', view: 'OLTS_LIST' as NavigationView },
-                    { label: 'VPN & TR069', view: 'VPN_TR069' as NavigationView },
-                    { label: 'Presets', view: 'VPN_TR069' as NavigationView },
-                    { label: 'General', view: 'SOURCE_CODE' as NavigationView },
-                    { label: 'Billing', view: 'SOURCE_CODE' as NavigationView },
-                  ].map((item) => (
+
+              {/* Map Dropdown */}
+              <div className="relative" onClick={(e) => e.stopPropagation()}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setOpenDropdown(openDropdown === 'MAP' ? null : 'MAP')
+                  }
+                  className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                    openDropdown === 'MAP' ||
+                    activeView === 'ZONES' ||
+                    activeView === 'SECTORS' ||
+                    activeView === 'SPLITTERS'
+                      ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
+                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                  }`}
+                >
+                  Map <ChevronDown className="h-3.5 w-3.5 opacity-75" />
+                </button>
+                {openDropdown === 'MAP' && (
+                  <div className="animate-modal-in absolute left-0 mt-1.5 w-48 rounded-xl border border-slate-700/80 bg-[#0d192b] p-1.5 text-xs shadow-2xl">
                     <button
-                      key={item.label}
                       type="button"
                       onClick={() => {
-                        setActiveView(item.view);
+                        setActiveView('ZONES');
                         setOpenDropdown(null);
                       }}
-                      className={`block w-full px-4 py-1.5 text-left hover:bg-[#1b2e4b] hover:text-white ${
-                        activeView === item.view
-                          ? 'bg-[#1b2e4b] font-bold text-sky-400'
-                          : 'text-slate-200'
-                      }`}
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-slate-200 transition hover:bg-slate-800/80 hover:text-white"
                     >
-                      {item.label}
+                      <MapPin className="h-3.5 w-3.5 text-sky-400" />
+                      Zones &amp; ODB Map
                     </button>
-                  ))}
-                </div>
-              )}
-            </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveView('SECTORS');
+                        setOpenDropdown(null);
+                      }}
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-slate-200 transition hover:bg-slate-800/80 hover:text-white"
+                    >
+                      <Layers className="h-3.5 w-3.5 text-indigo-400" />
+                      Sectors (RK)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveView('SPLITTERS');
+                        setOpenDropdown(null);
+                      }}
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-slate-200 transition hover:bg-slate-800/80 hover:text-white"
+                    >
+                      <GitBranch className="h-3.5 w-3.5 text-emerald-400" />
+                      Splitters (ODP)
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setActiveView('GRAPHS')}
+                className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                  activeView === 'GRAPHS'
+                    ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
+                    : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                }`}
+              >
+                Graphs
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveView('DASHBOARD')}
+                className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-slate-800/60 hover:text-white"
+              >
+                Events
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveView('DIAG_PARSER')}
+                className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                  activeView === 'DIAG_PARSER'
+                    ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
+                    : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                }`}
+              >
+                Diag
+              </button>
+
+              {/* Tasks Dropdown */}
+              <div className="relative" onClick={(e) => e.stopPropagation()}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setOpenDropdown(openDropdown === 'TASKS' ? null : 'TASKS')
+                  }
+                  className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                    activeView === 'TASKS' || openDropdown === 'TASKS'
+                      ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
+                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                  }`}
+                >
+                  Tasks <ChevronDown className="h-3.5 w-3.5 opacity-75" />
+                </button>
+                {openDropdown === 'TASKS' && (
+                  <div className="animate-modal-in absolute left-0 mt-1.5 w-40 rounded-xl border border-slate-700/80 bg-[#0d192b] p-1.5 text-xs shadow-2xl">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveView('TASKS');
+                        setOpenDropdown(null);
+                      }}
+                      className="block w-full rounded-lg px-3 py-2 text-left text-white transition hover:bg-slate-800/80"
+                    >
+                      Tasks
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveView('TASKS');
+                        setOpenDropdown(null);
+                      }}
+                      className="block w-full rounded-lg px-3 py-2 text-left text-slate-200 transition hover:bg-slate-800/80"
+                    >
+                      Tickets
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Reports Dropdown */}
+              <div className="relative" onClick={(e) => e.stopPropagation()}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setOpenDropdown(openDropdown === 'REPORTS' ? null : 'REPORTS')
+                  }
+                  className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-slate-800/60 hover:text-white"
+                >
+                  Reports <ChevronDown className="h-3.5 w-3.5 opacity-75" />
+                </button>
+                {openDropdown === 'REPORTS' && (
+                  <div className="animate-modal-in absolute left-0 mt-1.5 w-52 rounded-xl border border-slate-700/80 bg-[#0d192b] p-1.5 text-xs shadow-2xl">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveView('GRAPHS');
+                        setOpenDropdown(null);
+                      }}
+                      className="block w-full rounded-lg px-3 py-2 text-left text-slate-200 transition hover:bg-slate-800/80"
+                    >
+                      Optical Signal Report
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveView('SOURCE_CODE');
+                        setOpenDropdown(null);
+                      }}
+                      className="block w-full rounded-lg px-3 py-2 text-left text-emerald-400 transition hover:bg-slate-800/80"
+                    >
+                      Export SQL &amp; Backend Code
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Settings Dropdown */}
+              <div className="relative" onClick={(e) => e.stopPropagation()}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setOpenDropdown(openDropdown === 'SETTINGS' ? null : 'SETTINGS')
+                  }
+                  className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                    openDropdown === 'SETTINGS' ||
+                    activeView === 'USERS' ||
+                    activeView === 'OLTS_LIST' ||
+                    activeView === 'OLT_DETAIL'
+                      ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
+                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                  }`}
+                >
+                  Settings <ChevronDown className="h-3.5 w-3.5 opacity-75" />
+                </button>
+                {openDropdown === 'SETTINGS' && (
+                  <div className="animate-modal-in absolute left-0 mt-1.5 w-52 rounded-xl border border-slate-700/80 bg-[#0d192b] p-1.5 text-xs shadow-2xl">
+                    {[
+                      { label: 'Zones', view: 'ZONES' as NavigationView },
+                      { label: 'Sectors (RK)', view: 'SECTORS' as NavigationView },
+                      { label: 'Splitters (ODP)', view: 'SPLITTERS' as NavigationView },
+                      ...(isAdminUser
+                        ? [
+                            {
+                              label: 'Users & Hak Akses',
+                              view: 'USERS' as NavigationView,
+                            },
+                          ]
+                        : []),
+                      { label: 'ONU types', view: 'SPEED_PROFILES' as NavigationView },
+                      {
+                        label: 'Speed profiles',
+                        view: 'SPEED_PROFILES' as NavigationView,
+                      },
+                      { label: 'OLTs', view: 'OLTS_LIST' as NavigationView },
+                      { label: 'VPN & TR069', view: 'VPN_TR069' as NavigationView },
+                      { label: 'Presets', view: 'VPN_TR069' as NavigationView },
+                      { label: 'General', view: 'SOURCE_CODE' as NavigationView },
+                      { label: 'Billing', view: 'SOURCE_CODE' as NavigationView },
+                    ].map((item) => (
+                      <button
+                        key={item.label}
+                        type="button"
+                        onClick={() => {
+                          setActiveView(item.view);
+                          setOpenDropdown(null);
+                        }}
+                        className={`block w-full rounded-lg px-3 py-1.5 text-left transition hover:bg-slate-800/80 hover:text-white ${
+                          activeView === item.view
+                            ? 'bg-sky-500/15 font-bold text-sky-400'
+                            : 'text-slate-200'
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                    <div className="my-1 border-t border-slate-800" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenDropdown(null);
+                        openBackupRestoreModal();
+                      }}
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-semibold text-emerald-400 transition hover:bg-slate-800/80 hover:text-emerald-300"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Backup &amp; Restore
+                    </button>
+                  </div>
+                )}
+              </div>
+            </nav>
           </div>
 
-          {/* Right Utility Icons + Live PostgreSQL (:5435) & Docker Port 3004 Indicator */}
-          <div className="flex items-center gap-2.5 text-slate-200">
-            <button
-              type="button"
-              onClick={() => setShowPgConfigModal(true)}
-              title="Click to configure/test PostgreSQL connection (localhost:5435, user: likhin)"
-              className="hidden sm:inline-flex items-center gap-1.5 rounded border border-sky-500/40 bg-sky-950/50 px-2.5 py-1 font-mono text-[11px] font-semibold text-sky-300 hover:bg-sky-900/60"
-            >
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  dbMeta.pgConnected ? 'bg-emerald-400' : 'bg-amber-400'
-                }`}
-              />
-              PG: {pgUser}@{pgHost}:{pgPort} · Docker :3004
-            </button>
+          {/* Right Utility Actions + Backup & Restore + User Session Profile */}
+          <div className="flex items-center gap-2 text-slate-200">
+            <div className="hidden items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/60 px-2.5 py-1 font-mono text-[11px] text-slate-400 md:flex">
+              <Clock className="h-3.5 w-3.5 text-sky-400" />
+              <span>WIB (UTC+7)</span>
+            </div>
+
             <button
               type="button"
               onClick={async () => {
@@ -2106,26 +2728,28 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 );
               }}
               title="Save state to SQL Database & OLT NVRAM"
-              className="hover:text-white"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300 transition hover:border-sky-500/40 hover:bg-slate-800 hover:text-white"
             >
               <Save className="h-4 w-4" />
             </button>
+
             <button
               type="button"
               onClick={() => setActiveView('VPN_TR069')}
               title="TR-069 CWMP ACS & Remote Access"
-              className="hover:text-emerald-400"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300 transition hover:border-emerald-500/40 hover:bg-slate-800 hover:text-emerald-400"
             >
               <Contrast className="h-4 w-4" />
             </button>
+
             <button
               type="button"
-              onClick={() => setActiveView('SOURCE_CODE')}
-              title="View Complete SQL Schema, Dockerfile (Port 3004) & Backend Code"
-              className="hidden md:flex items-center gap-1 rounded bg-emerald-600/20 px-2 py-1 text-[11px] font-semibold text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/30"
+              onClick={openBackupRestoreModal}
+              title="Backup & Restore Database (OLT, ONU, Zone, RK & Konfigurasi CLI)"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-emerald-950/40 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 shadow-xs transition hover:border-emerald-400/60 hover:bg-emerald-900/50 hover:text-white"
             >
-              <FileCode className="h-3.5 w-3.5" />
-              Docker :3004 &amp; SQL
+              <Database className="h-3.5 w-3.5 text-emerald-400" />
+              <span className="hidden sm:inline">Backup &amp; Restore</span>
             </button>
 
             {/* Logged-in User Profile & User Management Button */}
@@ -2157,11 +2781,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   ? `Klik untuk membuka User Management (Sesi #${sessionTokenId || 'AKTIF'})`
                   : `Logged in as ${currentUser.full_name} (Sesi #${sessionTokenId || 'AKTIF'})`
               }
-              className="inline-flex items-center gap-1.5 rounded border border-[#284870] bg-[#132842] px-2.5 py-1 text-xs font-semibold text-white hover:border-sky-400"
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-700/80 bg-[#0f1e34] px-2.5 py-1 text-xs font-semibold text-white transition hover:border-sky-400/60 hover:bg-[#132642]"
             >
-              <User className="h-3.5 w-3.5 text-sky-400" />
-              <span>{currentUser.username}</span>
-              <span className="rounded bg-sky-500/20 px-1.5 py-0.2 font-mono text-[10px] text-sky-300">
+              <div className="flex h-5 w-5 items-center justify-center rounded-md bg-sky-500/20 text-sky-400">
+                <User className="h-3.5 w-3.5" />
+              </div>
+              <span className="max-w-[100px] truncate">{currentUser.username}</span>
+              <span className="rounded-md bg-sky-500/20 px-1.5 py-0.2 font-mono text-[10px] text-sky-300">
                 {currentUser.role}
               </span>
             </button>
@@ -2170,404 +2796,661 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               type="button"
               onClick={handleLogout}
               title="Keluar (Logout)"
-              className="rounded border border-amber-500/40 bg-amber-950/40 px-2.5 py-1 text-xs font-semibold text-amber-300 hover:bg-amber-900/60 hover:text-white"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/35 bg-rose-950/35 px-2.5 py-1.5 text-xs font-semibold text-rose-300 transition hover:border-rose-400/60 hover:bg-rose-900/50 hover:text-white"
             >
-              Logout
+              <LogOut className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Logout</span>
             </button>
-
-            {isAdminUser && (
-              <button
-                type="button"
-                onClick={async () => {
-                  localStorage.removeItem(STORAGE_KEY);
-                  const resp = await fetch('/api/database/reset', {
-                    method: 'POST',
-                  });
-                  const data = await resp.json();
-                  if (data.state) setDb(data.state);
-                  showToast('Database SQL berhasil dikosongkan (0 OLT, 0 ONU).');
-                }}
-                title="Reset / Empty SQL Database"
-                className="flex items-center gap-1 text-xs font-medium text-red-300 hover:text-red-200"
-              >
-                <Power className="h-3.5 w-3.5" />
-                Reset DB
-              </button>
-            )}
           </div>
         </div>
       </header>
 
       {/* Toast Notification */}
       {toastMsg && (
-        <div className="fixed right-5 bottom-5 z-50 flex items-center gap-2 rounded-lg border border-emerald-500/50 bg-[#0d223a] px-4 py-3 text-xs font-semibold text-emerald-300 shadow-2xl">
-          <Check className="h-4 w-4 text-emerald-400" />
-          {toastMsg}
+        <div className="animate-modal-in fixed right-5 bottom-5 z-50 flex items-center gap-2.5 rounded-xl border border-emerald-500/40 bg-[#0b1b30]/95 px-4 py-3 text-xs font-semibold text-emerald-200 shadow-2xl backdrop-blur-md">
+          <div className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400">
+            <Check className="h-3.5 w-3.5" />
+          </div>
+          <span>{toastMsg}</span>
         </div>
       )}
 
-      {/* MAIN PAGE CONTAINER */}
-      <main className="mx-auto max-w-[1440px] px-4 py-5">
-        {/* ===================================================================
-            VIEW 1: DASHBOARD (Exact match to Screenshot image_eaabc7d1.png)
-           =================================================================== */}
-        {activeView === 'DASHBOARD' && (
-          <div className="space-y-5">
-            {/* Top 4 Colored Status Cards */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              {/* Card 1: Waiting authorization (Blue) */}
-              <div
-                onClick={() => setActiveView('UNCONFIGURED')}
-                className="cursor-pointer rounded-md bg-[#007bff] px-4 py-3 text-white shadow-lg transition hover:brightness-110"
-              >
-                <div className="flex items-start justify-between">
-                  <span className="text-sm font-medium">
-                    Waiting authorization
-                  </span>
-                  <span className="text-3xl font-bold leading-none">
-                    {unconfiguredOnus.length}
-                  </span>
+      {/* MOBILE SIDEBAR DRAWER OVERLAY */}
+      {mobileSidebarOpen && (
+        <div
+          className="fixed inset-0 z-50 flex lg:hidden"
+          onClick={() => setMobileSidebarOpen(false)}
+        >
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-xs" />
+          <aside
+            className="relative z-10 flex w-64 flex-col border-r border-slate-800 bg-[#091322] text-xs"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex h-14 items-center justify-between border-b border-slate-800 px-4">
+              <div className="flex items-center gap-2">
+                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-500 text-white">
+                  <Wifi className="h-4 w-4" />
                 </div>
-                <div className="mt-4 flex items-center justify-end gap-3 border-t border-white/20 pt-1.5 text-xs">
-                  <span>D: 0</span>
-                  <span>Resync: 0</span>
-                  <span>New: {unconfiguredOnus.length}</span>
-                </div>
+                <span className="font-bold tracking-tight text-white">JETCYBERNET</span>
               </div>
-
-              {/* Card 2: Online (Green — 100% Live from SQL Database) */}
-              <div
-                onClick={() => {
-                  setFilterSignalLevel('ALL');
-                  setActiveView('CONFIGURED');
-                }}
-                className="cursor-pointer rounded-md bg-[#28a745] px-4 py-3 text-white shadow-lg transition hover:brightness-110"
+              <button
+                type="button"
+                onClick={() => setMobileSidebarOpen(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
               >
-                <div className="flex items-start justify-between">
-                  <span className="text-sm font-medium">Online</span>
-                  <span className="text-3xl font-bold leading-none">
-                    {onlineOnus.length}
-                  </span>
-                </div>
-                <div className="mt-4 flex items-center justify-end border-t border-white/20 pt-1.5 text-xs">
-                  <span>Total authorized: {configuredOnus.length}</span>
-                </div>
-              </div>
-
-              {/* Card 3: Total offline (Dark Slate — 100% Live from SQL Database) */}
-              <div
-                onClick={() => setActiveView('CONFIGURED')}
-                className="cursor-pointer rounded-md bg-[#343a40] px-4 py-3 text-white shadow-lg transition hover:brightness-110"
-              >
-                <div className="flex items-start justify-between">
-                  <span className="text-sm font-medium">Total offline</span>
-                  <span className="text-3xl font-bold leading-none">
-                    {totalOfflineCount}
-                  </span>
-                </div>
-                <div className="mt-4 flex items-center justify-end gap-3 border-t border-white/20 pt-1.5 text-xs">
-                  <span>PwrFail: {pwrFailOnus.length}</span>
-                  <span>LoS: {losOnus.length}</span>
-                  <span>N/A: {otherOfflineOnus.length}</span>
-                </div>
-              </div>
-
-              {/* Card 4: Low signals (Orange — 100% Live from SQL Database) */}
-              <div
-                onClick={() => {
-                  setFilterSignalLevel('CRITICAL');
-                  setActiveView('CONFIGURED');
-                }}
-                className="cursor-pointer rounded-md bg-[#e67e22] px-4 py-3 text-white shadow-lg transition hover:brightness-110"
-              >
-                <div className="flex items-start justify-between">
-                  <span className="text-sm font-medium">Low signals</span>
-                  <span className="text-3xl font-bold leading-none">
-                    {totalLowSignalCount}
-                  </span>
-                </div>
-                <div className="mt-4 flex items-center justify-end gap-3 border-t border-white/20 pt-1.5 text-xs">
-                  <span>Warning: {warningSignalOnus.length}</span>
-                  <span>Critical: {criticalSignalOnus.length}</span>
-                </div>
-              </div>
+                <X className="h-4 w-4" />
+              </button>
             </div>
+            <div className="flex-1 space-y-5 overflow-y-auto p-3">
+              {sidebarCategories.map((group) => (
+                <div key={group.title}>
+                  <div className="mb-1.5 px-2.5 text-[10px] font-bold tracking-wider text-slate-500 uppercase">
+                    {group.title}
+                  </div>
+                  <div className="space-y-0.5">
+                    {group.items.map((item) => {
+                      const IconComponent = item.icon;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => {
+                            item.onClick();
+                            setMobileSidebarOpen(false);
+                          }}
+                          className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs font-medium transition ${
+                            item.active
+                              ? 'bg-sky-500/15 font-semibold text-sky-300 ring-1 ring-sky-500/30'
+                              : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                          }`}
+                        >
+                          <span className="flex items-center gap-2.5">
+                            <IconComponent
+                              className={`h-4 w-4 ${
+                                item.active ? 'text-sky-400' : 'text-slate-400'
+                              }`}
+                            />
+                            <span>{item.label}</span>
+                          </span>
+                          {item.badge !== null && (
+                            <span
+                              className={`rounded-md border px-1.5 py-0.2 font-mono text-[10px] font-semibold ${item.badgeColor}`}
+                            >
+                              {item.badge}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </aside>
+        </div>
+      )}
 
-            {/* Middle Row: Network status chart + OLTs online */}
-            <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-              {/* Network status area graph */}
-              <div className="rounded border border-[#1e3a5f] bg-[#0b192c]/90 p-4 lg:col-span-6">
-                <div className="mb-2 flex items-center gap-2 text-xs">
-                  <span className="text-sm font-bold text-white">
-                    Network status
+      {/* APP SHELL: COLLAPSIBLE SIDEBAR + MAIN PAGE CONTAINER */}
+      <div className="mx-auto flex max-w-[1600px]">
+        {/* DESKTOP COLLAPSIBLE SIDEBAR */}
+        <aside
+          className={`sticky top-14 hidden h-[calc(100vh-3.5rem)] shrink-0 flex-col border-r border-slate-800/80 bg-[#08111f]/75 backdrop-blur-xs transition-all duration-200 lg:flex ${
+            sidebarCollapsed ? 'w-16' : 'w-60'
+          }`}
+        >
+          <div className="flex-1 space-y-5 overflow-y-auto px-2.5 py-4">
+            {sidebarCategories.map((group) => (
+              <div key={group.title}>
+                {!sidebarCollapsed && (
+                  <div className="mb-1.5 px-2.5 text-[10px] font-bold tracking-wider text-slate-500 uppercase">
+                    {group.title}
+                  </div>
+                )}
+                <div className="space-y-1">
+                  {group.items.map((item) => {
+                    const IconComponent = item.icon;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={item.onClick}
+                        title={sidebarCollapsed ? item.label : undefined}
+                        className={`group flex w-full items-center ${
+                          sidebarCollapsed ? 'justify-center px-2 py-2.5' : 'justify-between px-2.5 py-2'
+                        } rounded-xl text-left text-xs font-medium transition ${
+                          item.active
+                            ? 'bg-sky-500/15 font-semibold text-sky-300 ring-1 ring-sky-500/30 shadow-xs'
+                            : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+                        }`}
+                      >
+                        <span className="flex items-center gap-2.5 truncate">
+                          <IconComponent
+                            className={`h-4 w-4 shrink-0 transition ${
+                              item.active
+                                ? 'text-sky-400'
+                                : 'text-slate-400 group-hover:text-slate-200'
+                            }`}
+                          />
+                          {!sidebarCollapsed && (
+                            <span className="truncate">{item.label}</span>
+                          )}
+                        </span>
+                        {!sidebarCollapsed && item.badge !== null && (
+                          <span
+                            className={`ml-2 rounded-md border px-1.5 py-0.2 font-mono text-[10px] font-semibold ${item.badgeColor}`}
+                          >
+                            {item.badge}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Sidebar Footer: Access Scope Summary & Collapse Button */}
+          <div className="border-t border-slate-800/80 p-2.5">
+            {!sidebarCollapsed && (
+              <div className="mb-2 rounded-xl border border-slate-800/90 bg-[#0b1628] p-2.5 text-[11px]">
+                <div className="flex items-center justify-between font-semibold text-slate-200">
+                  <span className="truncate">{currentUser.full_name}</span>
+                  <span className="rounded bg-emerald-500/15 px-1.5 py-0.2 font-mono text-[9px] text-emerald-300">
+                    ONLINE
                   </span>
-                  <span className="font-bold text-white">Hourly</span>
-                  <span className="text-slate-500">|</span>
-                  <button
-                    type="button"
-                    onClick={() => setActiveView('GRAPHS')}
-                    className="text-sky-400 hover:underline"
-                  >
-                    Daily
-                  </button>
+                </div>
+                <div className="mt-1 text-[10px] text-slate-400">
+                  Scope: {currentUser.access_all_olts ? 'All OLT' : `${visibleOlts.length} OLT`} ·{' '}
+                  {currentUser.access_all_zones ? 'All Zone' : `${visibleZones.length} Zone`} ·{' '}
+                  {currentUser.access_all_rks ? 'All RK' : `${visibleSectors.length} RK`}
+                </div>
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={toggleSidebarCollapse}
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-800 bg-slate-900/50 py-1.5 text-xs font-medium text-slate-400 transition hover:border-slate-700 hover:bg-slate-800 hover:text-white"
+              title={sidebarCollapsed ? 'Perluas Sidebar' : 'Kecilkan Sidebar'}
+            >
+              {sidebarCollapsed ? (
+                <PanelLeftOpen className="h-4 w-4" />
+              ) : (
+                <>
+                  <PanelLeftClose className="h-3.5 w-3.5" />
+                  <span>Collapse Sidebar</span>
+                </>
+              )}
+            </button>
+          </div>
+        </aside>
+
+        {/* MAIN PAGE CONTAINER */}
+        <main className="min-w-0 flex-1 px-4 py-5 sm:px-6">
+          {/* Contextual Page Header Bar */}
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3.5">
+            <div>
+              <div className="flex items-center gap-2 text-[11px] font-medium text-sky-400">
+                <span>JETCYBERNET</span>
+                <span className="text-slate-600">/</span>
+                <span className="font-mono uppercase">{activeView.replace('_', ' ')}</span>
+              </div>
+              <h1 className="mt-0.5 text-lg font-bold tracking-tight text-white sm:text-xl">
+                {currentViewMeta[activeView]?.title || 'SmartOLT Management'}
+              </h1>
+              <p className="text-xs text-slate-400">
+                {currentViewMeta[activeView]?.subtitle}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {activeView !== 'DASHBOARD' && (
+                <button
+                  type="button"
+                  onClick={() => setActiveView('DASHBOARD')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700/80 bg-slate-900/70 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-slate-600 hover:bg-slate-800 hover:text-white"
+                >
+                  <LayoutDashboard className="h-3.5 w-3.5 text-sky-400" />
+                  Dashboard
+                </button>
+              )}
+              {unconfiguredOnus.length > 0 && activeView !== 'UNCONFIGURED' && (
+                <button
+                  type="button"
+                  onClick={() => setActiveView('UNCONFIGURED')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-950/40 px-3 py-1.5 text-xs font-semibold text-amber-300 transition hover:bg-amber-900/50 hover:text-white"
+                >
+                  <Radio className="h-3.5 w-3.5 text-amber-400" />
+                  <span>{unconfiguredOnus.length} ONU Waiting Auth</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* ===================================================================
+              VIEW 1: DASHBOARD (Modernized KPI Summary Cards & Telemetry Panels)
+             =================================================================== */}
+          {activeView === 'DASHBOARD' && (
+            <div className="space-y-5">
+              {/* Top 4 Modern KPI Summary Cards */}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                {/* Card 1: Waiting authorization */}
+                <div
+                  onClick={() => setActiveView('UNCONFIGURED')}
+                  className="group relative cursor-pointer overflow-hidden rounded-xl border border-sky-500/30 bg-gradient-to-br from-[#0c213d] via-[#0b192e] to-[#091322] p-4 text-white shadow-lg transition hover:-translate-y-0.5 hover:border-sky-400/60"
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <span className="text-xs font-semibold tracking-wide text-sky-300 uppercase">
+                        Waiting Authorization
+                      </span>
+                      <div className="mt-2 font-mono text-3xl font-extrabold tracking-tight text-white">
+                        {unconfiguredOnus.length}
+                      </div>
+                    </div>
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-sky-500/20 text-sky-400 ring-1 ring-sky-500/30 transition group-hover:bg-sky-500 group-hover:text-white">
+                      <Radio className="h-5 w-5" />
+                    </div>
+                  </div>
+                  <div className="mt-4 flex items-center justify-between border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-300">
+                    <span>Discovered Queue</span>
+                    <div className="flex items-center gap-2.5">
+                      <span>D: 0</span>
+                      <span>Resync: 0</span>
+                      <span className="font-bold text-sky-300">
+                        New: {unconfiguredOnus.length}
+                      </span>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="rounded border border-slate-800 bg-[#05080f] p-3">
-                  <div className="text-center font-mono text-[11px] font-bold text-slate-200">
-                    Network status (live SQL telemetry) — total: {configuredOnus.length} ONUs
-                  </div>
-                  <div className="mt-2 flex h-32 items-end gap-0.5 border-b border-l border-slate-700 pt-4">
-                    {Array.from({ length: 36 }, (_, i) => (
-                      <div
-                        key={i}
-                        className="flex h-full flex-1 flex-col justify-end"
-                      >
-                        <div
-                          className="w-full bg-amber-500/80"
-                          style={{
-                            height: totalLowSignalCount > 0 ? '12%' : '0%',
-                          }}
-                        />
-                        <div
-                          className="w-full bg-emerald-500/80"
-                          style={{
-                            height: onlineOnus.length > 0 ? '75%' : '4%',
-                          }}
-                        />
+                {/* Card 2: Online ONUs */}
+                <div
+                  onClick={() => {
+                    setFilterSignalLevel('ALL');
+                    setActiveView('CONFIGURED');
+                  }}
+                  className="group relative cursor-pointer overflow-hidden rounded-xl border border-emerald-500/30 bg-gradient-to-br from-[#0b2622] via-[#0a1c24] to-[#091322] p-4 text-white shadow-lg transition hover:-translate-y-0.5 hover:border-emerald-400/60"
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <span className="text-xs font-semibold tracking-wide text-emerald-300 uppercase">
+                        Online ONUs
+                      </span>
+                      <div className="mt-2 font-mono text-3xl font-extrabold tracking-tight text-white">
+                        {onlineOnus.length}
                       </div>
-                    ))}
+                    </div>
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30 transition group-hover:bg-emerald-500 group-hover:text-white">
+                      <Wifi className="h-5 w-5" />
+                    </div>
                   </div>
-                  <div className="mt-2 flex flex-wrap items-center justify-between font-mono text-[10px] text-slate-300">
-                    <span className="text-emerald-400">
-                      ■ Online: {onlineOnus.length}
+                  <div className="mt-4 flex items-center justify-between border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-300">
+                    <span>Active Working</span>
+                    <span className="font-bold text-emerald-300">
+                      Total authorized: {configuredOnus.length}
                     </span>
-                    <span className="text-amber-400">
-                      ■ Low signal: {totalLowSignalCount}
-                    </span>
-                    <span className="text-red-400">■ LOS: {losOnus.length}</span>
-                    <span className="text-sky-400">
-                      ■ Power fail: {pwrFailOnus.length}
-                    </span>
+                  </div>
+                </div>
+
+                {/* Card 3: Total offline */}
+                <div
+                  onClick={() => setActiveView('CONFIGURED')}
+                  className="group relative cursor-pointer overflow-hidden rounded-xl border border-slate-700/80 bg-gradient-to-br from-[#162032] via-[#0e1726] to-[#091322] p-4 text-white shadow-lg transition hover:-translate-y-0.5 hover:border-slate-500"
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <span className="text-xs font-semibold tracking-wide text-slate-300 uppercase">
+                        Total Offline
+                      </span>
+                      <div className="mt-2 font-mono text-3xl font-extrabold tracking-tight text-white">
+                        {totalOfflineCount}
+                      </div>
+                    </div>
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-700/40 text-slate-300 ring-1 ring-slate-600/40 transition group-hover:bg-slate-700 group-hover:text-white">
+                      <Power className="h-5 w-5" />
+                    </div>
+                  </div>
+                  <div className="mt-4 flex items-center justify-between border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-300">
+                    <span className="text-amber-300">PwrFail: {pwrFailOnus.length}</span>
+                    <span className="text-rose-400">LoS: {losOnus.length}</span>
+                    <span>N/A: {otherOfflineOnus.length}</span>
+                  </div>
+                </div>
+
+                {/* Card 4: Low signals */}
+                <div
+                  onClick={() => {
+                    setFilterSignalLevel('CRITICAL');
+                    setActiveView('CONFIGURED');
+                  }}
+                  className="group relative cursor-pointer overflow-hidden rounded-xl border border-amber-500/30 bg-gradient-to-br from-[#2b1d12] via-[#191622] to-[#091322] p-4 text-white shadow-lg transition hover:-translate-y-0.5 hover:border-amber-400/60"
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <span className="text-xs font-semibold tracking-wide text-amber-300 uppercase">
+                        Low Signals
+                      </span>
+                      <div className="mt-2 font-mono text-3xl font-extrabold tracking-tight text-white">
+                        {totalLowSignalCount}
+                      </div>
+                    </div>
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/30 transition group-hover:bg-amber-500 group-hover:text-white">
+                      <AlertTriangle className="h-5 w-5" />
+                    </div>
+                  </div>
+                  <div className="mt-4 flex items-center justify-between border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-300">
+                    <span>Optical Attenuation</span>
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-amber-300">Warning: {warningSignalOnus.length}</span>
+                      <span className="font-bold text-rose-400">
+                        Critical: {criticalSignalOnus.length}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              {/* OLTs online list (Zero Dummy Data) */}
-              <div className="rounded border border-[#1e3a5f] bg-[#0b192c]/90 p-4 lg:col-span-6">
-                <div className="mb-2 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold text-white">OLTs</span>
-                    <span className="rounded bg-[#28a745] px-2 py-0.5 text-[11px] font-bold text-white">
-                      {visibleOlts.filter((o) => o.status === 'ONLINE').length}/
-                      {visibleOlts.length} online
-                    </span>
+              {/* Middle Row: Network status chart + OLTs online */}
+              <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+                {/* Network status area graph */}
+                <div className="rounded-xl border border-slate-800/90 bg-[#0b1526]/90 p-5 shadow-lg lg:col-span-6">
+                  <div className="mb-3 flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-2">
+                      <Activity className="h-4 w-4 text-sky-400" />
+                      <span className="text-sm font-bold text-white">
+                        Network Status Telemetry
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-md bg-sky-500/15 px-2 py-0.5 font-semibold text-sky-300">
+                        Hourly
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setActiveView('GRAPHS')}
+                        className="rounded-md border border-slate-700/80 bg-slate-900/70 px-2.5 py-0.5 font-medium text-sky-400 transition hover:border-sky-500/40 hover:text-sky-300"
+                      >
+                        Buka Graphs 24h →
+                      </button>
+                    </div>
                   </div>
-                  {isAdminUser && (
-                    <button
-                      type="button"
-                      onClick={() => setActiveView('ADD_OLT')}
-                      className="flex items-center gap-1 rounded bg-[#5cb85c] px-2.5 py-1 text-xs font-bold text-white hover:bg-[#4cae4c]"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      Add OLT
-                    </button>
-                  )}
+
+                  <div className="rounded-xl border border-slate-800/90 bg-[#060c17] p-3.5">
+                    <div className="flex items-center justify-between font-mono text-[11px] text-slate-300">
+                      <span>Live SQL Telemetry</span>
+                      <span className="font-bold text-white">
+                        Total: {configuredOnus.length} ONUs
+                      </span>
+                    </div>
+                    <div className="mt-3 flex h-32 items-end gap-1 border-b border-l border-slate-800 pt-4 pl-1">
+                      {Array.from({ length: 36 }, (_, i) => (
+                        <div
+                          key={i}
+                          className="flex h-full flex-1 flex-col justify-end overflow-hidden rounded-t-[2px]"
+                        >
+                          <div
+                            className="w-full bg-amber-500/85 transition-all"
+                            style={{
+                              height: totalLowSignalCount > 0 ? '14%' : '0%',
+                            }}
+                          />
+                          <div
+                            className="w-full bg-emerald-500/85 transition-all"
+                            style={{
+                              height: onlineOnus.length > 0 ? '76%' : '4%',
+                            }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] text-slate-300">
+                      <span className="inline-flex items-center gap-1.5 text-emerald-400">
+                        <span className="h-2 w-2 rounded-xs bg-emerald-400" />
+                        Online: {onlineOnus.length}
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 text-amber-400">
+                        <span className="h-2 w-2 rounded-xs bg-amber-400" />
+                        Low signal: {totalLowSignalCount}
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 text-rose-400">
+                        <span className="h-2 w-2 rounded-xs bg-rose-400" />
+                        LOS: {losOnus.length}
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 text-sky-400">
+                        <span className="h-2 w-2 rounded-xs bg-sky-400" />
+                        Power fail: {pwrFailOnus.length}
+                      </span>
+                    </div>
+                  </div>
                 </div>
 
-                {visibleOlts.length === 0 ? (
-                  <div className="rounded border border-dashed border-[#284870] bg-[#0c1c30]/60 p-6 text-center text-xs text-slate-300">
-                    <p className="font-semibold text-white">
-                      {db.olts.length === 0
-                        ? `Belum ada OLT terdaftar di Database (${dbMeta.dbEngine}).`
-                        : 'Tidak ada OLT yang di-assign ke akun Anda.'}
-                    </p>
-                    <p className="mt-1 text-slate-400">
-                      {db.olts.length === 0
-                        ? 'Klik tombol + Add OLT untuk menghubungkan OLT baru atau mengimpor #show running-config.'
-                        : 'Hubungi Administrator untuk memberikan akses OLT pada akun Anda.'}
-                    </p>
+                {/* OLTs online list */}
+                <div className="rounded-xl border border-slate-800/90 bg-[#0b1526]/90 p-5 shadow-lg lg:col-span-6">
+                  <div className="mb-3 flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <Server className="h-4 w-4 text-emerald-400" />
+                      <span className="text-sm font-bold text-white">OLT Chassis</span>
+                      <span className="rounded-md border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 font-mono text-[11px] font-bold text-emerald-300">
+                        {visibleOlts.filter((o) => o.status === 'ONLINE').length}/
+                        {visibleOlts.length} online
+                      </span>
+                    </div>
                     {isAdminUser && (
                       <button
                         type="button"
                         onClick={() => setActiveView('ADD_OLT')}
-                        className="mt-3 inline-flex items-center gap-1.5 rounded bg-[#0275d8] px-4 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+                        className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white shadow-xs transition hover:bg-emerald-500"
                       >
                         <Plus className="h-3.5 w-3.5" />
-                        Add Your First OLT
+                        Add OLT
                       </button>
                     )}
                   </div>
-                ) : (
-                  <div className="divide-y divide-[#1e3a5f]/70 text-xs">
-                    {visibleOlts.map((o) => (
-                      <div
-                        key={o.id}
-                        className="flex flex-wrap items-center justify-between py-2 hover:bg-[#132842]/50 px-2 rounded"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedOltId(o.id);
-                              setInitialOltTab('OLT_DETAILS');
-                              setActiveView('OLT_DETAIL');
-                            }}
-                            className="font-medium text-sky-400 hover:underline"
-                          >
-                            {o.id} - {o.name} ({o.ip_address})
-                          </button>
-                        </div>
-                        <div className="flex items-center gap-3 font-mono text-xs">
-                          <button
-                            type="button"
-                            onClick={() => void syncOltFromTelnetLive(o.id, o)}
-                            className="flex items-center gap-1 rounded bg-emerald-600 px-2.5 py-1 font-sans text-[11px] font-bold text-white hover:bg-emerald-500"
-                            title="Ambil semua VLAN, ONU, Uplink & Running Config langsung dari OLT via Telnet"
-                          >
-                            <RefreshCw className="h-3 w-3" />
-                            Sync Data &amp; Config OLT
-                          </button>
-                          <span className="text-slate-300">
-                            Uptime: {o.uptime_str},
-                          </span>
-                          <span
-                            className={
-                              o.temperature_c >= 50
-                                ? 'font-bold text-red-400'
-                                : o.temperature_c >= 42
-                                ? 'font-bold text-amber-400'
-                                : 'font-bold text-emerald-400'
-                            }
-                          >
-                            {o.temperature_c}°C
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
 
-            {/* Bottom Row: PON outage accordions + Info activity feed */}
-            <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-              {/* PON outage (Live from SQL Database) */}
-              <div className="space-y-2 lg:col-span-6">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-bold text-white">PON outage</span>
-                  <span className="text-xs text-slate-400">
-                    Live optical monitoring
-                  </span>
-                </div>
-
-                <div className="overflow-hidden rounded border border-[#1e3a5f] bg-[#0c1c30]">
-                  <div className="flex items-center justify-between bg-[#162b46] px-3 py-2 text-xs font-semibold text-white">
-                    <span>Signal variations &amp; LOS</span>
-                    <div className="flex items-center gap-1.5">
-                      <span className="rounded bg-red-600 px-1.5 py-0.5 text-[10px]">
-                        {criticalSignalOnus.length + losOnus.length} Critical
-                      </span>
-                    </div>
-                  </div>
-                  {criticalSignalOnus.length === 0 && losOnus.length === 0 ? (
-                    <div className="px-3 py-4 text-center text-xs text-slate-400">
-                      Tidak ada PON outage atau sinyal kritis pada database saat ini.
-                    </div>
-                  ) : (
-                    <table className="w-full text-left text-xs">
-                      <thead className="border-b border-[#1e3a5f] text-slate-300">
-                        <tr>
-                          <th className="px-3 py-1.5">OLT</th>
-                          <th className="px-3 py-1.5">ONU / PON</th>
-                          <th className="px-3 py-1.5">SN</th>
-                          <th className="px-3 py-1.5">Signal / State</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#1e3a5f]/50">
-                        {[...losOnus, ...pwrFailOnus, ...otherOfflineOnus, ...criticalSignalOnus]
-                          .slice(0, 6)
-                          .map((item) => {
-                            const o = db.olts.find((x) => x.id === item.olt_id);
-                            return (
-                              <tr key={item.id}>
-                                <td className="px-3 py-1.5">
-                                  {o ? `${o.id} - ${o.name}` : `OLT ${item.olt_id}`}
-                                </td>
-                                <td className="px-3 py-1.5 text-sky-400">
-                                  1/{item.board}/{item.port}:{item.onu_index} (
-                                  {item.customer_name})
-                                </td>
-                                <td className="px-3 py-1.5 font-mono">
-                                  {item.serial_number}
-                                </td>
-                                <td className="px-3 py-1.5">
-                                  <span
-                                    className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold text-white ${
-                                      item.phase_state === 'LOS'
-                                        ? 'bg-red-600'
-                                        : item.phase_state === 'DyingGasp'
-                                          ? 'bg-amber-600'
-                                          : item.phase_state !== 'working'
-                                            ? 'bg-slate-600'
-                                            : 'bg-orange-600'
-                                    }`}
-                                  >
-                                    {item.phase_state === 'LOS'
-                                      ? 'LOS'
-                                      : item.phase_state === 'DyingGasp'
-                                        ? 'Power fail'
-                                        : item.phase_state !== 'working'
-                                          ? 'Offline'
-                                          : `${item.onu_rx_dbm} dBm`}
-                                  </span>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              </div>
-
-              {/* Info activity feed (Live from SQL Database) */}
-              <div className="space-y-2 lg:col-span-6">
-                <div className="text-sm font-bold text-white">Info</div>
-                <div className="divide-y divide-[#1e3a5f]/60 rounded border border-[#1e3a5f] bg-[#0c1c30]/90 text-xs">
-                  {db.provisioning_logs.length === 0 ? (
-                    <div className="px-3 py-4 text-center text-slate-400">
-                      Belum ada riwayat aktivitas provisioning di database.
-                    </div>
-                  ) : (
-                    db.provisioning_logs.slice(0, 6).map((log) => {
-                      const logOlt = db.olts.find((o) => o.id === log.olt_id);
-                      return (
-                        <div
-                          key={log.id}
-                          className="flex flex-wrap items-center justify-between px-3 py-2.5 hover:bg-[#132842]/50"
+                  {visibleOlts.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-slate-700/80 bg-[#08111f]/60 p-6 text-center text-xs text-slate-300">
+                      <p className="font-semibold text-white">
+                        {db.olts.length === 0
+                          ? `Belum ada OLT terdaftar di Database (${dbMeta.dbEngine}).`
+                          : 'Tidak ada OLT yang di-assign ke akun Anda.'}
+                      </p>
+                      <p className="mt-1 text-slate-400">
+                        {db.olts.length === 0
+                          ? 'Klik tombol + Add OLT untuk menghubungkan OLT baru atau mengimpor #show running-config.'
+                          : 'Hubungi Administrator untuk memberikan akses OLT pada akun Anda.'}
+                      </p>
+                      {isAdminUser && (
+                        <button
+                          type="button"
+                          onClick={() => setActiveView('ADD_OLT')}
+                          className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-4 py-2 text-xs font-bold text-white transition hover:bg-sky-500"
                         >
-                          <div>
-                            <span className="font-mono text-sky-400">
-                              {log.summary_text ||
-                                `${log.interface_target} ${log.action_type}`}
-                            </span>{' '}
-                            <span className="text-slate-300">
-                              on {log.olt_id} - {logOlt?.name || 'OLT'}
+                          <Plus className="h-3.5 w-3.5" />
+                          Add Your First OLT
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-slate-800/80 text-xs">
+                      {visibleOlts.map((o) => (
+                        <div
+                          key={o.id}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg px-2.5 py-2.5 transition hover:bg-slate-800/40"
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 ring-4 ring-emerald-500/15" />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedOltId(o.id);
+                                setInitialOltTab('OLT_DETAILS');
+                                setActiveView('OLT_DETAIL');
+                              }}
+                              className="font-semibold text-sky-400 transition hover:text-sky-300 hover:underline"
+                            >
+                              {o.id} - {o.name}{' '}
+                              <span className="font-mono text-slate-400">({o.ip_address})</span>
+                            </button>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-3 font-mono text-xs">
+                            <button
+                              type="button"
+                              onClick={() => void syncOltFromTelnetLive(o.id, o)}
+                              className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-600/20 px-2.5 py-1 font-sans text-[11px] font-semibold text-emerald-300 transition hover:bg-emerald-600 hover:text-white"
+                              title="Ambil semua VLAN, ONU, Uplink & Running Config langsung dari OLT via Telnet"
+                            >
+                              <RefreshCw className="h-3 w-3" />
+                              Sync Data &amp; Config OLT
+                            </button>
+                            <span className="text-slate-400">Uptime: {o.uptime_str}</span>
+                            <span
+                              className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
+                                o.temperature_c >= 50
+                                  ? 'bg-rose-500/15 text-rose-400'
+                                  : o.temperature_c >= 42
+                                    ? 'bg-amber-500/15 text-amber-400'
+                                    : 'bg-emerald-500/15 text-emerald-400'
+                              }`}
+                            >
+                              {o.temperature_c}°C
                             </span>
                           </div>
-                          <div className="text-[11px] text-slate-400">
-                            by {log.executed_by} · {log.created_at}
-                          </div>
                         </div>
-                      );
-                    })
+                      ))}
+                    </div>
                   )}
                 </div>
               </div>
+
+              {/* Bottom Row: PON outage accordions + Info activity feed */}
+              <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+                {/* PON outage (Live from SQL Database) */}
+                <div className="space-y-2.5 lg:col-span-6">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-white">PON Outage &amp; Alarms</span>
+                    <span className="text-xs text-slate-400">
+                      Live optical monitoring
+                    </span>
+                  </div>
+
+                  <div className="overflow-hidden rounded-xl border border-slate-800/90 bg-[#0b1526]/90 shadow-lg">
+                    <div className="flex items-center justify-between border-b border-slate-800 bg-[#101f36] px-4 py-2.5 text-xs font-semibold text-white">
+                      <span>Signal variations &amp; LOS</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="rounded-md bg-rose-600 px-2 py-0.5 font-mono text-[10px] font-bold">
+                          {criticalSignalOnus.length + losOnus.length} Critical
+                        </span>
+                      </div>
+                    </div>
+                    {criticalSignalOnus.length === 0 && losOnus.length === 0 ? (
+                      <div className="px-4 py-6 text-center text-xs text-slate-400">
+                        Tidak ada PON outage atau sinyal kritis pada database saat ini.
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead className="border-b border-slate-800 bg-[#091220] text-[11px] font-semibold text-slate-400 uppercase">
+                            <tr>
+                              <th className="px-3.5 py-2">OLT</th>
+                              <th className="px-3.5 py-2">ONU / PON</th>
+                              <th className="px-3.5 py-2">SN</th>
+                              <th className="px-3.5 py-2">Signal / State</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800/60">
+                            {[...losOnus, ...pwrFailOnus, ...otherOfflineOnus, ...criticalSignalOnus]
+                              .slice(0, 6)
+                              .map((item) => {
+                                const o = db.olts.find((x) => x.id === item.olt_id);
+                                return (
+                                  <tr key={item.id} className="transition hover:bg-slate-800/35">
+                                    <td className="px-3.5 py-2 font-medium text-slate-200">
+                                      {o ? `${o.id} - ${o.name}` : `OLT ${item.olt_id}`}
+                                    </td>
+                                    <td className="px-3.5 py-2 font-medium text-sky-400">
+                                      1/{item.board}/{item.port}:{item.onu_index} (
+                                      {item.customer_name})
+                                    </td>
+                                    <td className="px-3.5 py-2 font-mono text-slate-300">
+                                      {item.serial_number}
+                                    </td>
+                                    <td className="px-3.5 py-2">
+                                      <span
+                                        className={`inline-block rounded-md px-2 py-0.5 font-mono text-[10px] font-bold text-white ${
+                                          item.phase_state === 'LOS'
+                                            ? 'bg-rose-600'
+                                            : item.phase_state === 'DyingGasp'
+                                              ? 'bg-amber-600'
+                                              : item.phase_state !== 'working'
+                                                ? 'bg-slate-600'
+                                                : 'bg-orange-600'
+                                        }`}
+                                      >
+                                        {item.phase_state === 'LOS'
+                                          ? 'LOS'
+                                          : item.phase_state === 'DyingGasp'
+                                            ? 'Power fail'
+                                            : item.phase_state !== 'working'
+                                              ? 'Offline'
+                                              : `${item.onu_rx_dbm} dBm`}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Info activity feed (Live from SQL Database) */}
+                <div className="space-y-2.5 lg:col-span-6">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-white">Provisioning &amp; System Activity</span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveView('TASKS')}
+                      className="text-xs font-medium text-sky-400 hover:text-sky-300"
+                    >
+                      Lihat Semua →
+                    </button>
+                  </div>
+                  <div className="divide-y divide-slate-800/70 overflow-hidden rounded-xl border border-slate-800/90 bg-[#0b1526]/90 text-xs shadow-lg">
+                    {db.provisioning_logs.length === 0 ? (
+                      <div className="px-4 py-6 text-center text-slate-400">
+                        Belum ada riwayat aktivitas provisioning di database.
+                      </div>
+                    ) : (
+                      db.provisioning_logs.slice(0, 6).map((log) => {
+                        const logOlt = db.olts.find((o) => o.id === log.olt_id);
+                        return (
+                          <div
+                            key={log.id}
+                            className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 transition hover:bg-slate-800/40"
+                          >
+                            <div>
+                              <span className="font-mono font-semibold text-sky-400">
+                                {log.summary_text ||
+                                  `${log.interface_target} ${log.action_type}`}
+                              </span>{' '}
+                              <span className="text-slate-300">
+                                on {log.olt_id} - {logOlt?.name || 'OLT'}
+                              </span>
+                            </div>
+                            <div className="font-mono text-[11px] text-slate-400">
+                              by {log.executed_by} · {log.created_at}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
         {/* ===================================================================
             VIEW 2: UNCONFIGURED ONUS (Live Telnet Poll & Manual SN Registration)
@@ -6981,7 +7864,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             )}
           </div>
         )}
-      </main>
+        </main>
+      </div>
 
       {/* Global "Update ONU mode" Modal when triggered from Configured ONUs table or VPN_TR069 */}
       {updatingModeOnu && (
@@ -7631,6 +8515,356 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 className="rounded bg-[#5cb85c] px-4 py-1.5 text-xs font-bold text-white hover:bg-[#4cae4c]"
               >
                 {pgTesting ? 'Connecting...' : 'Save & Connect PostgreSQL'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================
+          BACKUP & RESTORE DATABASE + OLT RUNNING-CONFIG MODAL
+         =================================================================== */}
+      {showBackupModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
+          onClick={() => setShowBackupModal(false)}
+        >
+          <div
+            className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-lg border border-slate-600 bg-[#152030] shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-700/80 bg-[#101926] px-6 py-4">
+              <div>
+                <h3 className="text-base font-bold text-white">
+                  Backup &amp; Restore Database &amp; Konfigurasi OLT
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-400">
+                  Simpan cadangan penuh (OLT, ONU, Zone, RK/Sector, Splitter/ODP, VLAN &amp; User) atau pulihkan data dari file backup / snapshot server.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowBackupModal(false)}
+                className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-6 p-6 text-xs">
+              {/* SECTION 1: DOWNLOAD BACKUP (FILE JSON & CLI RUNNING-CONFIG) */}
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {/* Card A: Full System Backup (.json) */}
+                <div className="flex flex-col justify-between rounded-lg border border-emerald-500/30 bg-[#0d1a2b] p-4">
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-emerald-300">
+                        1. Backup Penuh Database (.json)
+                      </span>
+                      <span className="rounded bg-emerald-950/80 px-2 py-0.5 font-mono text-[10px] text-emerald-300 border border-emerald-500/30">
+                        Full System State
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-[11px] text-slate-300">
+                      Mengunduh seluruh data OLT ({db.olts.length}), ONU ({db.onus.length}), Zone ({db.zones.length}), RK/Sector ({(db.sectors || []).length}), Splitter/ODP ({db.odbs.length}), VLAN ({db.vlans.length}), dan User ({(db.users || []).length}) ke komputer Anda.
+                    </p>
+                  </div>
+                  <div className="mt-4">
+                    <button
+                      type="button"
+                      onClick={handleDownloadFullBackupJson}
+                      className="inline-flex w-full items-center justify-center gap-2 rounded bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow hover:bg-emerald-500"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Download Full Backup (.json)
+                    </button>
+                  </div>
+                </div>
+
+                {/* Card B: Per-OLT ZTE Running-Config CLI (.cfg) */}
+                <div className="flex flex-col justify-between rounded-lg border border-sky-500/30 bg-[#0d1a2b] p-4">
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-sky-300">
+                        2. Backup CLI Running-Config OLT (.cfg)
+                      </span>
+                      <span className="rounded bg-sky-950/80 px-2 py-0.5 font-mono text-[10px] text-sky-300 border border-sky-500/30">
+                        ZTE / Huawei CLI
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-[11px] text-slate-300">
+                      Unduh script konfigurasi CLI OLT (`vlan`, `interface gpon-olt`, `interface gpon-onu`, `pon-onu-mng`) siap pakai untuk restore ke mesin OLT:
+                    </p>
+                    <div className="mt-3 max-h-28 space-y-1.5 overflow-y-auto pr-1">
+                      {visibleOlts.map((olt) => (
+                        <div
+                          key={olt.id}
+                          className="flex items-center justify-between rounded border border-slate-700/80 bg-[#13243a] px-3 py-1.5"
+                        >
+                          <div>
+                            <div className="font-semibold text-white">
+                              {olt.name}
+                            </div>
+                            <div className="font-mono text-[10px] text-slate-400">
+                              {olt.ip_address} • {olt.hardware_model}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadOltCliConfig(olt)}
+                            className="inline-flex items-center gap-1 rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#025aa5]"
+                          >
+                            <Download className="h-3 w-3" />
+                            .cfg
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* SECTION 2: RESTORE DARI FILE BACKUP (.JSON) */}
+              <div className="rounded-lg border border-amber-500/30 bg-[#0d1a2b] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="font-bold text-amber-300">
+                      3. Restore Database dari File Backup (.json)
+                    </h4>
+                    <p className="mt-0.5 text-[11px] text-slate-300">
+                      Pilih file <span className="font-mono text-white">.json</span> hasil backup untuk memulihkan data. Sistem otomatis membuat titik Auto-Backup sebelum menimpa data.
+                    </p>
+                  </div>
+
+                  {/* Mode Restore */}
+                  <div className="flex items-center gap-2 rounded border border-slate-700 bg-[#13243a] p-1">
+                    <button
+                      type="button"
+                      onClick={() => setRestoreMode('OVERWRITE')}
+                      className={`rounded px-2.5 py-1 text-[11px] font-semibold transition ${
+                        restoreMode === 'OVERWRITE'
+                          ? 'bg-amber-600 text-white'
+                          : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      Full Restore (Timpa Semua)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRestoreMode('MERGE')}
+                      className={`rounded px-2.5 py-1 text-[11px] font-semibold transition ${
+                        restoreMode === 'MERGE'
+                          ? 'bg-sky-600 text-white'
+                          : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      Merge (Gabungkan Data)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <label className="inline-flex cursor-pointer items-center gap-2 rounded border border-slate-600 bg-[#172a45] px-3.5 py-2 text-xs font-semibold text-sky-300 hover:border-sky-400 hover:text-white">
+                    <FileCode className="h-4 w-4" />
+                    <span>Pilih File Backup (.json)</span>
+                    <input
+                      type="file"
+                      accept=".json,application/json"
+                      onChange={handleBackupFileSelect}
+                      className="hidden"
+                    />
+                  </label>
+                  {uploadedBackupFileName ? (
+                    <span className="font-mono text-xs text-emerald-300">
+                      File dipilih: <strong>{uploadedBackupFileName}</strong>
+                      {uploadedBackupMeta?.exportedAtWib
+                        ? ` (Diekspor: ${uploadedBackupMeta.exportedAtWib})`
+                        : ''}
+                    </span>
+                  ) : (
+                    <span className="text-[11px] text-slate-400">
+                      Belum ada file backup yang dipilih.
+                    </span>
+                  )}
+                </div>
+
+                {uploadedBackupState && (
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded border border-emerald-500/40 bg-emerald-950/30 p-3">
+                    <div className="space-y-1">
+                      <div className="font-bold text-emerald-300">
+                        Preview Isi File Backup:
+                      </div>
+                      <div className="flex flex-wrap gap-2 font-mono text-[11px] text-slate-200">
+                        <span className="rounded bg-slate-800 px-2 py-0.5">
+                          OLT: {uploadedBackupState.olts?.length || 0}
+                        </span>
+                        <span className="rounded bg-slate-800 px-2 py-0.5">
+                          ONU: {uploadedBackupState.onus?.length || 0}
+                        </span>
+                        <span className="rounded bg-slate-800 px-2 py-0.5">
+                          Zone: {uploadedBackupState.zones?.length || 0}
+                        </span>
+                        <span className="rounded bg-slate-800 px-2 py-0.5">
+                          RK/Sector: {(uploadedBackupState.sectors || []).length}
+                        </span>
+                        <span className="rounded bg-slate-800 px-2 py-0.5">
+                          Splitter/ODP: {uploadedBackupState.odbs?.length || 0}
+                        </span>
+                        <span className="rounded bg-slate-800 px-2 py-0.5">
+                          User: {(uploadedBackupState.users || []).length}
+                        </span>
+                      </div>
+                    </div>
+                    {isAdminUser ? (
+                      <button
+                        type="button"
+                        disabled={backupBusy}
+                        onClick={handleConfirmFileRestore}
+                        className="rounded bg-amber-600 px-4 py-2 text-xs font-bold text-white shadow hover:bg-amber-500 disabled:opacity-50"
+                      >
+                        {backupBusy
+                          ? 'Memproses Restore...'
+                          : `Jalankan Restore Sekarang (${
+                              restoreMode === 'MERGE' ? 'Merge' : 'Full Restore'
+                            })`}
+                      </button>
+                    ) : (
+                      <span className="text-[11px] font-semibold text-red-300">
+                        Hanya Admin yang dapat mengeksekusi Restore.
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* SECTION 3: SERVER SNAPSHOTS (TITIK BACKUP CEPAT DI SERVER) */}
+              <div className="rounded-lg border border-slate-700 bg-[#0d1a2b] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="font-bold text-white">
+                      4. Titik Backup Cepat di Server (Server Snapshots)
+                    </h4>
+                    <p className="mt-0.5 text-[11px] text-slate-400">
+                      Simpan titik cadangan instan di database server sebelum melakukan perubahan besar.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      value={backupSnapshotLabel}
+                      onChange={(e) => setBackupSnapshotLabel(e.target.value)}
+                      placeholder="Catatan snapshot (opsional)..."
+                      className="w-56 rounded border border-slate-600 bg-[#13243a] px-3 py-1.5 text-xs text-white placeholder-slate-400 focus:border-sky-400 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      disabled={backupBusy}
+                      onClick={handleCreateServerSnapshot}
+                      className="inline-flex items-center gap-1.5 rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-50"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Buat Snapshot Sekarang
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-3 overflow-x-auto rounded border border-slate-700/80">
+                  <table className="w-full text-left text-xs">
+                    <thead className="border-b border-slate-700 bg-[#101d2e] text-[11px] font-bold uppercase text-slate-300">
+                      <tr>
+                        <th className="px-3 py-2">ID</th>
+                        <th className="px-3 py-2">Label / Catatan</th>
+                        <th className="px-3 py-2">Waktu (WIB)</th>
+                        <th className="px-3 py-2">Ringkasan Data</th>
+                        <th className="px-3 py-2">Dibuat Oleh</th>
+                        <th className="px-3 py-2 text-right">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800 bg-[#0b1523]">
+                      {backupSnapshots.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={6}
+                            className="px-4 py-6 text-center text-slate-400"
+                          >
+                            Belum ada snapshot tersimpan di server.
+                          </td>
+                        </tr>
+                      ) : (
+                        backupSnapshots.map((snap) => (
+                          <tr key={snap.id} className="hover:bg-[#13243a]/60">
+                            <td className="px-3 py-2.5 font-mono text-sky-300">
+                              #{snap.id}
+                            </td>
+                            <td className="px-3 py-2.5 font-semibold text-white">
+                              {snap.label}
+                            </td>
+                            <td className="px-3 py-2.5 font-mono text-[11px] text-slate-300">
+                              {snap.created_at_wib}
+                            </td>
+                            <td className="px-3 py-2.5 font-mono text-[11px] text-slate-300">
+                              {snap.olts_count} OLT • {snap.onus_count} ONU •{' '}
+                              {snap.zones_count} Zone • {snap.rks_count} RK/ODP
+                            </td>
+                            <td className="px-3 py-2.5 font-mono text-[11px] text-emerald-300">
+                              {snap.created_by}
+                            </td>
+                            <td className="px-3 py-2.5 text-right">
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void handleDownloadSnapshotFile(snap)
+                                  }
+                                  className="rounded border border-sky-500/40 bg-sky-950/50 px-2 py-1 text-[11px] font-semibold text-sky-300 hover:bg-sky-900/70 hover:text-white"
+                                  title="Download file JSON snapshot ini"
+                                >
+                                  Download
+                                </button>
+                                {isAdminUser && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={backupBusy}
+                                      onClick={() =>
+                                        void handleRestoreFromSnapshot(snap)
+                                      }
+                                      className="rounded bg-amber-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-amber-500 disabled:opacity-50"
+                                      title="Pulihkan database ke titik snapshot ini"
+                                    >
+                                      Restore
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        void handleDeleteSnapshot(snap.id)
+                                      }
+                                      className="rounded border border-red-500/40 bg-red-950/50 px-2 py-1 text-[11px] text-red-300 hover:bg-red-900/70 hover:text-white"
+                                      title="Hapus snapshot"
+                                    >
+                                      <Trash2 className="h-3 w-3" />
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end border-t border-slate-700/80 bg-[#101926] px-6 py-3">
+              <button
+                type="button"
+                onClick={() => setShowBackupModal(false)}
+                className="rounded bg-slate-700 px-4 py-1.5 text-xs font-bold text-white hover:bg-slate-600"
+              >
+                Tutup
               </button>
             </div>
           </div>
