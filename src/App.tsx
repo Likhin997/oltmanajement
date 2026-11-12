@@ -3808,12 +3808,22 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             const secCount = (db.sectors || []).filter(
                               (s) => s.zone_id === z.id
                             ).length;
-                            const spCount = db.odbs.filter(
+                            const zoneSplitters = db.odbs.filter(
                               (o) => o.zone_id === z.id
-                            ).length;
-                            const onuCount = db.onus.filter(
-                              (u) => u.is_authorized && u.zone_id === z.id
-                            ).length;
+                            );
+                            const spCount = zoneSplitters.length;
+                            const zoneSplitterIds = new Set(
+                              zoneSplitters.map((o) => o.id)
+                            );
+                            const attachedZoneOnus = db.onus.filter(
+                              (u) =>
+                                u.is_authorized &&
+                                (u.zone_id === z.id ||
+                                  (u.odb_id !== null &&
+                                    zoneSplitterIds.has(u.odb_id)))
+                            );
+                            const onuCount = attachedZoneOnus.length;
+                            const isZoneDeleteLocked = onuCount > 0;
                             return (
                               <tr key={z.id} className="hover:bg-[#132842]/60">
                                 <td className="px-4 py-3 font-mono text-white">
@@ -3907,7 +3917,18 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                     </button>
                                     <button
                                       type="button"
+                                      title={
+                                        isZoneDeleteLocked
+                                          ? `Tidak dapat dihapus: masih ada ${onuCount} ONU di Splitter / Zone ini`
+                                          : `Hapus Zone ${z.name}`
+                                      }
                                       onClick={() => {
+                                        if (isZoneDeleteLocked) {
+                                          showToast(
+                                            `⚠ Zone "${z.name}" tidak dapat dihapus karena masih ada ${onuCount} ONU yang terhubung di Splitter / Zone ini!`
+                                          );
+                                          return;
+                                        }
                                         setDb((prev) => ({
                                           ...prev,
                                           zones: prev.zones.filter(
@@ -3916,7 +3937,11 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                         }));
                                         showToast(`Zone "${z.name}" dihapus.`);
                                       }}
-                                      className="rounded bg-[#d9534f] p-1 text-white hover:bg-[#c9302c]"
+                                      className={`rounded p-1 transition ${
+                                        isZoneDeleteLocked
+                                          ? 'cursor-not-allowed bg-slate-700/70 text-slate-400 hover:bg-slate-700'
+                                          : 'bg-[#d9534f] text-white hover:bg-[#c9302c]'
+                                      }`}
                                     >
                                       <Trash2 className="h-3.5 w-3.5" />
                                     </button>
@@ -4647,7 +4672,18 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                     </button>
                                     <button
                                       type="button"
+                                      title={
+                                        usedPorts > 0
+                                          ? `Tidak dapat dihapus: masih ada ${usedPorts} ONU di Splitter ini`
+                                          : `Hapus Splitter ${o.name}`
+                                      }
                                       onClick={() => {
+                                        if (usedPorts > 0) {
+                                          showToast(
+                                            `⚠ Splitter / ODP "${o.name}" tidak dapat dihapus karena masih ada ${usedPorts} ONU yang terhubung di Splitter ini!`
+                                          );
+                                          return;
+                                        }
                                         setDb((prev) => ({
                                           ...prev,
                                           odbs: prev.odbs.filter(
@@ -4658,7 +4694,11 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                           `Splitter "${o.name}" dihapus.`
                                         );
                                       }}
-                                      className="rounded bg-[#d9534f] p-1 text-white hover:bg-[#c9302c]"
+                                      className={`rounded p-1 transition ${
+                                        usedPorts > 0
+                                          ? 'cursor-not-allowed bg-slate-700/70 text-slate-400 hover:bg-slate-700'
+                                          : 'bg-[#d9534f] text-white hover:bg-[#c9302c]'
+                                      }`}
                                     >
                                       <Trash2 className="h-3.5 w-3.5" />
                                     </button>
