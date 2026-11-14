@@ -2,6 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { apiFetch as fetch } from '../services/authSession';
 import {
   OnuRecord,
+  ZoneRecord,
+  SectorRecord,
+  OdbRecord,
   SmartOltDatabaseState,
 } from '../services/mockDatabase';
 import {
@@ -71,6 +74,9 @@ interface OnuDetailViewProps {
     error?: string;
     durationMs?: number;
   }> | void;
+  onQuickAddZone?: (zoneInput: Omit<ZoneRecord, 'id'>) => ZoneRecord;
+  onQuickAddSector?: (sectorInput: Omit<SectorRecord, 'id'>) => SectorRecord;
+  onQuickAddSplitter?: (odbInput: Omit<OdbRecord, 'id'>) => OdbRecord;
 }
 
 export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
@@ -80,6 +86,9 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   onBackToDashboard,
   onViewOlt,
   onExecuteAction,
+  onQuickAddZone,
+  onQuickAddSector,
+  onQuickAddSplitter,
 }) => {
   const olt =
     db.olts.find((o) => o.id === onu.olt_id) ||
@@ -230,23 +239,32 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const [metaPppoeUser, setMetaPppoeUser] = useState(cleanPppoeUser);
   const [metaPppoePass, setMetaPppoePass] = useState(cleanPppoePass);
   const [metaRebindAll, setMetaRebindAll] = useState<boolean>(false);
+  const [showInlineZoneAdd, setShowInlineZoneAdd] = useState<boolean>(false);
+  const [inlineZoneName, setInlineZoneName] = useState<string>('');
+  const [showInlineSectorAdd, setShowInlineSectorAdd] = useState<boolean>(false);
+  const [inlineSectorName, setInlineSectorName] = useState<string>('');
+  const [showInlineOdbAdd, setShowInlineOdbAdd] = useState<boolean>(false);
+  const [inlineOdbName, setInlineOdbName] = useState<string>('');
+  const [inlineOdbRatio, setInlineOdbRatio] = useState<'1:2' | '1:4' | '1:8' | '1:16' | '1:32' | '1:64'>('1:8');
 
-  // Keep inline PPPoE & metadata fields synced when `onu` prop updates
+  // Keep inline PPPoE & metadata fields synced when `onu` prop updates (only when modal is closed)
   useEffect(() => {
     setInlinePppoeUser(cleanPppoeUser);
     setInlinePppoePass(cleanPppoePass);
-    setMetaName(onu.customer_name || onu.serial_number);
-    setMetaSn(onu.serial_number);
-    setMetaAddress(onu.address || 'none');
-    setMetaContact(onu.contact || 'None');
-    setMetaExtId(onu.external_id || onu.serial_number);
-    setMetaZoneId(onu.zone_id || 'NONE');
-    setMetaSectorId(onu.sector_id || 'NONE');
-    setMetaOdbId(onu.odb_id || 'NONE');
-    setMetaOdbPort(onu.odb_port || 'NONE');
-    setMetaPppoeUser(cleanPppoeUser);
-    setMetaPppoePass(cleanPppoePass);
-  }, [onu, cleanPppoeUser, cleanPppoePass]);
+    if (activeEditDialog !== 'METADATA') {
+      setMetaName(onu.customer_name || onu.serial_number);
+      setMetaSn(onu.serial_number);
+      setMetaAddress(onu.address || 'none');
+      setMetaContact(onu.contact || 'None');
+      setMetaExtId(onu.external_id || onu.serial_number);
+      setMetaZoneId(onu.zone_id || 'NONE');
+      setMetaSectorId(onu.sector_id || 'NONE');
+      setMetaOdbId(onu.odb_id || 'NONE');
+      setMetaOdbPort(onu.odb_port || 'NONE');
+      setMetaPppoeUser(cleanPppoeUser);
+      setMetaPppoePass(cleanPppoePass);
+    }
+  }, [onu, cleanPppoeUser, cleanPppoePass, activeEditDialog]);
 
   const openMetadataDialog = (rebindDefault = false) => {
     setMetaName(onu.customer_name || onu.serial_number);
@@ -261,6 +279,9 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     setMetaPppoeUser(cleanPppoeUser);
     setMetaPppoePass(cleanPppoePass);
     setMetaRebindAll(rebindDefault);
+    setShowInlineZoneAdd(false);
+    setShowInlineSectorAdd(false);
+    setShowInlineOdbAdd(false);
     setActiveEditDialog('METADATA');
   };
 
@@ -2332,24 +2353,63 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  const cleanName =
-                    metaName.trim().toUpperCase().replace(/\s+/g, '-') ||
+                  const cleanDbName =
+                    metaName.trim().toUpperCase() ||
+                    metaSn.trim().toUpperCase();
+                  const cleanCliName =
+                    cleanDbName.replace(/\s+/g, '-') ||
                     metaSn.trim().toUpperCase();
                   const cleanSn =
                     metaSn.trim().toUpperCase() || onu.serial_number;
-                  const cleanPppoeUser =
-                    metaPppoeUser.trim().replace(/\s+/g, '-') || cleanName;
-                  const cleanPppoePass =
+                  const cleanPppoeUserVal =
+                    metaPppoeUser.trim().replace(/\s+/g, '-') || cleanCliName;
+                  const cleanPppoePassVal =
                     metaPppoePass.trim().replace(/\s+/g, '') || 'jetcyber';
                   const rebindSnOrType =
                     metaRebindAll || cleanSn !== onu.serial_number;
+
+                  const cliFieldsChanged =
+                    rebindSnOrType ||
+                    cleanDbName !== (onu.customer_name || '').trim().toUpperCase() ||
+                    metaAddress.trim() !== (onu.address || 'none').trim() ||
+                    cleanPppoeUserVal !== cleanPppoeUser ||
+                    cleanPppoePassVal !== cleanPppoePass;
+
+                  const updatedMetadataFields: Partial<OnuRecord> = {
+                    customer_name: cleanDbName,
+                    serial_number: cleanSn,
+                    onu_type: 'ALL',
+                    pppoe_username: cleanPppoeUserVal,
+                    pppoe_password: cleanPppoePassVal,
+                    address: metaAddress.trim() || 'none',
+                    contact: metaContact.trim() || 'None',
+                    external_id: metaExtId.trim() || cleanSn,
+                    zone_id: metaZoneId === 'NONE' ? null : metaZoneId,
+                    sector_id: metaSectorId === 'NONE' ? null : metaSectorId,
+                    odb_id: metaOdbId === 'NONE' ? null : metaOdbId,
+                    odb_port: metaOdbPort === 'NONE' ? null : metaOdbPort,
+                  };
+
+                  setActiveEditDialog(null);
+
+                  if (!cliFieldsChanged) {
+                    // Only SmartOLT Database fields (Zone, Splitter/ODP, Sector, Contact, External ID) changed —
+                    // save immediately to Database without running unnecessary Telnet CLI commands!
+                    void onExecuteAction(
+                      onu.id,
+                      'UPDATE_ONU_MODE',
+                      '# [DB-ONLY] Update Zone / ODP / Sector / Contact Metadata',
+                      updatedMetadataFields
+                    );
+                    return;
+                  }
 
                   const cli = generateUpdateOnuModeCliScript({
                     firmwareVersion: olt.firmware_version,
                     ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
                     onuIndex: onu.onu_index || 1,
                     serialNumber: cleanSn,
-                    customerName: cleanName,
+                    customerName: cleanCliName,
                     address: metaAddress.trim() || 'none',
                     rebindTypeAll: rebindSnOrType,
                     vlanId: vlan?.vlan_id || 101,
@@ -2359,29 +2419,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     wanRemoteAccess:
                       onu.wan_remote_access ||
                       'Enabled from everywhere in the internet',
-                    pppoeUsername: cleanPppoeUser,
-                    pppoePassword: cleanPppoePass,
+                    pppoeUsername: cleanPppoeUserVal,
+                    pppoePassword: cleanPppoePassVal,
                   });
 
-                  setActiveEditDialog(null);
                   void executeAndDisplayLivePush(
                     'UPDATE_ONU_MODE',
                     cli,
-                    {
-                      customer_name: cleanName,
-                      serial_number: cleanSn,
-                      onu_type: 'ALL',
-                      pppoe_username: cleanPppoeUser,
-                      pppoe_password: cleanPppoePass,
-                      address: metaAddress,
-                      contact: metaContact,
-                      external_id: metaExtId || cleanSn,
-                      zone_id: metaZoneId === 'NONE' ? null : metaZoneId,
-                      sector_id: metaSectorId === 'NONE' ? null : metaSectorId,
-                      odb_id: metaOdbId === 'NONE' ? null : metaOdbId,
-                      odb_port: metaOdbPort === 'NONE' ? null : metaOdbPort,
-                    },
-                    `Save & Push ONU Config (${cleanName}) — ${onuInterface}`
+                    updatedMetadataFields,
+                    `Save & Push ONU Config (${cleanDbName}) — ${onuInterface}`
                   );
                 }}
                 className="space-y-2.5"
@@ -2432,7 +2478,18 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block font-bold">Zone</label>
+                    <div className="flex items-center justify-between">
+                      <label className="block font-bold">Zone</label>
+                      {onQuickAddZone && (
+                        <button
+                          type="button"
+                          onClick={() => setShowInlineZoneAdd((v) => !v)}
+                          className="text-[11px] font-bold text-emerald-400 hover:underline"
+                        >
+                          {showInlineZoneAdd ? 'Tutup' : '+ Zone Baru'}
+                        </button>
+                      )}
+                    </div>
                     <select
                       value={metaZoneId}
                       onChange={(e) =>
@@ -2451,9 +2508,49 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                         </option>
                       ))}
                     </select>
+                    {showInlineZoneAdd && onQuickAddZone && (
+                      <div className="mt-1.5 flex items-center gap-1.5 rounded border border-emerald-500/40 bg-[#0d1f33] p-1.5">
+                        <input
+                          type="text"
+                          value={inlineZoneName}
+                          onChange={(e) => setInlineZoneName(e.target.value)}
+                          placeholder="Nama Zone baru..."
+                          className="w-full rounded border border-slate-600 bg-[#152840] px-2 py-1 text-[11px] text-white"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!inlineZoneName.trim()) return;
+                            const created = onQuickAddZone({
+                              name: inlineZoneName.trim().toUpperCase(),
+                              code: `ZN-0${db.zones.length + 1}`,
+                              city_district: 'Lebak',
+                              description: `Zone ${inlineZoneName.trim().toUpperCase()}`,
+                            });
+                            setMetaZoneId(created.id);
+                            setInlineZoneName('');
+                            setShowInlineZoneAdd(false);
+                          }}
+                          className="shrink-0 rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-emerald-500"
+                        >
+                          Tambah
+                        </button>
+                      </div>
+                    )}
                   </div>
                   <div>
-                    <label className="block font-bold">Sector</label>
+                    <div className="flex items-center justify-between">
+                      <label className="block font-bold">Sector</label>
+                      {onQuickAddSector && (
+                        <button
+                          type="button"
+                          onClick={() => setShowInlineSectorAdd((v) => !v)}
+                          className="text-[11px] font-bold text-emerald-400 hover:underline"
+                        >
+                          {showInlineSectorAdd ? 'Tutup' : '+ Sector Baru'}
+                        </button>
+                      )}
+                    </div>
                     <select
                       value={metaSectorId}
                       onChange={(e) =>
@@ -2472,11 +2569,56 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                         </option>
                       ))}
                     </select>
+                    {showInlineSectorAdd && onQuickAddSector && (
+                      <div className="mt-1.5 flex items-center gap-1.5 rounded border border-emerald-500/40 bg-[#0d1f33] p-1.5">
+                        <input
+                          type="text"
+                          value={inlineSectorName}
+                          onChange={(e) => setInlineSectorName(e.target.value)}
+                          placeholder="Nama Sector/RK..."
+                          className="w-full rounded border border-slate-600 bg-[#152840] px-2 py-1 text-[11px] text-white"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!inlineSectorName.trim()) return;
+                            const created = onQuickAddSector({
+                              name: inlineSectorName.trim().toUpperCase(),
+                              code: `SEC-0${(db.sectors || []).length + 1}`,
+                              zone_id:
+                                metaZoneId === 'NONE'
+                                  ? db.zones[0]?.id ?? null
+                                  : metaZoneId,
+                              olt_id: onu.olt_id,
+                              pon_port_id: onu.pon_port_id,
+                              description: `Sector ${inlineSectorName.trim().toUpperCase()}`,
+                            });
+                            setMetaSectorId(created.id);
+                            setInlineSectorName('');
+                            setShowInlineSectorAdd(false);
+                          }}
+                          className="shrink-0 rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-emerald-500"
+                        >
+                          Tambah
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block font-bold">Splitter (ODB/ODP)</label>
+                    <div className="flex items-center justify-between">
+                      <label className="block font-bold">Splitter (ODB/ODP)</label>
+                      {onQuickAddSplitter && (
+                        <button
+                          type="button"
+                          onClick={() => setShowInlineOdbAdd((v) => !v)}
+                          className="text-[11px] font-bold text-emerald-400 hover:underline"
+                        >
+                          {showInlineOdbAdd ? 'Tutup' : '+ ODP Baru'}
+                        </button>
+                      )}
+                    </div>
                     <select
                       value={metaOdbId}
                       onChange={(e) =>
@@ -2495,6 +2637,72 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                         </option>
                       ))}
                     </select>
+                    {showInlineOdbAdd && onQuickAddSplitter && (
+                      <div className="mt-1.5 space-y-1.5 rounded border border-emerald-500/40 bg-[#0d1f33] p-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            value={inlineOdbName}
+                            onChange={(e) => setInlineOdbName(e.target.value)}
+                            placeholder="Nama ODP (mis. ODP-ML-01)..."
+                            className="w-full rounded border border-slate-600 bg-[#152840] px-2 py-1 text-[11px] text-white"
+                          />
+                          <select
+                            value={inlineOdbRatio}
+                            onChange={(e) =>
+                              setInlineOdbRatio(
+                                e.target.value as
+                                  | '1:2'
+                                  | '1:4'
+                                  | '1:8'
+                                  | '1:16'
+                                  | '1:32'
+                                  | '1:64'
+                              )
+                            }
+                            className="rounded border border-slate-600 bg-[#152840] px-1.5 py-1 font-mono text-[11px] text-white"
+                          >
+                            <option value="1:4">1:4</option>
+                            <option value="1:8">1:8</option>
+                            <option value="1:16">1:16</option>
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!inlineOdbName.trim()) return;
+                              const totalPorts =
+                                Number(inlineOdbRatio.split(':')[1]) || 8;
+                              const created = onQuickAddSplitter({
+                                name: inlineOdbName.trim().toUpperCase(),
+                                zone_id:
+                                  metaZoneId === 'NONE'
+                                    ? db.zones[0]?.id || 1
+                                    : metaZoneId,
+                                sector_id:
+                                  metaSectorId === 'NONE' ? null : metaSectorId,
+                                olt_id: onu.olt_id,
+                                pon_port_id: onu.pon_port_id,
+                                splitter_ratio: inlineOdbRatio,
+                                total_ports: totalPorts,
+                                pole_number: `TIANG-0${db.odbs.length + 1}`,
+                                latitude: -6.355,
+                                longitude: 106.251,
+                                description: `ODP ${inlineOdbName.trim().toUpperCase()}`,
+                              });
+                              setMetaOdbId(created.id);
+                              if (metaOdbPort === 'NONE') {
+                                setMetaOdbPort(onu.onu_index || 1);
+                              }
+                              setInlineOdbName('');
+                              setShowInlineOdbAdd(false);
+                            }}
+                            className="shrink-0 rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-emerald-500"
+                          >
+                            Tambah
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <div>
                     <label className="block font-bold">Splitter Port</label>
@@ -2565,7 +2773,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     />
                   </div>
                 </div>
-                <div className="flex justify-end gap-2 pt-2">
+                <div className="flex flex-wrap justify-end gap-2 pt-2">
                   <button
                     type="button"
                     onClick={() => setActiveEditDialog(null)}
@@ -2577,7 +2785,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     type="submit"
                     className="rounded bg-[#4caf50] px-4 py-1.5 font-bold text-white hover:bg-[#43a047]"
                   >
-                    Save & Push to OLT
+                    Save Changes
                   </button>
                 </div>
               </form>

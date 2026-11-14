@@ -148,7 +148,93 @@ export default function App() {
   const [manualUncfgSn, setManualUncfgSn] = useState<string>('ZTEGC6A394D4');
   const [manualUncfgType, setManualUncfgType] = useState<string>('ALL');
   const skipNextServerSyncRef = useRef<boolean>(false);
+  const nextSyncIsUserMutationRef = useRef<boolean>(false);
+  const lastUserMutationAtRef = useRef<number>(0);
   const [isSyncingAllOnus, setIsSyncingAllOnus] = useState<boolean>(false);
+
+  // Non-destructive state merge helper so background OLT Telnet polls never wipe out
+  // newly added Zones, Sectors, ODPs (Splitters), or user-edited ONU Zone/ODP/Customer fields.
+  const mergeLiveOltStatePreservingUserMetadata = (
+    prev: SmartOltDatabaseState,
+    incoming: SmartOltDatabaseState
+  ): SmartOltDatabaseState => {
+    const mergeByIdPreferPrev = <T extends { id: number }>(
+      prevList: T[] | undefined,
+      incList: T[] | undefined
+    ): T[] => {
+      const map = new Map<number, T>();
+      for (const item of incList || []) {
+        if (item && typeof item.id === 'number') map.set(item.id, item);
+      }
+      for (const item of prevList || []) {
+        if (item && typeof item.id === 'number') map.set(item.id, item);
+      }
+      return Array.from(map.values());
+    };
+
+    const prevOnuById = new Map<number, OnuRecord>();
+    const prevOnuByCoord = new Map<string, OnuRecord>();
+    const prevOnuBySn = new Map<string, OnuRecord>();
+
+    for (const u of prev.onus || []) {
+      prevOnuById.set(u.id, u);
+      if (u.onu_index !== null) {
+        prevOnuByCoord.set(`${u.olt_id}:${u.board}:${u.port}:${u.onu_index}`, u);
+      }
+      if (u.serial_number && !u.serial_number.startsWith('ONU-')) {
+        prevOnuBySn.set(u.serial_number.toUpperCase(), u);
+      }
+    }
+
+    const mergedOnus = (incoming.onus || []).map((incOnu) => {
+      const coordKey =
+        incOnu.onu_index !== null
+          ? `${incOnu.olt_id}:${incOnu.board}:${incOnu.port}:${incOnu.onu_index}`
+          : null;
+      const prevOnu =
+        prevOnuById.get(incOnu.id) ||
+        (coordKey ? prevOnuByCoord.get(coordKey) : undefined) ||
+        (incOnu.serial_number
+          ? prevOnuBySn.get(incOnu.serial_number.toUpperCase())
+          : undefined);
+
+      if (!prevOnu) return incOnu;
+
+      return {
+        ...incOnu,
+        zone_id: prevOnu.zone_id ?? incOnu.zone_id ?? null,
+        sector_id: prevOnu.sector_id ?? incOnu.sector_id ?? null,
+        odb_id: prevOnu.odb_id ?? incOnu.odb_id ?? null,
+        odb_port: prevOnu.odb_port ?? incOnu.odb_port ?? null,
+        customer_name:
+          prevOnu.customer_name && !prevOnu.customer_name.startsWith('ONU-')
+            ? prevOnu.customer_name
+            : incOnu.customer_name,
+        address:
+          prevOnu.address &&
+          prevOnu.address.trim() !== '' &&
+          prevOnu.address.trim().toLowerCase() !== 'none'
+            ? prevOnu.address
+            : incOnu.address,
+        contact:
+          prevOnu.contact && prevOnu.contact !== 'None'
+            ? prevOnu.contact
+            : incOnu.contact,
+        external_id:
+          prevOnu.external_id && !prevOnu.external_id.startsWith('ONU-')
+            ? prevOnu.external_id
+            : incOnu.external_id,
+      };
+    });
+
+    return {
+      ...incoming,
+      zones: mergeByIdPreferPrev(prev.zones, incoming.zones),
+      sectors: mergeByIdPreferPrev(prev.sectors, incoming.sectors),
+      odbs: mergeByIdPreferPrev(prev.odbs, incoming.odbs),
+      onus: mergedOnus,
+    };
+  };
 
   const loadAuthorizedDatabaseState = async () => {
     try {
@@ -222,10 +308,20 @@ export default function App() {
       skipNextServerSyncRef.current = false;
       return;
     }
+    const isUserMut = nextSyncIsUserMutationRef.current;
+    nextSyncIsUserMutationRef.current = false;
+    if (isUserMut) {
+      lastUserMutationAtRef.current = Date.now();
+    }
+
     fetch('/api/state/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state: db }),
+      body: JSON.stringify({
+        state: db,
+        userMutation: isUserMut,
+        allowShrink: isUserMut,
+      }),
     })
       .then(async (r) => {
         if (!r.ok) return null;
@@ -233,13 +329,15 @@ export default function App() {
       })
       .then((data) => {
         if (
+          !isUserMut &&
+          Date.now() - lastUserMutationAtRef.current > 5000 &&
           data &&
           data.state &&
           Array.isArray(data.state.onus) &&
           data.state.onus.length > db.onus.length
         ) {
           skipNextServerSyncRef.current = true;
-          setDb(data.state);
+          setDb((prev) => mergeLiveOltStatePreservingUserMetadata(prev, data.state));
         }
       })
       .catch(() => {
@@ -752,6 +850,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   const [graphsOverviewPeriod, setGraphsOverviewPeriod] = useState<
     'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
   >('Live2h');
+  const [graphsGridMode, setGraphsGridMode] = useState<'1x1' | '2x1' | '4x1'>('2x1');
   const [selectedGraphInterfaceName, setSelectedGraphInterfaceName] = useState<string | null>(null);
   const [selectedGraphPeriod, setSelectedGraphPeriod] = useState<
     'ALL_PERIODS' | 'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly'
@@ -819,13 +918,25 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     return () => clearInterval(interval);
   }, [activeView, graphsOltId, selectedOltId]);
 
-  // Quick-add helpers shared between Settings -> Zones/Sectors/Splitters & AuthorizeOnuModal
+  // Quick-add helpers shared between Settings -> Zones/Sectors/Splitters, OnuDetailView & AuthorizeOnuModal
   const handleQuickAddZone = (zoneInput: Omit<ZoneRecord, 'id'>): ZoneRecord => {
     const nextId = Math.max(0, ...db.zones.map((z) => z.id)) + 1;
     const created: ZoneRecord = { ...zoneInput, id: nextId };
+    nextSyncIsUserMutationRef.current = true;
+    lastUserMutationAtRef.current = Date.now();
     setDb((prev) => ({
       ...prev,
       zones: [...prev.zones, created],
+      users: (prev.users || []).map((u) =>
+        u.id === loggedInUserId && !u.access_all_zones
+          ? {
+              ...u,
+              allowed_zone_ids: Array.from(
+                new Set([...(u.allowed_zone_ids || []), nextId])
+              ),
+            }
+          : u
+      ),
     }));
     showToast(`✓ Zone "${created.name}" berhasil ditambahkan dan tersinkronisasi!`);
     return created;
@@ -837,9 +948,21 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     const currentSectors = db.sectors || [];
     const nextId = Math.max(0, ...currentSectors.map((s) => s.id)) + 1;
     const created: SectorRecord = { ...sectorInput, id: nextId };
+    nextSyncIsUserMutationRef.current = true;
+    lastUserMutationAtRef.current = Date.now();
     setDb((prev) => ({
       ...prev,
       sectors: [...(prev.sectors || []), created],
+      users: (prev.users || []).map((u) =>
+        u.id === loggedInUserId && !u.access_all_rks
+          ? {
+              ...u,
+              allowed_sector_ids: Array.from(
+                new Set([...(u.allowed_sector_ids || []), nextId])
+              ),
+            }
+          : u
+      ),
     }));
     showToast(
       `✓ Sector "${created.name}" berhasil ditambahkan dan tersinkronisasi!`
@@ -852,9 +975,21 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   ): OdbRecord => {
     const nextId = Math.max(0, ...db.odbs.map((o) => o.id)) + 1;
     const created: OdbRecord = { ...odbInput, id: nextId };
+    nextSyncIsUserMutationRef.current = true;
+    lastUserMutationAtRef.current = Date.now();
     setDb((prev) => ({
       ...prev,
       odbs: [...prev.odbs, created],
+      users: (prev.users || []).map((u) =>
+        u.id === loggedInUserId && !u.access_all_rks
+          ? {
+              ...u,
+              allowed_odb_ids: Array.from(
+                new Set([...(u.allowed_odb_ids || []), nextId])
+              ),
+            }
+          : u
+      ),
     }));
     showToast(
       `✓ Splitter / ODP "${created.name}" (${created.splitter_ratio}) berhasil ditambahkan dan tersinkronisasi!`
@@ -1358,22 +1493,26 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   };
 
   // Scoped visibility based on logged-in user's assigned OLTs, Zones, and RKs (Sectors & Splitters)
-  const visibleOlts = !currentUser || currentUser.access_all_olts
-    ? db.olts
-    : db.olts.filter((o) => (currentUser.allowed_olt_ids || []).includes(o.id));
+  const visibleOlts =
+    !currentUser || currentUser.role === 'ADMIN' || currentUser.access_all_olts
+      ? db.olts
+      : db.olts.filter((o) => (currentUser.allowed_olt_ids || []).includes(o.id));
   const visibleOltIds = new Set(visibleOlts.map((o) => o.id));
 
-  const visibleZones = !currentUser || currentUser.access_all_zones
-    ? db.zones
-    : db.zones.filter((z) => (currentUser.allowed_zone_ids || []).includes(z.id));
+  const visibleZones =
+    !currentUser || currentUser.role === 'ADMIN' || currentUser.access_all_zones
+      ? db.zones
+      : db.zones.filter((z) => (currentUser.allowed_zone_ids || []).includes(z.id));
   const visibleZoneIds = new Set(visibleZones.map((z) => z.id));
 
   const visibleSectors = (db.sectors || []).filter((s) => {
-    if (!currentUser) return true;
+    if (!currentUser || currentUser.role === 'ADMIN') return true;
+    const zoneExists =
+      s.zone_id !== null && db.zones.some((z) => z.id === s.zone_id);
     const zoneOk =
       currentUser.access_all_zones ||
-      s.zone_id === null ||
-      visibleZoneIds.has(s.zone_id);
+      !zoneExists ||
+      (s.zone_id !== null && visibleZoneIds.has(s.zone_id));
     const rkOk =
       currentUser.access_all_rks ||
       (currentUser.allowed_sector_ids || []).includes(s.id);
@@ -1382,9 +1521,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   const visibleSectorIds = new Set(visibleSectors.map((s) => s.id));
 
   const visibleOdbs = db.odbs.filter((o) => {
-    if (!currentUser) return true;
+    if (!currentUser || currentUser.role === 'ADMIN') return true;
+    const zoneExists =
+      o.zone_id !== null &&
+      o.zone_id !== undefined &&
+      db.zones.some((z) => z.id === o.zone_id);
     const zoneOk =
-      currentUser.access_all_zones || visibleZoneIds.has(o.zone_id);
+      currentUser.access_all_zones ||
+      !zoneExists ||
+      visibleZoneIds.has(o.zone_id);
     const rkOk =
       currentUser.access_all_rks ||
       (currentUser.allowed_odb_ids || []).includes(o.id) ||
@@ -1548,7 +1693,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       const data = await resp.json();
       if (data.state) {
         skipNextServerSyncRef.current = true;
-        setDb(data.state);
+        setDb((prev) => mergeLiveOltStatePreservingUserMetadata(prev, data.state));
       }
       if (data.ok) {
         showToast(
@@ -1603,6 +1748,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     const oltToPoll =
       db.olts.find((o) => o.id === (targetOltId || selectedOltId)) || db.olts[0];
     if (!oltToPoll) return;
+    const pollStartedAt = Date.now();
     try {
       const resp = await fetch(`/api/olts/${oltToPoll.id}/poll-realtime`, {
         method: 'POST',
@@ -1618,8 +1764,12 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       });
       const data = await resp.json();
       if (data && data.ok && !data.skipped && data.state) {
-        skipNextServerSyncRef.current = true;
-        setDb(data.state);
+        // If user edited Zone, ODP, Sector, or ONU metadata while this Telnet poll was in flight,
+        // merge non-destructively so user edits are 100% preserved!
+        if (lastUserMutationAtRef.current < pollStartedAt) {
+          skipNextServerSyncRef.current = true;
+        }
+        setDb((prev) => mergeLiveOltStatePreservingUserMetadata(prev, data.state));
       }
     } catch {
       // ignore transient network errors during background poll
@@ -1994,6 +2144,11 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       );
     }
 
+    if (actionType !== 'POLL_SIGNAL') {
+      nextSyncIsUserMutationRef.current = true;
+      lastUserMutationAtRef.current = Date.now();
+    }
+
     setDb((prev) => ({
       ...prev,
       onus: prev.onus.map((item) =>
@@ -2007,6 +2162,11 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
     if (actionType === 'POLL_SIGNAL' && updatedFields) {
       return { ok: true, output: cliScript, durationMs: 0 };
+    }
+
+    if (!cliScript || cliScript.trim() === '' || cliScript.trim().startsWith('# [DB-ONLY')) {
+      showToast(`✓ Data Pelanggan / Zone / ODP berhasil disimpan ke Database!`);
+      return { ok: true, output: '[Saved to SmartOLT Database]', durationMs: 0 };
     }
 
     showToast(`Mengeksekusi ${summaryMap[actionType]} ke OLT...`);
@@ -4148,6 +4308,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               setActiveView('OLT_DETAIL');
             }}
             onExecuteAction={handleExecuteOnuAction}
+            onQuickAddZone={handleQuickAddZone}
+            onQuickAddSector={handleQuickAddSector}
+            onQuickAddSplitter={handleQuickAddSplitter}
           />
         )}
 
@@ -5500,6 +5663,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                           );
                                           return;
                                         }
+                                        nextSyncIsUserMutationRef.current = true;
+                                        lastUserMutationAtRef.current = Date.now();
                                         setDb((prev) => ({
                                           ...prev,
                                           zones: prev.zones.filter(
@@ -5547,6 +5712,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           e.preventDefault();
                           if (!zoneFormName.trim()) return;
                           if (editingZone) {
+                            nextSyncIsUserMutationRef.current = true;
+                            lastUserMutationAtRef.current = Date.now();
                             setDb((prev) => ({
                               ...prev,
                               zones: prev.zones.map((z) =>
@@ -5827,6 +5994,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                     <button
                                       type="button"
                                       onClick={() => {
+                                        nextSyncIsUserMutationRef.current = true;
+                                        lastUserMutationAtRef.current = Date.now();
                                         setDb((prev) => ({
                                           ...prev,
                                           sectors: (prev.sectors || []).filter(
@@ -5872,6 +6041,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           e.preventDefault();
                           if (!sectorFormName.trim()) return;
                           if (editingSector) {
+                            nextSyncIsUserMutationRef.current = true;
+                            lastUserMutationAtRef.current = Date.now();
                             setDb((prev) => ({
                               ...prev,
                               sectors: (prev.sectors || []).map((s) =>
@@ -6255,6 +6426,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                           );
                                           return;
                                         }
+                                        nextSyncIsUserMutationRef.current = true;
+                                        lastUserMutationAtRef.current = Date.now();
                                         setDb((prev) => ({
                                           ...prev,
                                           odbs: prev.odbs.filter(
@@ -6308,6 +6481,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           const totalPorts =
                             Number(splitterFormRatio.split(':')[1]) || 8;
                           if (editingSplitter) {
+                            nextSyncIsUserMutationRef.current = true;
+                            lastUserMutationAtRef.current = Date.now();
                             setDb((prev) => ({
                               ...prev,
                               odbs: prev.odbs.map((o) =>
@@ -7444,6 +7619,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     series={series}
                     sensorId={2000 + (item.id || 1)}
                     polledAtStr={oltGraphsData?.polledAtWib || jakartaClockStr}
+                    compact={isClickableCard && graphsGridMode === '4x1'}
                     activePeriod={isClickableCard ? graphsOverviewPeriod : periodKey}
                     onSelectPeriod={
                       isClickableCard
@@ -7477,6 +7653,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 Monthly: 'Monthly Graph, 30 days',
                 Yearly: 'Yearly Graph, 12 months',
               };
+
+              const graphsRowGridClass =
+                graphsGridMode === '4x1'
+                  ? 'grid grid-cols-1 gap-3.5 md:grid-cols-2 xl:grid-cols-4'
+                  : graphsGridMode === '2x1'
+                    ? 'grid grid-cols-1 gap-4 lg:grid-cols-2'
+                    : 'grid grid-cols-1 gap-4';
 
               return (
                 <div className="space-y-4">
@@ -7546,6 +7729,34 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           Hanya PON Port berisi ONU
                         </label>
                       )}
+
+                      {/* Selector Layout Kolom per Baris: 1x1, 2x1, 4x1 */}
+                      <div className="flex items-center gap-1 rounded border border-[#1e3a5f] bg-[#091526] p-1">
+                        <span className="px-1.5 text-[11px] font-semibold text-slate-400">
+                          Baris:
+                        </span>
+                        {(
+                          [
+                            { id: '1x1', label: '1x1' },
+                            { id: '2x1', label: '2x1' },
+                            { id: '4x1', label: '4x1' },
+                          ] as const
+                        ).map((mode) => (
+                          <button
+                            key={mode.id}
+                            type="button"
+                            onClick={() => setGraphsGridMode(mode.id)}
+                            className={`rounded px-2.5 py-1 font-mono text-xs font-bold transition ${
+                              graphsGridMode === mode.id
+                                ? 'bg-[#0275d8] text-white shadow'
+                                : 'text-slate-300 hover:bg-[#132842] hover:text-white'
+                            }`}
+                            title={`Tampilkan ${mode.label} grafik setiap baris`}
+                          >
+                            {mode.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2.5">
@@ -7623,50 +7834,58 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         </div>
                       </div>
 
-                      {(selectedGraphPeriod === 'ALL_PERIODS' ||
-                        selectedGraphPeriod === 'Live2h') &&
-                        renderGraphChartBlock(
-                          selectedGraphItem,
-                          'Live2h',
-                          'Live Graph, 2 hours',
-                          false
-                        )}
+                      <div
+                        className={
+                          selectedGraphPeriod === 'ALL_PERIODS'
+                            ? 'grid grid-cols-1 gap-4 lg:grid-cols-2'
+                            : 'space-y-4'
+                        }
+                      >
+                        {(selectedGraphPeriod === 'ALL_PERIODS' ||
+                          selectedGraphPeriod === 'Live2h') &&
+                          renderGraphChartBlock(
+                            selectedGraphItem,
+                            'Live2h',
+                            'Live Graph, 2 hours',
+                            false
+                          )}
 
-                      {(selectedGraphPeriod === 'ALL_PERIODS' ||
-                        selectedGraphPeriod === 'Daily') &&
-                        renderGraphChartBlock(
-                          selectedGraphItem,
-                          'Daily',
-                          'Live Graph, 24 hours',
-                          false
-                        )}
+                        {(selectedGraphPeriod === 'ALL_PERIODS' ||
+                          selectedGraphPeriod === 'Daily') &&
+                          renderGraphChartBlock(
+                            selectedGraphItem,
+                            'Daily',
+                            'Live Graph, 24 hours',
+                            false
+                          )}
 
-                      {(selectedGraphPeriod === 'ALL_PERIODS' ||
-                        selectedGraphPeriod === 'Weekly') &&
-                        renderGraphChartBlock(
-                          selectedGraphItem,
-                          'Weekly',
-                          'Weekly Graph, 7 days',
-                          false
-                        )}
+                        {(selectedGraphPeriod === 'ALL_PERIODS' ||
+                          selectedGraphPeriod === 'Weekly') &&
+                          renderGraphChartBlock(
+                            selectedGraphItem,
+                            'Weekly',
+                            'Weekly Graph, 7 days',
+                            false
+                          )}
 
-                      {(selectedGraphPeriod === 'ALL_PERIODS' ||
-                        selectedGraphPeriod === 'Monthly') &&
-                        renderGraphChartBlock(
-                          selectedGraphItem,
-                          'Monthly',
-                          'Monthly Graph, 30 days',
-                          false
-                        )}
+                        {(selectedGraphPeriod === 'ALL_PERIODS' ||
+                          selectedGraphPeriod === 'Monthly') &&
+                          renderGraphChartBlock(
+                            selectedGraphItem,
+                            'Monthly',
+                            'Monthly Graph, 30 days',
+                            false
+                          )}
 
-                      {(selectedGraphPeriod === 'ALL_PERIODS' ||
-                        selectedGraphPeriod === 'Yearly') &&
-                        renderGraphChartBlock(
-                          selectedGraphItem,
-                          'Yearly',
-                          'Yearly Graph, 12 months',
-                          false
-                        )}
+                        {(selectedGraphPeriod === 'ALL_PERIODS' ||
+                          selectedGraphPeriod === 'Yearly') &&
+                          renderGraphChartBlock(
+                            selectedGraphItem,
+                            'Yearly',
+                            'Yearly Graph, 12 months',
+                            false
+                          )}
+                      </div>
                     </div>
                   ) : (
                     <>
@@ -7681,15 +7900,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         graphsFilterType === 'UPLINK') &&
                         allUplinks.length > 0 && (
                           <div className="space-y-3">
-                            <div className="flex items-center justify-between">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
                               <h2 className="font-mono text-sm font-bold text-emerald-400">
-                                1. Grafik Uplink OLT — Real-Time Telemetry ({overviewWatermarkMap[graphsOverviewPeriod]} • WIB)
+                                1. Grafik Uplink OLT — Real-Time Telemetry ({overviewWatermarkMap[graphsOverviewPeriod]} • Layout {graphsGridMode} • WIB)
                               </h2>
                               <span className="text-[11px] text-slate-400">
                                 Klik grafik mana saja untuk membuka detail 2 Jam, Harian (24 Jam), Mingguan, Bulanan & Tahunan
                               </span>
                             </div>
-                            <div className="space-y-4">
+                            <div className={graphsRowGridClass}>
                               {allUplinks.map((uItem) =>
                                 renderGraphChartBlock(
                                   uItem,
@@ -7706,15 +7925,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       {(graphsFilterType === 'ALL' ||
                         graphsFilterType === 'PON') && (
                         <div className="space-y-3 pt-2">
-                          <div className="flex items-center justify-between">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
                             <h2 className="font-mono text-sm font-bold text-sky-400">
-                              2. Grafik GPON Port OLT (`gpon-olt_1/3/*`) — Real-Time Telemetry ({overviewWatermarkMap[graphsOverviewPeriod]} • WIB)
+                              2. Grafik GPON Port OLT (`gpon-olt_1/3/*`) — Real-Time Telemetry ({overviewWatermarkMap[graphsOverviewPeriod]} • Layout {graphsGridMode} • WIB)
                             </h2>
                             <span className="text-[11px] text-slate-400">
                               Menampilkan {allPonPorts.length} PON Port • Klik grafik untuk melihat 2 Jam, Harian, Mingguan, Bulanan & Tahunan
                             </span>
                           </div>
-                          <div className="space-y-4">
+                          <div className={graphsRowGridClass}>
                             {allPonPorts.map((pItem) =>
                               renderGraphChartBlock(
                                 pItem,

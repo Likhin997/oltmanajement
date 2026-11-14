@@ -727,7 +727,32 @@ async function syncRelationalTablesToPostgres(
   }
 }
 
+let latestMemoryState: SmartOltDatabaseState | null = null;
+let pgWriteChain: Promise<void> = Promise.resolve();
+
+function mergeCollectionById<T extends { id: number }>(
+  primary: T[] | undefined,
+  secondary: T[] | undefined
+): T[] {
+  const map = new Map<number, T>();
+  for (const item of secondary || []) {
+    if (item && typeof item.id === 'number') {
+      map.set(item.id, item);
+    }
+  }
+  for (const item of primary || []) {
+    if (item && typeof item.id === 'number') {
+      map.set(item.id, item);
+    }
+  }
+  return Array.from(map.values());
+}
+
 async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
+  if (latestMemoryState) {
+    return JSON.parse(JSON.stringify(latestMemoryState)) as SmartOltDatabaseState;
+  }
+
   let sqliteState: SmartOltDatabaseState | null = null;
   try {
     const row = sqliteDb
@@ -752,19 +777,49 @@ async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
         if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
           parsed.users = DEFAULT_APP_USERS;
         }
-        // Reconcile any extra ONUs from SQLite cache if present
-        if (sqliteState && Array.isArray(sqliteState.onus) && sqliteState.onus.length > parsed.onus.length) {
-          const existingKeys = new Set(
-            parsed.onus.map((u) => `${u.olt_id}:${u.board}:${u.port}:${u.onu_index ?? u.serial_number}`)
-          );
-          for (const su of sqliteState.onus) {
-            const k = `${su.olt_id}:${su.board}:${su.port}:${su.onu_index ?? su.serial_number}`;
-            if (!existingKeys.has(k)) {
-              existingKeys.add(k);
-              parsed.onus.push(su);
+        // Reconcile zones, sectors, odbs, and ONUs from SQLite cache if SQLite has newer/more records
+        if (sqliteState) {
+          parsed.zones = mergeCollectionById(sqliteState.zones, parsed.zones);
+          parsed.sectors = mergeCollectionById(sqliteState.sectors, parsed.sectors);
+          parsed.odbs = mergeCollectionById(sqliteState.odbs, parsed.odbs);
+          if (Array.isArray(sqliteState.onus)) {
+            const sqliteOnuById = new Map(sqliteState.onus.map((u) => [u.id, u]));
+            parsed.onus = parsed.onus.map((pu) => {
+              const su = sqliteOnuById.get(pu.id);
+              if (!su) return pu;
+              return {
+                ...pu,
+                zone_id: su.zone_id ?? pu.zone_id ?? null,
+                sector_id: su.sector_id ?? pu.sector_id ?? null,
+                odb_id: su.odb_id ?? pu.odb_id ?? null,
+                odb_port: su.odb_port ?? pu.odb_port ?? null,
+                customer_name:
+                  su.customer_name && !su.customer_name.startsWith('ONU-')
+                    ? su.customer_name
+                    : pu.customer_name,
+                address:
+                  su.address && su.address !== 'none'
+                    ? su.address
+                    : pu.address,
+                contact:
+                  su.contact && su.contact !== 'None'
+                    ? su.contact
+                    : pu.contact,
+              };
+            });
+            const existingKeys = new Set(
+              parsed.onus.map((u) => `${u.olt_id}:${u.board}:${u.port}:${u.onu_index ?? u.serial_number}`)
+            );
+            for (const su of sqliteState.onus) {
+              const k = `${su.olt_id}:${su.board}:${su.port}:${su.onu_index ?? su.serial_number}`;
+              if (!existingKeys.has(k)) {
+                existingKeys.add(k);
+                parsed.onus.push(su);
+              }
             }
           }
         }
+        latestMemoryState = JSON.parse(JSON.stringify(parsed)) as SmartOltDatabaseState;
         return parsed;
       }
       if (sqliteState) {
@@ -785,6 +840,7 @@ async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
     if (!Array.isArray(sqliteState.users) || sqliteState.users.length === 0) {
       sqliteState.users = DEFAULT_APP_USERS;
     }
+    latestMemoryState = JSON.parse(JSON.stringify(sqliteState)) as SmartOltDatabaseState;
     return sqliteState;
   }
 
@@ -793,31 +849,43 @@ async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
 }
 
 async function saveDatabaseState(state: SmartOltDatabaseState): Promise<void> {
-  const payload = JSON.stringify(state);
+  const cleanCopy = JSON.parse(JSON.stringify(state)) as SmartOltDatabaseState;
+  latestMemoryState = cleanCopy;
+  const payload = JSON.stringify(cleanCopy);
   const now = new Date().toISOString();
 
-  if (pgPool && pgConnected) {
-    try {
-      await pgPool.query(
+  // 1. Write synchronously to SQLite first so local persistence is instant (<1ms)
+  try {
+    sqliteDb
+      .prepare(
         `INSERT INTO smartolt_relational_store (store_key, json_payload, updated_at)
-         VALUES ('MAIN_STATE', $1, NOW())
-         ON CONFLICT (store_key) DO UPDATE
-         SET json_payload = EXCLUDED.json_payload, updated_at = NOW()`,
-        [payload]
-      );
-      await syncRelationalTablesToPostgres(pgPool, state);
-    } catch (err) {
-      console.warn('[PostgreSQL Save Warning]:', (err as Error).message);
-    }
+         VALUES ('MAIN_STATE', ?, ?)
+         ON CONFLICT(store_key) DO UPDATE SET json_payload = excluded.json_payload, updated_at = excluded.updated_at`
+      )
+      .run(payload, now);
+  } catch (err) {
+    console.warn('[SQLite Save Warning]:', (err as Error).message);
   }
 
-  sqliteDb
-    .prepare(
-      `INSERT INTO smartolt_relational_store (store_key, json_payload, updated_at)
-       VALUES ('MAIN_STATE', ?, ?)
-       ON CONFLICT(store_key) DO UPDATE SET json_payload = excluded.json_payload, updated_at = excluded.updated_at`
-    )
-    .run(payload, now);
+  // 2. Serialize PostgreSQL writes so an older slow query can never overwrite a newer state
+  if (pgPool && pgConnected) {
+    const poolRef = pgPool;
+    pgWriteChain = pgWriteChain
+      .then(async () => {
+        await poolRef.query(
+          `INSERT INTO smartolt_relational_store (store_key, json_payload, updated_at)
+           VALUES ('MAIN_STATE', $1, NOW())
+           ON CONFLICT (store_key) DO UPDATE
+           SET json_payload = EXCLUDED.json_payload, updated_at = NOW()`,
+          [payload]
+        );
+        await syncRelationalTablesToPostgres(poolRef, cleanCopy);
+      })
+      .catch((err) => {
+        console.warn('[PostgreSQL Save Warning]:', (err as Error).message);
+      });
+    await pgWriteChain;
+  }
 }
 
 // ============================================================================
@@ -1786,12 +1854,21 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
       o.serialNumber;
 
     const bestCustomerName =
-      (!o.name.startsWith('ONU-') ? o.name : null) ||
-      det?.name ||
       (prevOnu?.customer_name && !prevOnu.customer_name.startsWith('ONU-')
         ? prevOnu.customer_name
         : null) ||
+      (!o.name.startsWith('ONU-') ? o.name : null) ||
+      det?.name ||
       o.name;
+
+    const preservedAddress =
+      prevOnu?.address &&
+      prevOnu.address.trim() !== '' &&
+      prevOnu.address.trim().toLowerCase() !== 'none'
+        ? prevOnu.address
+        : o.description === 'none'
+        ? prevOnu?.address || ''
+        : o.description;
 
     return {
       id: prevOnu?.id || oltId * 100000 + o.board * 10000 + o.port * 1000 + o.onuIndex,
@@ -1804,13 +1881,13 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
       onu_type: o.onuType !== 'ALL' ? o.onuType : bi?.onuType || prevOnu?.onu_type || 'ALL',
       is_authorized: true,
       customer_name: bestCustomerName,
-      address: o.description === 'none' ? prevOnu?.address || '' : o.description,
+      address: preservedAddress,
       contact: prevOnu?.contact || 'None',
       external_id: prevOnu?.external_id || bestSerial,
-      zone_id: prevOnu?.zone_id || state.zones[0]?.id || null,
+      zone_id: prevOnu ? prevOnu.zone_id : null,
       sector_id: prevOnu?.sector_id ?? null,
-      odb_id: prevOnu?.odb_id || state.odbs[0]?.id || null,
-      odb_port: prevOnu?.odb_port || o.onuIndex,
+      odb_id: prevOnu ? prevOnu.odb_id : null,
+      odb_port: prevOnu ? prevOnu.odb_port : o.onuIndex,
       vlan_id: matchedVlan ? matchedVlan.id : prevOnu?.vlan_id || o.vlanId,
       speed_profile_id: prevOnu?.speed_profile_id || 1,
       tcont_profile_id: prevOnu?.tcont_profile_id || 1,
@@ -2605,11 +2682,21 @@ app.post('/api/state/sync', async (req, res) => {
       nextState.users = existingUsers;
     }
 
-    // Protect OLTs and ONUs from accidental overwrite by a stale frontend state
-    if (!allowShrink) {
+    // Protect OLTs, Zones, Sectors, ODPs, and ONUs from accidental overwrite by a stale frontend state
+    const isExplicitUserMutation = Boolean(req.body.userMutation);
+    if (!allowShrink && !isExplicitUserMutation) {
       if (nextState.olts.length === 0 && currentDbState.olts.length > 0) {
         nextState.olts = currentDbState.olts;
       }
+      nextState.zones = mergeCollectionById(nextState.zones, currentDbState.zones);
+      nextState.sectors = mergeCollectionById(
+        nextState.sectors,
+        currentDbState.sectors
+      );
+      nextState.odbs = mergeCollectionById(nextState.odbs, currentDbState.odbs);
+    }
+
+    if (!allowShrink) {
       const activeOltIds = new Set(nextState.olts.map((o) => o.id));
       const clientOnus = Array.isArray(nextState.onus) ? nextState.onus : [];
 
@@ -2643,6 +2730,18 @@ app.post('/api/state/sync', async (req, res) => {
             !dbMatch.customer_name.startsWith('ONU-')
               ? dbMatch.customer_name
               : co.customer_name,
+          zone_id: isExplicitUserMutation
+            ? co.zone_id
+            : co.zone_id ?? dbMatch.zone_id ?? null,
+          sector_id: isExplicitUserMutation
+            ? co.sector_id
+            : co.sector_id ?? dbMatch.sector_id ?? null,
+          odb_id: isExplicitUserMutation
+            ? co.odb_id
+            : co.odb_id ?? dbMatch.odb_id ?? null,
+          odb_port: isExplicitUserMutation
+            ? co.odb_port
+            : co.odb_port ?? dbMatch.odb_port ?? null,
         };
       });
 
@@ -3465,8 +3564,18 @@ app.post('/api/olts/:id/sync-live', async (req, res) => {
       }
     }
 
+    // Reload the latest database state AFTER slow Telnet sessions finish so any Zone, ODP, Sector,
+    // or ONU edits saved by the user while Telnet was running are 100% preserved!
+    let freshStateAfterSync = await loadDatabaseState();
+    if (!freshStateAfterSync.olts.some((o) => o.id === effectiveOltId) && olt) {
+      freshStateAfterSync = {
+        ...freshStateAfterSync,
+        olts: [...freshStateAfterSync.olts, olt],
+      };
+    }
+
     const { nextState, summary } = applyRunningConfigAndLiveTelemetryToState({
-      state,
+      state: freshStateAfterSync,
       oltId: effectiveOltId,
       rawConfig: combinedSyncOutput,
       rawUncfgOutput: combinedSyncOutput,
@@ -3658,9 +3767,14 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
     const focusedAtten = focusedOnu ? parseZteOpticalAttenuation(rawOut) : null;
     const focusedWan = focusedOnu ? parseZteWanIpOutput(rawOut) : null;
 
-    // Update existing configured ONUs
+    // CRITICAL: Re-load the latest database state AFTER the Telnet session finishes!
+    // This guarantees that any ODP, Zone, Sector, or ONU metadata (zone_id, odb_id, customer_name, etc.)
+    // edited by the user while Telnet was in flight is NEVER overwritten by a stale pre-Telnet snapshot.
+    const latestState = await loadDatabaseState();
+
+    // Update existing configured ONUs using latestState
     const existingIfKeys = new Set<string>();
-    const updatedOnus: OnuRecord[] = state.onus
+    const updatedOnus: OnuRecord[] = latestState.onus
       .filter((u) => u.olt_id !== olt.id || u.is_authorized)
       .map((u) => {
         if (u.olt_id !== olt.id || !u.is_authorized || u.onu_index === null) {
@@ -3854,7 +3968,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         (cfgOnu && !cfgOnu.name.startsWith('ONU-') ? cfgOnu.name : null) ||
         det?.name ||
         resolvedSn;
-      const matchedVlan = state.vlans.find(
+      const matchedVlan = latestState.vlans.find(
         (v) => v.olt_id === olt.id && v.vlan_id === (cfgOnu?.vlanId || 101)
       );
 
@@ -3874,10 +3988,11 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
             ? cfgOnu.description
             : 'none',
         external_id: resolvedSn,
-        zone_id: state.zones[0]?.id || null,
-        odb_id: state.odbs[0]?.id || null,
+        zone_id: null,
+        sector_id: null,
+        odb_id: null,
         odb_port: onuIndex,
-        vlan_id: matchedVlan?.id || state.vlans.find((v) => v.vlan_id === 101)?.id || 101,
+        vlan_id: matchedVlan?.id || latestState.vlans.find((v) => v.vlan_id === 101)?.id || 101,
         speed_profile_id: 1,
         tcont_profile_id: 1,
         onu_mode: 'Routing',
@@ -3920,7 +4035,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         .map((u) => u.serial_number.toUpperCase())
     );
     const prevUncfgBySn = new Map(
-      state.onus
+      latestState.onus
         .filter((u) => u.olt_id === olt.id && !u.is_authorized)
         .map((u) => [u.serial_number.toUpperCase(), u])
     );
@@ -3948,7 +4063,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         zone_id: null,
         odb_id: null,
         odb_port: null,
-        vlan_id: state.vlans.find((v) => v.vlan_id === 101)?.id || 101,
+        vlan_id: latestState.vlans.find((v) => v.vlan_id === 101)?.id || 101,
         speed_profile_id: 1,
         tcont_profile_id: 1,
         onu_mode: 'Routing',
@@ -3980,7 +4095,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
     }
 
     // Recompute PON ports online/total counts
-    const updatedPonPorts = state.pon_ports.map((p) => {
+    const updatedPonPorts = latestState.pon_ports.map((p) => {
       if (p.olt_id !== olt.id) return p;
       const portOnus = updatedOnus.filter(
         (u) => u.olt_id === olt.id && u.is_authorized && u.port === p.port_number
@@ -3993,14 +4108,14 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       };
     });
 
-    const updatedOlts = state.olts.map((o) =>
+    const updatedOlts = latestState.olts.map((o) =>
       o.id === olt.id
         ? { ...o, status: 'ONLINE' as const, last_polled_at: nowStr }
         : o
     );
 
     const nextState: SmartOltDatabaseState = {
-      ...state,
+      ...latestState,
       olts: updatedOlts,
       pon_ports: updatedPonPorts,
       onus: [...updatedOnus, ...nextUncfgOnus],
@@ -5011,20 +5126,33 @@ app.post('/api/onus/:id/poll-telemetry', async (req, res) => {
         phase_state: nextPhase,
       });
 
-      // Persist updated ONU state/power/IP if changed
+      // Persist updated ONU state/power/IP on top of the latest database state
+      // so any Zone/ODP/Sector edits made while Telnet was running are preserved
+      const freshState = await loadDatabaseState();
+      const freshOnu =
+        freshState.onus.find((u) => u.id === onu.id) || updatedOnu;
+      const mergedOnu: OnuRecord = {
+        ...freshOnu,
+        phase_state: updatedOnu.phase_state,
+        onu_rx_dbm: updatedOnu.onu_rx_dbm,
+        olt_rx_dbm: updatedOnu.olt_rx_dbm,
+        onu_tx_dbm: updatedOnu.onu_tx_dbm,
+        distance_m: updatedOnu.distance_m,
+        ip_address: updatedOnu.ip_address,
+      };
       const nextState: SmartOltDatabaseState = {
-        ...state,
-        onus: state.onus.map((u) => (u.id === onu.id ? updatedOnu : u)),
+        ...freshState,
+        onus: freshState.onus.map((u) => (u.id === onu.id ? mergedOnu : u)),
       };
       await saveDatabaseState(nextState);
 
       res.json({
         ok: true,
         reachable: true,
-        onu: updatedOnu,
+        onu: mergedOnu,
         onlineDuration: parsedDetail.onlineDuration || null,
         rawTraffic: parsedTraffic,
-        ...buildAllPeriodsTelemetry(updatedOnu, liveDownMbps, liveUpMbps),
+        ...buildAllPeriodsTelemetry(mergedOnu, liveDownMbps, liveUpMbps),
       });
       return;
     }
@@ -5820,9 +5948,10 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
           existingOnusInDb: state.onus,
           oltId: olt.id,
         });
+        const freshStateForSync = await loadDatabaseState();
         const combinedOut = `${syncRes.output}\n${extraEnrich}`;
         const { nextState, summary } = applyRunningConfigAndLiveTelemetryToState({
-          state,
+          state: freshStateForSync,
           oltId: olt.id,
           rawConfig: combinedOut,
           rawUncfgOutput: combinedOut,
@@ -5871,8 +6000,9 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
       stateByIf.set(st.fullInterface.toLowerCase(), st);
     }
 
+    const latestState = await loadDatabaseState();
     const existingIfKeys = new Set<string>();
-    const updatedExistingOnus = state.onus
+    const updatedExistingOnus = latestState.onus
       .filter((u) => u.olt_id !== olt.id || u.is_authorized)
       .map((u) => {
         if (u.olt_id !== olt.id || !u.is_authorized || u.onu_index === null)
@@ -6016,7 +6146,7 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
     }
 
     const nextState: SmartOltDatabaseState = {
-      ...state,
+      ...latestState,
       onus: [...updatedExistingOnus, ...newUnconfiguredOnus],
     };
     await saveDatabaseState(nextState);
