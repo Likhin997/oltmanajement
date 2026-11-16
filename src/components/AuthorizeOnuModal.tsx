@@ -294,6 +294,14 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   // Advanced WAN PPPoE, WAN Remote Access & TR069 options
   const [wanMode, setWanMode] = useState<WanModeOption>('PPPOE');
   const [configMethod, setConfigMethod] = useState<ConfigMethodOption>('OMCI');
+  const defaultTrProfile =
+    db.tr069_profiles.find((p) => p.is_default) || db.tr069_profiles[0];
+  const [tr069ProfileId, setTr069ProfileId] = useState<number>(
+    defaultTrProfile?.id || 1
+  );
+  const [voipSipEnabled, setVoipSipEnabled] = useState<boolean>(
+    defaultTrProfile?.voip_enabled ?? true
+  );
   const [wanRemoteAccess, setWanRemoteAccess] = useState<WanRemoteAccessOption>(
     'Enabled from everywhere in the internet'
   );
@@ -310,11 +318,30 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
       id: 101,
       vlan_id: 101,
       name: 'PPPOE',
+      used_for_mgmt_tr069_voip: false,
+      service_type: 'PPPOE' as const,
     };
   const selectedSpeed =
     db.speed_profiles.find((s) => s.id === downSpeedId) || db.speed_profiles[0];
   const selectedTcont = db.tcont_profiles[0];
-  const selectedTr069 = db.tr069_profiles[0];
+  const selectedTr069 =
+    db.tr069_profiles.find((p) => p.id === tr069ProfileId) ||
+    db.tr069_profiles[0];
+  const oltMgmtVlan = db.vlans.find(
+    (v) =>
+      v.olt_id === selectedOltId &&
+      (v.used_for_mgmt_tr069_voip || v.service_type === 'TR069_MGMT')
+  );
+  const isSelectedVlanMgmtOnly = Boolean(
+    selectedVlan?.used_for_mgmt_tr069_voip ||
+      selectedVlan?.service_type === 'TR069_MGMT'
+  );
+  const effectiveConfigMethod: ConfigMethodOption = isSelectedVlanMgmtOnly
+    ? 'TR069'
+    : configMethod;
+  const effectiveMgmtVlanId = isSelectedVlanMgmtOnly
+    ? selectedVlan.vlan_id
+    : selectedTr069?.mgmt_vlan_id || oltMgmtVlan?.vlan_id || 100;
 
   const effectivePppoeUser =
     pppoeUsername.trim() ||
@@ -335,15 +362,21 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
       vlanId: selectedVlan?.vlan_id || 101,
       onuMode,
       wanMode: onuMode === 'Bridging' ? 'BRIDGE' : wanMode,
-      configMethod,
+      configMethod: effectiveConfigMethod,
       wanRemoteAccess,
       pppoeUsername: effectivePppoeUser,
       pppoePassword,
-      tr069Enabled: configMethod === 'TR069',
+      tr069Enabled: effectiveConfigMethod === 'TR069',
       tr069AcsUrl: selectedTr069?.acs_url,
       tr069AcsUsername: selectedTr069?.acs_username,
       tr069AcsPassword: selectedTr069?.acs_password,
       tr069PeriodicInterval: selectedTr069?.periodic_inform_interval,
+      tr069MgmtVlanId: effectiveMgmtVlanId,
+      tr069Priority: selectedTr069?.vlan_priority ?? 2,
+      tr069TcontProfile: selectedTr069?.tcont_profile,
+      tr069TrafficProfile: selectedTr069?.traffic_profile,
+      voipSipEnabled: isSelectedVlanMgmtOnly ? true : voipSipEnabled,
+      mgmtOnlyNoInternet: isSelectedVlanMgmtOnly,
     });
   }, [
     olt?.firmware_version,
@@ -358,11 +391,14 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
     selectedVlan,
     onuMode,
     wanMode,
-    configMethod,
+    effectiveConfigMethod,
     wanRemoteAccess,
     effectivePppoeUser,
     pppoePassword,
     selectedTr069,
+    effectiveMgmtVlanId,
+    isSelectedVlanMgmtOnly,
+    voipSipEnabled,
   ]);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -394,24 +430,39 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         speed_profile_id: downSpeedId,
         tcont_profile_id: selectedTcont?.id || 1,
         onu_mode: onuMode,
-        wan_mode: onuMode === 'Bridging' ? 'BRIDGE' : wanMode,
-        config_method: configMethod,
+        wan_mode: isSelectedVlanMgmtOnly
+          ? 'DHCP'
+          : onuMode === 'Bridging'
+          ? 'BRIDGE'
+          : wanMode,
+        config_method: effectiveConfigMethod,
         wan_remote_access: wanRemoteAccess,
         wan_remote_allowed_subnet: '0.0.0.0/0',
-        tr069_profile_id: 1,
-        tr069_status: 'ACTIVE_INFORMING',
-        tr069_last_inform: `${jktIso} WIB`,
+        tr069_profile_id: selectedTr069?.id || tr069ProfileId || 1,
+        tr069_mgmt_vlan_id: effectiveMgmtVlanId,
+        tr069_status:
+          effectiveConfigMethod === 'TR069' ? 'ACTIVE_INFORMING' : 'DISABLED',
+        tr069_last_inform:
+          effectiveConfigMethod === 'TR069' ? `${jktIso} WIB` : null,
+        voip_enabled: isSelectedVlanMgmtOnly ? true : voipSipEnabled,
         mgmt_ip: null,
         wifi_enabled: true,
-        pppoe_username: onuMode === 'Routing' ? effectivePppoeUser : null,
-        pppoe_password: onuMode === 'Routing' ? pppoePassword : null,
+        pppoe_username:
+          !isSelectedVlanMgmtOnly && onuMode === 'Routing'
+            ? effectivePppoeUser
+            : null,
+        pppoe_password:
+          !isSelectedVlanMgmtOnly && onuMode === 'Routing'
+            ? pppoePassword
+            : null,
         phase_state: 'working',
         onu_rx_dbm: onu.onu_rx_dbm,
         olt_rx_dbm: onu.olt_rx_dbm,
-        ip_address:
-          onuMode === 'Routing'
-            ? null
-            : `Bridge-VLAN${selectedVlan?.vlan_id || 101}`,
+        ip_address: isSelectedVlanMgmtOnly
+          ? `Mgmt-VLAN${selectedVlan?.vlan_id || effectiveMgmtVlanId}`
+          : onuMode === 'Routing'
+          ? null
+          : `Bridge-VLAN${selectedVlan?.vlan_id || 101}`,
         auth_date_label: `Today ${nowTime} WIB`,
         last_online_at: jktIso,
         last_offline_reason: 'None',
@@ -748,27 +799,35 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
           <label className="font-semibold text-slate-200 sm:col-span-3 sm:text-right sm:pr-4">
             User VLAN-ID
           </label>
-          <div className="sm:col-span-8">
-            <select
-              value={vlanRecordId}
-              onChange={(e) => setVlanRecordId(Number(e.target.value))}
-              className="w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
-            >
-              {db.vlans.length === 0 ? (
-                <>
-                  <option value={101}>101 - PPPOE (Default)</option>
-                  <option value={100}>100 - TR069</option>
-                </>
-              ) : (
-                db.vlans.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.vlan_id} - {v.name}
-                  </option>
-                ))
-              )}
-            </select>
-          </div>
-        </div>
+              <div className="sm:col-span-8">
+                <select
+                  value={vlanRecordId}
+                  onChange={(e) => setVlanRecordId(Number(e.target.value))}
+                  className="w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                >
+                  {db.vlans.length === 0 ? (
+                    <>
+                      <option value={101}>101 - PPPOE (Default)</option>
+                      <option value={100}>100 - TR069 [MGMT: TR069 + VoIP Only]</option>
+                    </>
+                  ) : (
+                    db.vlans.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.vlan_id} - {v.name}
+                        {v.used_for_mgmt_tr069_voip || v.service_type === 'TR069_MGMT'
+                          ? ' [MGMT: TR069 + VoIP Only]'
+                          : ''}
+                      </option>
+                    ))
+                  )}
+                </select>
+                {isSelectedVlanMgmtOnly && (
+                  <div className="mt-2 rounded border border-amber-500/50 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200">
+                    <strong>Mode VLAN Management (VLAN {selectedVlan.vlan_id}):</strong> Service yang dikirim hanya <strong>TR-069 &amp; VoIP</strong>, tanpa push Internet (PPPoE / DHCP WAN / Bridge).
+                  </div>
+                )}
+              </div>
+            </div>
 
         {/* Zone */}
         <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-12">
@@ -1267,49 +1326,54 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         </div>
 
         {/* WAN PPPoE + WAN Remote Access + TR069 Inline Quick Config */}
-        {onuMode === 'Routing' && (
+        {(onuMode === 'Routing' || isSelectedVlanMgmtOnly) && (
           <div className="grid grid-cols-1 items-start gap-2 border-t border-[#1e3a5f] pt-3 sm:grid-cols-12">
             <label className="pt-2 font-semibold text-emerald-400 sm:col-span-3 sm:text-right sm:pr-4">
-              WAN PPPoE & TR-069
+              {isSelectedVlanMgmtOnly ? 'TR-069 & VoIP Mgmt' : 'WAN PPPoE & TR-069'}
             </label>
             <div className="grid grid-cols-1 gap-3 rounded border border-[#284870] bg-[#10233a]/80 p-3 sm:col-span-8 sm:grid-cols-2">
-              <div>
-                <label className="block text-[11px] text-slate-400">
-                  PPPoE Username
-                </label>
-                <input
-                  type="text"
-                  value={pppoeUsername}
-                  onChange={(e) => {
-                    setPppoeUserEdited(true);
-                    setPppoeUsername(e.target.value);
-                  }}
-                  placeholder={effectivePppoeUser}
-                  className="mt-1 w-full rounded border border-[#284870] bg-[#0c1c30] px-2.5 py-1.5 font-mono text-xs text-white"
-                />
-              </div>
-              <div>
-                <label className="block text-[11px] text-slate-400">
-                  PPPoE Password
-                </label>
-                <input
-                  type="text"
-                  value={pppoePassword}
-                  onChange={(e) => setPppoePassword(e.target.value)}
-                  className="mt-1 w-full rounded border border-[#284870] bg-[#0c1c30] px-2.5 py-1.5 font-mono text-xs text-white"
-                />
-              </div>
+              {!isSelectedVlanMgmtOnly && (
+                <>
+                  <div>
+                    <label className="block text-[11px] text-slate-400">
+                      PPPoE Username
+                    </label>
+                    <input
+                      type="text"
+                      value={pppoeUsername}
+                      onChange={(e) => {
+                        setPppoeUserEdited(true);
+                        setPppoeUsername(e.target.value);
+                      }}
+                      placeholder={effectivePppoeUser}
+                      className="mt-1 w-full rounded border border-[#284870] bg-[#0c1c30] px-2.5 py-1.5 font-mono text-xs text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400">
+                      PPPoE Password
+                    </label>
+                    <input
+                      type="text"
+                      value={pppoePassword}
+                      onChange={(e) => setPppoePassword(e.target.value)}
+                      className="mt-1 w-full rounded border border-[#284870] bg-[#0c1c30] px-2.5 py-1.5 font-mono text-xs text-white"
+                    />
+                  </div>
+                </>
+              )}
               <div>
                 <label className="block text-[11px] text-slate-400">
                   Config method
                 </label>
                 <select
-                  value={configMethod}
+                  value={effectiveConfigMethod}
+                  disabled={isSelectedVlanMgmtOnly}
                   onChange={(e) => setConfigMethod(e.target.value as ConfigMethodOption)}
                   className="mt-1 w-full rounded border border-[#284870] bg-[#0c1c30] px-2.5 py-1.5 text-xs text-white"
                 >
                   <option value="OMCI">OMCI</option>
-                  <option value="TR069">TR069 - Active (JETCYBER ACS)</option>
+                  <option value="TR069">TR069 - Active (CWMP ACS)</option>
                 </select>
               </div>
               <div>
@@ -1332,6 +1396,46 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
                   <option value="Disabled">Disabled</option>
                 </select>
               </div>
+
+              {effectiveConfigMethod === 'TR069' && (
+                <>
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] text-emerald-300">
+                      TR-069 ACS Profile (ISP) — Mgmt VLAN {effectiveMgmtVlanId}
+                    </label>
+                    <select
+                      value={tr069ProfileId}
+                      onChange={(e) => {
+                        const nextId = Number(e.target.value);
+                        setTr069ProfileId(nextId);
+                        const prof = db.tr069_profiles.find((p) => p.id === nextId);
+                        if (prof && typeof prof.voip_enabled === 'boolean') {
+                          setVoipSipEnabled(prof.voip_enabled);
+                        }
+                      }}
+                      className="mt-1 w-full rounded border border-emerald-600/50 bg-[#0c1c30] px-2.5 py-1.5 font-mono text-xs text-white"
+                    >
+                      {db.tr069_profiles.map((prof) => (
+                        <option key={prof.id} value={prof.id}>
+                          {prof.profile_name} ({prof.acs_url} · VLAN {prof.mgmt_vlan_id})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="flex cursor-pointer items-center gap-2 text-[11px] font-semibold text-sky-300">
+                      <input
+                        type="checkbox"
+                        checked={isSelectedVlanMgmtOnly ? true : voipSipEnabled}
+                        disabled={isSelectedVlanMgmtOnly}
+                        onChange={(e) => setVoipSipEnabled(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded accent-sky-500"
+                      />
+                      Aktifkan Service VoIP SIP (`voip protocol sip`) pada Mgmt VLAN {effectiveMgmtVlanId}
+                    </label>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}

@@ -145,6 +145,12 @@ export interface Tr069ProfileRecord {
   connection_request_password: string;
   periodic_inform_interval: number;
   mgmt_vlan_id: number;
+  vlan_priority?: number;
+  tcont_profile?: string;
+  traffic_profile?: string;
+  voip_enabled?: boolean;
+  voip_sip_server?: string;
+  description?: string;
   is_default: boolean;
 }
 
@@ -222,8 +228,10 @@ export interface OnuRecord {
   wan_remote_access: WanRemoteAccessOption;
   wan_remote_allowed_subnet: string;
   tr069_profile_id: number | null;
+  tr069_mgmt_vlan_id?: number | null;
   tr069_status: 'ACTIVE_INFORMING' | 'PENDING_INFORM' | 'DISABLED';
   tr069_last_inform: string | null;
+  voip_enabled?: boolean;
   mgmt_ip?: string | null;
   wifi_enabled?: boolean;
   wifi_ssid: string | null;
@@ -441,6 +449,12 @@ export const INITIAL_DB_STATE: SmartOltDatabaseState = {
       connection_request_password: 'smartolt-req',
       periodic_inform_interval: 300,
       mgmt_vlan_id: 100,
+      vlan_priority: 2,
+      tcont_profile: 'SMARTOLT-VOIPMNG-10M',
+      traffic_profile: 'SMARTOLT-VOIPMNG-10M',
+      voip_enabled: true,
+      voip_sip_server: '',
+      description: 'Default ISP TR-069 CWMP + VoIP Management Profile',
       is_default: true,
     },
   ],
@@ -554,31 +568,60 @@ export function buildLiveZteRunningConfig(
     for (const o of portOnus) {
       const vlObj = db.vlans.find((v) => v.id === o.vlan_id || v.vlan_id === o.vlan_id);
       const vlanNum = vlObj?.vlan_id || o.vlan_id || 101;
+      const trProfile =
+        db.tr069_profiles.find((t) => t.id === o.tr069_profile_id) ||
+        db.tr069_profiles.find((t) => t.is_default) ||
+        db.tr069_profiles[0];
+      const oltMgmtVlan = oltVlans.find(
+        (v) => v.used_for_mgmt_tr069_voip || v.service_type === 'TR069_MGMT'
+      );
+      const isMgmtOnly = Boolean(
+        vlObj?.used_for_mgmt_tr069_voip || vlObj?.service_type === 'TR069_MGMT'
+      );
+      const mgmtVlanNum =
+        o.tr069_mgmt_vlan_id ||
+        trProfile?.mgmt_vlan_id ||
+        oltMgmtVlan?.vlan_id ||
+        100;
+      const mgmtTcont = trProfile?.tcont_profile || 'SMARTOLT-VOIPMNG-10M';
+      const mgmtTraffic = trProfile?.traffic_profile || 'SMARTOLT-VOIPMNG-10M';
+
       lines.push(
         `interface gpon-onu_1/3/${p}:${o.onu_index}`,
         `  name ${o.customer_name || o.serial_number}`,
         `  description ${o.address || 'none'}`,
-        `  sn-bind enable sn`,
-        `  tcont 1 profile SMARTOLT-1G-UP`
+        `  sn-bind enable sn`
       );
-      if (o.config_method === 'TR069') {
-        lines.push(`  tcont 2 profile SMARTOLT-VOIPMNG-10M`);
-      }
-      lines.push(
-        `  gemport 1 tcont 1`,
-        `  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN`
-      );
-      if (o.config_method === 'TR069') {
+      if (isMgmtOnly) {
         lines.push(
-          `  gemport 2 tcont 2`,
-          `  gemport 2 traffic-limit downstream SMARTOLT-VOIPMNG-10M`
+          `  tcont 1 profile ${mgmtTcont}`,
+          `  gemport 1 tcont 1`,
+          `  gemport 1 traffic-limit downstream ${mgmtTraffic}`,
+          `  service-port 1 vport 1 user-vlan ${vlanNum} vlan ${vlanNum}`
         );
-      }
-      lines.push(
-        `  service-port 1 vport 1 user-vlan ${vlanNum} vlan ${vlanNum}`
-      );
-      if (o.config_method === 'TR069') {
-        lines.push(`  service-port 2 vport 2 user-vlan 100 vlan 100`);
+      } else {
+        lines.push(`  tcont 1 profile SMARTOLT-1G-UP`);
+        if (o.config_method === 'TR069') {
+          lines.push(`  tcont 2 profile ${mgmtTcont}`);
+        }
+        lines.push(
+          `  gemport 1 tcont 1`,
+          `  gemport 1 traffic-limit downstream SMARTOLT-1G-DOWN`
+        );
+        if (o.config_method === 'TR069') {
+          lines.push(
+            `  gemport 2 tcont 2`,
+            `  gemport 2 traffic-limit downstream ${mgmtTraffic}`
+          );
+        }
+        lines.push(
+          `  service-port 1 vport 1 user-vlan ${vlanNum} vlan ${vlanNum}`
+        );
+        if (o.config_method === 'TR069') {
+          lines.push(
+            `  service-port 2 vport 2 user-vlan ${mgmtVlanNum} vlan ${mgmtVlanNum}`
+          );
+        }
       }
       lines.push(`!`);
     }
@@ -617,36 +660,79 @@ export function buildLiveZteRunningConfig(
     const vlanNum = vlObj?.vlan_id || o.vlan_id || 101;
     const trProfile =
       db.tr069_profiles.find((t) => t.id === o.tr069_profile_id) ||
+      db.tr069_profiles.find((t) => t.is_default) ||
       db.tr069_profiles[0];
+    const oltMgmtVlan = oltVlans.find(
+      (v) => v.used_for_mgmt_tr069_voip || v.service_type === 'TR069_MGMT'
+    );
+    const isMgmtOnly = Boolean(
+      vlObj?.used_for_mgmt_tr069_voip || vlObj?.service_type === 'TR069_MGMT'
+    );
+    const mgmtVlanNum =
+      o.tr069_mgmt_vlan_id ||
+      trProfile?.mgmt_vlan_id ||
+      oltMgmtVlan?.vlan_id ||
+      100;
+    const pri = trProfile?.vlan_priority ?? 2;
 
     lines.push(`pon-onu-mng gpon-onu_1/3/${o.port}:${o.onu_index}`);
-    lines.push(
-      `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
-      `  flow 1 pri 0 vlan ${vlanNum}`
-    );
-    if (o.hotspot_bridge_vlan) {
-      lines.push(`  flow 1 pri 0 vlan ${o.hotspot_bridge_vlan}`);
-    }
-    lines.push(
-      `  gemport 1 flow 1`,
-      `  switchport-bind switch_0/1 iphost 1`,
-      `  switchport-bind switch_0/1 veip 1`,
-      `  pppoe 1 nat enable user ${o.pppoe_username || o.customer_name || 'USER'} password ${o.pppoe_password || 'jetcyber'}`,
-      `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
-      `  vlan-filter iphost 1 pri 0 vlan ${vlanNum}`
-    );
-
-    const ethPorts = o.onu_type === 'F670LV9.0' ? 4 : 8;
-    for (let e = 1; e <= ethPorts; e++) {
-      lines.push(`  dhcp-ip ethuni eth_0/${e} from-onu`);
-    }
-
-    if (o.config_method === 'TR069' && trProfile) {
+    if (isMgmtOnly) {
       lines.push(
-        `  tr069-mgmt 1 state unlock`,
-        `  tr069-mgmt 1 acs ${trProfile.acs_url} validate basic username ${trProfile.acs_username} password ${trProfile.acs_password}`,
-        `  tr069-mgmt 1 tag pri 2 vlan 100`
+        `  voip protocol sip`,
+        `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
+        `  flow 1 pri ${pri} vlan ${vlanNum}`,
+        `  gemport 1 flow 1`,
+        `  switchport-bind switch_0/1 iphost 1`,
+        `  switchport-bind switch_0/1 veip 1`,
+        `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
+        `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+        `  vlan-filter iphost 1 pri ${pri} vlan ${vlanNum}`,
+        `  veip 1 port udp 1232 host 1`
       );
+      if (trProfile) {
+        lines.push(
+          `  tr069-mgmt 1 state unlock`,
+          `  tr069-mgmt 1 acs ${trProfile.acs_url} validate basic username ${trProfile.acs_username} password ${trProfile.acs_password}`,
+          `  tr069-mgmt 1 tag pri ${pri} vlan ${vlanNum}`
+        );
+      }
+    } else {
+      lines.push(
+        `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
+        `  flow 1 pri 0 vlan ${vlanNum}`
+      );
+      if (o.hotspot_bridge_vlan) {
+        lines.push(`  flow 1 pri 0 vlan ${o.hotspot_bridge_vlan}`);
+      }
+      lines.push(
+        `  gemport 1 flow 1`,
+        `  switchport-bind switch_0/1 iphost 1`,
+        `  switchport-bind switch_0/1 veip 1`,
+        `  pppoe 1 nat enable user ${o.pppoe_username || o.customer_name || 'USER'} password ${o.pppoe_password || 'jetcyber'}`,
+        `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+        `  vlan-filter iphost 1 pri 0 vlan ${vlanNum}`
+      );
+
+      const ethPorts = o.onu_type === 'F670LV9.0' ? 4 : 8;
+      for (let e = 1; e <= ethPorts; e++) {
+        lines.push(`  dhcp-ip ethuni eth_0/${e} from-onu`);
+      }
+
+      if (o.config_method === 'TR069' && trProfile) {
+        lines.push(
+          `  flow 2 switch switch_0/1`,
+          `  flow mode 2 tag-filter vlan-filter untag-filter discard`,
+          `  flow 2 pri ${pri} vlan ${mgmtVlanNum}`,
+          `  gemport 2 flow 2`,
+          `  switchport-bind switch_0/1 iphost 2`,
+          `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
+          `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
+          `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlanNum}`,
+          `  tr069-mgmt 1 state unlock`,
+          `  tr069-mgmt 1 acs ${trProfile.acs_url} validate basic username ${trProfile.acs_username} password ${trProfile.acs_password}`,
+          `  tr069-mgmt 1 tag pri ${pri} vlan ${mgmtVlanNum}`
+        );
+      }
     }
 
     lines.push(

@@ -97,9 +97,16 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
     onu.static_dns1 || '8.8.8.8'
   );
 
-  // TR-069 specific fields
+  // TR-069 & VoIP Mgmt specific fields
+  const defaultTrProfile =
+    db.tr069_profiles.find((p) => p.id === onu.tr069_profile_id) ||
+    db.tr069_profiles.find((p) => p.is_default) ||
+    db.tr069_profiles[0];
   const [tr069ProfileId, setTr069ProfileId] = useState<number>(
-    onu.tr069_profile_id || db.tr069_profiles[0]?.id || 1
+    defaultTrProfile?.id || 1
+  );
+  const [voipSipEnabled, setVoipSipEnabled] = useState<boolean>(
+    onu.voip_enabled ?? defaultTrProfile?.voip_enabled ?? true
   );
   const [wifiSsid, setWifiSsid] = useState<string>(
     onu.wifi_ssid || `${(onu.customer_name || 'SmartOLT').split(' ')[0]}_5G`
@@ -117,10 +124,27 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
       id: 101,
       vlan_id: 101,
       name: 'PPPOE',
+      used_for_mgmt_tr069_voip: false,
+      service_type: 'PPPOE' as const,
     };
   const selectedTr069Profile =
     db.tr069_profiles.find((p) => p.id === tr069ProfileId) ||
     db.tr069_profiles[0];
+  const oltMgmtVlan = db.vlans.find(
+    (v) =>
+      v.olt_id === (olt?.id || onu.olt_id) &&
+      (v.used_for_mgmt_tr069_voip || v.service_type === 'TR069_MGMT')
+  );
+  const isSelectedVlanMgmtOnly = Boolean(
+    selectedVlan?.used_for_mgmt_tr069_voip ||
+      selectedVlan?.service_type === 'TR069_MGMT'
+  );
+  const effectiveConfigMethod: ConfigMethodOption = isSelectedVlanMgmtOnly
+    ? 'TR069'
+    : configMethod;
+  const effectiveMgmtVlanId = isSelectedVlanMgmtOnly
+    ? selectedVlan.vlan_id
+    : selectedTr069Profile?.mgmt_vlan_id || oltMgmtVlan?.vlan_id || 100;
 
   const generatedCli = useMemo(() => {
     return generateUpdateOnuModeCliScript({
@@ -134,7 +158,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
       vlanId: selectedVlan?.vlan_id || 101,
       onuMode,
       wanMode: onuMode === 'Bridging' ? 'BRIDGE' : wanMode,
-      configMethod,
+      configMethod: effectiveConfigMethod,
       wanRemoteAccess,
       wanRemoteAllowedSubnet: allowedSubnet,
       pppoeUsername: username,
@@ -147,6 +171,12 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
       tr069AcsUsername: selectedTr069Profile?.acs_username,
       tr069AcsPassword: selectedTr069Profile?.acs_password,
       tr069PeriodicInterval: selectedTr069Profile?.periodic_inform_interval,
+      tr069MgmtVlanId: effectiveMgmtVlanId,
+      tr069Priority: selectedTr069Profile?.vlan_priority ?? 2,
+      tr069TcontProfile: selectedTr069Profile?.tcont_profile,
+      tr069TrafficProfile: selectedTr069Profile?.traffic_profile,
+      voipSipEnabled: isSelectedVlanMgmtOnly ? true : voipSipEnabled,
+      mgmtOnlyNoInternet: isSelectedVlanMgmtOnly,
       wifiSsid,
       wifiPassword,
     });
@@ -161,7 +191,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
     selectedVlan,
     onuMode,
     wanMode,
-    configMethod,
+    effectiveConfigMethod,
     wanRemoteAccess,
     allowedSubnet,
     username,
@@ -171,6 +201,9 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
     staticGw,
     staticDns,
     selectedTr069Profile,
+    effectiveMgmtVlanId,
+    isSelectedVlanMgmtOnly,
+    voipSipEnabled,
     wifiSsid,
     wifiPassword,
   ]);
@@ -186,25 +219,35 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
         onu_type: rebindTypeAll ? 'ALL' : onu.onu_type,
         vlan_id: selectedVlan?.id || vlanRecordId,
         onu_mode: onuMode,
-        wan_mode: onuMode === 'Bridging' ? 'BRIDGE' : wanMode,
-        config_method: configMethod,
+        wan_mode: isSelectedVlanMgmtOnly
+          ? 'DHCP'
+          : onuMode === 'Bridging'
+          ? 'BRIDGE'
+          : wanMode,
+        config_method: effectiveConfigMethod,
         wan_remote_access: wanRemoteAccess,
         wan_remote_allowed_subnet: allowedSubnet,
         pppoe_username:
-          onuMode === 'Routing' && wanMode === 'PPPOE'
+          !isSelectedVlanMgmtOnly && onuMode === 'Routing' && wanMode === 'PPPOE'
             ? username.trim().replace(/\s+/g, '-')
             : onu.pppoe_username,
         pppoe_password:
-          onuMode === 'Routing' && wanMode === 'PPPOE'
+          !isSelectedVlanMgmtOnly && onuMode === 'Routing' && wanMode === 'PPPOE'
             ? password.trim()
             : onu.pppoe_password,
-        static_ip_address: wanMode === 'STATIC_IP' ? staticIp : null,
-        static_subnet_mask: wanMode === 'STATIC_IP' ? staticMask : null,
-        static_gateway: wanMode === 'STATIC_IP' ? staticGw : null,
-        static_dns1: wanMode === 'STATIC_IP' ? staticDns : null,
+        static_ip_address: !isSelectedVlanMgmtOnly && wanMode === 'STATIC_IP' ? staticIp : null,
+        static_subnet_mask: !isSelectedVlanMgmtOnly && wanMode === 'STATIC_IP' ? staticMask : null,
+        static_gateway: !isSelectedVlanMgmtOnly && wanMode === 'STATIC_IP' ? staticGw : null,
+        static_dns1: !isSelectedVlanMgmtOnly && wanMode === 'STATIC_IP' ? staticDns : null,
         tr069_profile_id: tr069ProfileId,
-        tr069_status: 'ACTIVE_INFORMING',
-        tr069_last_inform: `${new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ')} WIB`,
+        tr069_mgmt_vlan_id: effectiveMgmtVlanId,
+        tr069_status:
+          effectiveConfigMethod === 'TR069' ? 'ACTIVE_INFORMING' : 'DISABLED',
+        tr069_last_inform:
+          effectiveConfigMethod === 'TR069'
+            ? `${new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ')} WIB`
+            : onu.tr069_last_inform,
+        voip_enabled: isSelectedVlanMgmtOnly ? true : voipSipEnabled,
         wifi_ssid: wifiSsid,
         wifi_password: wifiPassword,
       },
@@ -289,48 +332,66 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
                   {db.vlans.map((v) => (
                     <option key={v.id} value={v.id}>
                       {v.vlan_id} - {v.name}
+                      {v.used_for_mgmt_tr069_voip || v.service_type === 'TR069_MGMT'
+                        ? ' [MGMT: TR069 + VoIP Only]'
+                        : ''}
                     </option>
                   ))}
                 </select>
               </div>
             </div>
 
+            {isSelectedVlanMgmtOnly && (
+              <div className="rounded-lg border border-amber-500/50 bg-amber-950/30 px-4 py-3 text-xs text-amber-200">
+                <div className="font-bold text-amber-300">
+                  Mode VLAN Management (VLAN {selectedVlan.vlan_id} — {selectedVlan.name})
+                </div>
+                <p className="mt-1 leading-relaxed">
+                  VLAN ini ditandai sebagai <strong>Mgmt / TR-069 / VoIP</strong>. CLI yang dikirim ke OLT hanya mengaktifkan service <strong>TR-069 CWMP + VoIP SIP</strong> tanpa push service Internet (PPPoE / DHCP WAN / Bridge LAN).
+                </p>
+              </div>
+            )}
+
             {/* Helper Notice from Screenshot */}
-            <p className="text-sm leading-relaxed text-slate-400">
-              After changing the WAN VLAN-ID, please check the Ethernet ports settings and update VLANs as desired.
-            </p>
+            {!isSelectedVlanMgmtOnly && (
+              <p className="text-sm leading-relaxed text-slate-400">
+                After changing the WAN VLAN-ID, please check the Ethernet ports settings and update VLANs as desired.
+              </p>
+            )}
 
             {/* Row 2: ONU mode (Routing / Bridging) */}
-            <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-12">
-              <label className="text-sm font-bold text-slate-200 sm:col-span-4 sm:text-right sm:pr-4">
-                ONU mode
-              </label>
-              <div className="flex items-center gap-6 sm:col-span-8">
-                <label className="flex cursor-pointer items-center gap-2 text-sm text-white">
-                  <input
-                    type="radio"
-                    name="onuMode"
-                    checked={onuMode === 'Routing'}
-                    onChange={() => setOnuMode('Routing')}
-                    className="h-4 w-4 accent-blue-500"
-                  />
-                  Routing
+            {!isSelectedVlanMgmtOnly && (
+              <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-12">
+                <label className="text-sm font-bold text-slate-200 sm:col-span-4 sm:text-right sm:pr-4">
+                  ONU mode
                 </label>
-                <label className="flex cursor-pointer items-center gap-2 text-sm text-white">
-                  <input
-                    type="radio"
-                    name="onuMode"
-                    checked={onuMode === 'Bridging'}
-                    onChange={() => setOnuMode('Bridging')}
-                    className="h-4 w-4 accent-blue-500"
-                  />
-                  Bridging
-                </label>
+                <div className="flex items-center gap-6 sm:col-span-8">
+                  <label className="flex cursor-pointer items-center gap-2 text-sm text-white">
+                    <input
+                      type="radio"
+                      name="onuMode"
+                      checked={onuMode === 'Routing'}
+                      onChange={() => setOnuMode('Routing')}
+                      className="h-4 w-4 accent-blue-500"
+                    />
+                    Routing
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-2 text-sm text-white">
+                    <input
+                      type="radio"
+                      name="onuMode"
+                      checked={onuMode === 'Bridging'}
+                      onChange={() => setOnuMode('Bridging')}
+                      className="h-4 w-4 accent-blue-500"
+                    />
+                    Bridging
+                  </label>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Row 3: WAN mode */}
-            {onuMode === 'Routing' && (
+            {!isSelectedVlanMgmtOnly && onuMode === 'Routing' && (
               <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-12">
                 <label className="pt-0.5 text-sm font-bold text-slate-200 sm:col-span-4 sm:text-right sm:pr-4">
                   WAN mode
@@ -397,7 +458,8 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
                   <input
                     type="radio"
                     name="configMethod"
-                    checked={configMethod === 'OMCI'}
+                    disabled={isSelectedVlanMgmtOnly}
+                    checked={effectiveConfigMethod === 'OMCI'}
                     onChange={() => setConfigMethod('OMCI')}
                     className="h-4 w-4 accent-blue-500"
                   />
@@ -407,7 +469,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
                   <input
                     type="radio"
                     name="configMethod"
-                    checked={configMethod === 'TR069'}
+                    checked={effectiveConfigMethod === 'TR069'}
                     onChange={() => setConfigMethod('TR069')}
                     className="h-4 w-4 accent-emerald-500"
                   />
@@ -418,7 +480,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
             </div>
 
             {/* Conditional PPPoE Username & Password (Identical to Screenshot) */}
-            {onuMode === 'Routing' && wanMode === 'PPPOE' && (
+            {!isSelectedVlanMgmtOnly && onuMode === 'Routing' && wanMode === 'PPPOE' && (
               <>
                 <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-12">
                   <label className="text-sm font-bold text-slate-200 sm:col-span-4 sm:text-right sm:pr-4">
@@ -453,7 +515,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
             )}
 
             {/* Conditional Static IP Settings */}
-            {onuMode === 'Routing' && wanMode === 'STATIC_IP' && (
+            {!isSelectedVlanMgmtOnly && onuMode === 'Routing' && wanMode === 'STATIC_IP' && (
               <div className="grid grid-cols-1 gap-3 rounded-lg border border-slate-700 bg-slate-900/70 p-4 sm:grid-cols-2">
                 <div>
                   <label className="block text-xs font-semibold text-slate-300">
@@ -543,12 +605,12 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
               </div>
             )}
 
-            {/* Conditional TR-069 CWMP ACS Configuration Box */}
-            {configMethod === 'TR069' && (
+            {/* Conditional TR-069 CWMP ACS & VoIP Configuration Box */}
+            {effectiveConfigMethod === 'TR069' && (
               <div className="space-y-3 rounded-lg border border-emerald-500/40 bg-emerald-950/20 p-4">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs font-bold text-emerald-400">
-                    TR-069 (CWMP ACS) Auto-Provisioning & WLAN Parameters
+                    TR-069 (CWMP ACS) &amp; VoIP Management — VLAN {effectiveMgmtVlanId} (Pri {selectedTr069Profile?.vlan_priority ?? 2})
                   </span>
                   <span className="font-mono text-[11px] text-slate-400">
                     Inform Interval: {selectedTr069Profile?.periodic_inform_interval || 300}s
@@ -558,20 +620,41 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <div className="sm:col-span-3">
                     <label className="block text-xs font-medium text-slate-300">
-                      TR-069 ACS Server Profile
+                      TR-069 ACS Server Profile (ISP)
                     </label>
                     <select
                       value={tr069ProfileId}
-                      onChange={(e) => setTr069ProfileId(Number(e.target.value))}
+                      onChange={(e) => {
+                        const nextId = Number(e.target.value);
+                        setTr069ProfileId(nextId);
+                        const prof = db.tr069_profiles.find((p) => p.id === nextId);
+                        if (prof && typeof prof.voip_enabled === 'boolean') {
+                          setVoipSipEnabled(prof.voip_enabled);
+                        }
+                      }}
                       className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-xs text-white"
                     >
                       {db.tr069_profiles.map((prof) => (
                         <option key={prof.id} value={prof.id}>
-                          {prof.profile_name} ({prof.acs_url})
+                          {prof.profile_name} — {prof.acs_url} (VLAN {prof.mgmt_vlan_id})
                         </option>
                       ))}
                     </select>
                   </div>
+
+                  <div className="sm:col-span-3">
+                    <label className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-sky-300">
+                      <input
+                        type="checkbox"
+                        checked={isSelectedVlanMgmtOnly ? true : voipSipEnabled}
+                        disabled={isSelectedVlanMgmtOnly}
+                        onChange={(e) => setVoipSipEnabled(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded accent-sky-500"
+                      />
+                      Aktifkan Service VoIP SIP (`voip protocol sip` + `veip 1`) pada VLAN {effectiveMgmtVlanId}
+                    </label>
+                  </div>
+
                   <div>
                     <label className="block text-xs font-medium text-slate-300">
                       Remote WiFi SSID (TR-069)

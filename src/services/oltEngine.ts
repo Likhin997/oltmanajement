@@ -74,6 +74,11 @@ export interface CliProvisioningParams {
   tr069AcsUsername?: string;
   tr069AcsPassword?: string;
   tr069PeriodicInterval?: number;
+  tr069MgmtVlanId?: number;
+  tr069Priority?: number;
+  tr069TcontProfile?: string;
+  tr069TrafficProfile?: string;
+  mgmtOnlyNoInternet?: boolean;
   wifiSsid?: string;
   wifiPassword?: string;
   voipSipEnabled?: boolean;
@@ -839,28 +844,64 @@ export function buildTr069CliLines(params: {
   acsUsername?: string;
   acsPassword?: string;
   vlanId: number;
+  priority?: number;
+  usePrimaryFlow?: boolean;
+  voipSipEnabled?: boolean;
 }): string[] {
   if (params.enabled === false) {
     return [`  no tr069-mgmt 1`];
   }
-  const acsUrl = params.acsUrl || 'http://10.69.69.1:14501';
-  const acsUser = params.acsUsername || 'acsNet';
-  const acsPass = params.acsPassword || 'acsNet@2024';
-  const tr069Vlan = 100;
+  const acsUrl = (params.acsUrl || 'http://10.69.69.1:14501').trim();
+  const acsUser = (params.acsUsername || 'acsNet').trim();
+  const acsPass = (params.acsPassword || 'acsNet@2024').trim();
+  const tr069Vlan = params.vlanId > 0 ? params.vlanId : 100;
+  const pri =
+    typeof params.priority === 'number' && params.priority >= 0 && params.priority <= 7
+      ? params.priority
+      : 2;
 
-  return [
+  if (params.usePrimaryFlow) {
+    const lines = [
+      `  voip protocol sip`,
+      `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
+      `  flow 1 pri ${pri} vlan ${tr069Vlan}`,
+      `  gemport 1 flow 1`,
+      `  switchport-bind switch_0/1 iphost 1`,
+      `  switchport-bind switch_0/1 veip 1`,
+      `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
+      `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
+      `  vlan-filter iphost 1 pri ${pri} vlan ${tr069Vlan}`,
+      `  veip 1 port udp 1232 host 1`,
+      `  tr069-mgmt 1 state unlock`,
+      `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
+      `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`,
+    ];
+    return lines;
+  }
+
+  const lines: string[] = [];
+  if (params.voipSipEnabled) {
+    lines.push(`  voip protocol sip`);
+  }
+  lines.push(
     `  flow 2 switch switch_0/1`,
     `  flow mode 2 tag-filter vlan-filter untag-filter discard`,
-    `  flow 2 pri 2 vlan ${tr069Vlan}`,
+    `  flow 2 pri ${pri} vlan ${tr069Vlan}`,
     `  gemport 2 flow 2`,
     `  switchport-bind switch_0/1 iphost 2`,
     `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
     `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
-    `  vlan-filter iphost 2 pri 2 vlan ${tr069Vlan}`,
+    `  vlan-filter iphost 2 pri ${pri} vlan ${tr069Vlan}`
+  );
+  if (params.voipSipEnabled) {
+    lines.push(`  veip 1 port udp 1232 host 2`);
+  }
+  lines.push(
     `  tr069-mgmt 1 state unlock`,
     `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
-    `  tr069-mgmt 1 tag pri 2 vlan ${tr069Vlan}`,
-  ];
+    `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`
+  );
+  return lines;
 }
 
 /**
@@ -910,6 +951,18 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
       ? params.speedProfile
       : 'SMARTOLT-1G-DOWN';
 
+  const isMgmtOnly = Boolean(params.mgmtOnlyNoInternet);
+  const mgmtVlanId =
+    params.tr069MgmtVlanId && params.tr069MgmtVlanId > 0
+      ? params.tr069MgmtVlanId
+      : isMgmtOnly
+      ? params.vlanId
+      : 100;
+  const tr069Pri =
+    typeof params.tr069Priority === 'number' ? params.tr069Priority : 2;
+  const mgmtTcontProfile = params.tr069TcontProfile || 'SMARTOLT-VOIPMNG-10M';
+  const mgmtTrafficProfile = params.tr069TrafficProfile || 'SMARTOLT-VOIPMNG-10M';
+
   const lines: string[] = [
     `configure terminal`,
     `interface ${oltIf}`,
@@ -918,11 +971,39 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
     `interface ${onuIf}`,
     `  name ${cleanName}`,
     `  description ${cleanDesc}`,
-    `  tcont 1 profile ${tcontUpProfile}`,
   ];
 
+  if (isMgmtOnly) {
+    // VLAN Mgmt / MJMT: hanya service TR-069 & VoIP saja, tanpa push internet!
+    lines.push(
+      `  tcont 1 profile ${mgmtTcontProfile}`,
+      `  gemport 1 tcont 1`,
+      `  gemport 1 traffic-limit downstream ${mgmtTrafficProfile}`,
+      `  service-port 1 vport 1 user-vlan ${mgmtVlanId} vlan ${mgmtVlanId}`,
+      `exit`,
+      `pon-onu-mng ${onuIf}`,
+      ...buildTr069CliLines({
+        enabled: true,
+        acsUrl: params.tr069AcsUrl,
+        acsUsername: params.tr069AcsUsername,
+        acsPassword: params.tr069AcsPassword,
+        vlanId: mgmtVlanId,
+        priority: tr069Pri,
+        usePrimaryFlow: true,
+        voipSipEnabled: true,
+      }),
+      ...buildWanRemoteAccessCliLines(wanRemoteAccess, params.wanRemoteAllowedSubnet),
+      `exit`,
+      `end`,
+      `write`
+    );
+    return lines.join('\n');
+  }
+
+  lines.push(`  tcont 1 profile ${tcontUpProfile}`);
+
   if (configMethod === 'TR069' || params.tr069Enabled) {
-    lines.push(`  tcont 2 profile SMARTOLT-VOIPMNG-10M`);
+    lines.push(`  tcont 2 profile ${mgmtTcontProfile}`);
   }
 
   lines.push(
@@ -933,21 +1014,17 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
   if (configMethod === 'TR069' || params.tr069Enabled) {
     lines.push(
       `  gemport 2 tcont 2`,
-      `  gemport 2 traffic-limit downstream SMARTOLT-VOIPMNG-10M`
+      `  gemport 2 traffic-limit downstream ${mgmtTrafficProfile}`
     );
   }
 
   lines.push(`  service-port 1 vport 1 user-vlan ${params.vlanId} vlan ${params.vlanId}`);
 
   if (configMethod === 'TR069' || params.tr069Enabled) {
-    lines.push(`  service-port 2 vport 2 user-vlan 100 vlan 100`);
+    lines.push(`  service-port 2 vport 2 user-vlan ${mgmtVlanId} vlan ${mgmtVlanId}`);
   }
 
   lines.push(`exit`, `pon-onu-mng ${onuIf}`);
-
-  if (params.voipSipEnabled) {
-    lines.push(`  voip protocol sip`);
-  }
 
   lines.push(
     `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
@@ -1008,11 +1085,7 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
     lines.push(`  dhcp-ip ethuni eth_0/${e} from-onu`);
   }
 
-  if (params.voipSipEnabled) {
-    lines.push(`  veip 1 port udp 1232 host 2`);
-  }
-
-  // TR-069 CWMP configuration (if enabled)
+  // TR-069 CWMP + optional VoIP configuration (if enabled)
   if (configMethod === 'TR069' || params.tr069Enabled) {
     lines.push(
       ...buildTr069CliLines({
@@ -1020,9 +1093,14 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
         acsUrl: params.tr069AcsUrl,
         acsUsername: params.tr069AcsUsername,
         acsPassword: params.tr069AcsPassword,
-        vlanId: 100,
+        vlanId: mgmtVlanId,
+        priority: tr069Pri,
+        usePrimaryFlow: false,
+        voipSipEnabled: params.voipSipEnabled,
       })
     );
+  } else if (params.voipSipEnabled) {
+    lines.push(`  voip protocol sip`, `  veip 1 port udp 1232 host 2`);
   }
 
   // Security management rules (WAN Remote Access + LAN management)
@@ -1063,6 +1141,12 @@ export function generateUpdateOnuModeCliScript(params: {
   tr069AcsUsername?: string;
   tr069AcsPassword?: string;
   tr069PeriodicInterval?: number;
+  tr069MgmtVlanId?: number;
+  tr069Priority?: number;
+  tr069TcontProfile?: string;
+  tr069TrafficProfile?: string;
+  voipSipEnabled?: boolean;
+  mgmtOnlyNoInternet?: boolean;
   wifiSsid?: string;
   wifiPassword?: string;
 }): string {
@@ -1085,7 +1169,62 @@ export function generateUpdateOnuModeCliScript(params: {
           .replace(/\s+/g, '-')
       : 'none';
 
+  const isMgmtOnly = Boolean(params.mgmtOnlyNoInternet);
+  const mgmtVlanId =
+    params.tr069MgmtVlanId && params.tr069MgmtVlanId > 0
+      ? params.tr069MgmtVlanId
+      : isMgmtOnly
+      ? params.vlanId
+      : 100;
+  const tr069Pri =
+    typeof params.tr069Priority === 'number' ? params.tr069Priority : 2;
+  const mgmtTcontProfile = params.tr069TcontProfile || 'SMARTOLT-VOIPMNG-10M';
+  const mgmtTrafficProfile = params.tr069TrafficProfile || 'SMARTOLT-VOIPMNG-10M';
+
   const lines: string[] = [`configure terminal`];
+
+  if (isMgmtOnly) {
+    // VLAN Mgmt / MJMT: service TR-069 & VoIP saja, tanpa push internet!
+    if (params.rebindTypeAll) {
+      lines.push(
+        `interface ${oltIf}`,
+        `  no onu ${params.onuIndex}`,
+        `  onu ${params.onuIndex} type ALL sn ${params.serialNumber}`,
+        `exit`
+      );
+    }
+    lines.push(
+      `interface ${onuIf}`,
+      `  name ${cleanName}`,
+      `  description ${cleanDesc}`,
+      `  tcont 1 profile ${mgmtTcontProfile}`,
+      `  gemport 1 tcont 1`,
+      `  gemport 1 traffic-limit downstream ${mgmtTrafficProfile}`,
+      ...(!params.rebindTypeAll ? [`  no service-port 1`, `  no service-port 2`] : []),
+      `  service-port 1 vport 1 user-vlan ${mgmtVlanId} vlan ${mgmtVlanId}`,
+      `exit`,
+      `pon-onu-mng ${onuIf}`,
+      ...(!params.rebindTypeAll ? [`  no pppoe 1`] : []),
+      ...buildTr069CliLines({
+        enabled: true,
+        acsUrl: params.tr069AcsUrl,
+        acsUsername: params.tr069AcsUsername,
+        acsPassword: params.tr069AcsPassword,
+        vlanId: mgmtVlanId,
+        priority: tr069Pri,
+        usePrimaryFlow: true,
+        voipSipEnabled: true,
+      }),
+      ...buildWanRemoteAccessCliLines(
+        params.wanRemoteAccess,
+        params.wanRemoteAllowedSubnet
+      ),
+      `exit`,
+      `end`,
+      `write`
+    );
+    return lines.join('\n');
+  }
 
   if (params.rebindTypeAll) {
     lines.push(
@@ -1116,10 +1255,11 @@ export function generateUpdateOnuModeCliScript(params: {
 
   if (params.configMethod === 'TR069') {
     lines.push(
-      `  tcont 2 profile SMARTOLT-VOIPMNG-10M`,
+      `  tcont 2 profile ${mgmtTcontProfile}`,
       `  gemport 2 tcont 2`,
-      `  gemport 2 traffic-limit downstream SMARTOLT-VOIPMNG-10M`,
-      `  service-port 2 vport 2 user-vlan 100 vlan 100`
+      `  gemport 2 traffic-limit downstream ${mgmtTrafficProfile}`,
+      ...(!params.rebindTypeAll ? [`  no service-port 2`] : []),
+      `  service-port 2 vport 2 user-vlan ${mgmtVlanId} vlan ${mgmtVlanId}`
     );
   }
 
@@ -1187,7 +1327,10 @@ export function generateUpdateOnuModeCliScript(params: {
         acsUrl: params.tr069AcsUrl,
         acsUsername: params.tr069AcsUsername,
         acsPassword: params.tr069AcsPassword,
-        vlanId: 100,
+        vlanId: mgmtVlanId,
+        priority: tr069Pri,
+        usePrimaryFlow: false,
+        voipSipEnabled: params.voipSipEnabled,
       })
     );
   }
@@ -1216,6 +1359,63 @@ export function generateUpdateOnuModeCliScript(params: {
     `write`
   );
 
+  return lines.join('\n');
+}
+
+/**
+ * 6b. GENERATOR CLI ZTE UNTUK KONFIGURASI PROFILE TR-069 + MGMT VLAN DI OLT (SESUAI PARAMETER ISP)
+ */
+export function generateTr069ProfileOltCliScript(params: {
+  profileName: string;
+  acsUrl: string;
+  acsUsername: string;
+  acsPassword: string;
+  mgmtVlanId: number;
+  priority?: number;
+  tcontProfile?: string;
+  trafficProfile?: string;
+  voipEnabled?: boolean;
+  tagToUplinks?: string[];
+}): string {
+  const cleanProfName = params.profileName.trim().replace(/\s+/g, '-') || 'ISP-ACS';
+  const vid = params.mgmtVlanId > 0 ? params.mgmtVlanId : 100;
+  const pri = typeof params.priority === 'number' ? params.priority : 2;
+  const tcont = params.tcontProfile || 'SMARTOLT-VOIPMNG-10M';
+  const traffic = params.trafficProfile || 'SMARTOLT-VOIPMNG-10M';
+  const lines: string[] = [
+    `! TR-069 CWMP + VoIP Management Profile (${cleanProfName}) — VLAN ${vid} (No Internet Push)`,
+    `configure terminal`,
+    `vlan database`,
+    `  vlan ${vid}`,
+    `exit`,
+    `vlan ${vid}`,
+    `  name MGMT_TR069_VOIP`,
+    `exit`,
+    `gpon`,
+    `  profile tcont ${tcont} type 5 fixed 512 assured 1024 maximum 11264`,
+    `  profile traffic ${traffic} sir 10240 pir 11264 cbs 256 pbs 256`,
+    `  onu profile vlan SMARTOLT-vlan${vid} tag-mode tag cvlan ${vid} priority ${pri}`,
+    `exit`,
+  ];
+  if (params.tagToUplinks && params.tagToUplinks.length > 0) {
+    for (const u of params.tagToUplinks) {
+      lines.push(
+        `interface ${u}`,
+        `  switchport mode hybrid`,
+        `  switchport vlan ${vid} tag`,
+        `exit`
+      );
+    }
+  }
+  lines.push(
+    `! Template pon-onu-mng untuk ONU VLAN Mgmt ${vid} (TR-069 & VoIP Only):`,
+    `!   voip protocol sip`,
+    `!   tr069-mgmt 1 state unlock`,
+    `!   tr069-mgmt 1 acs ${params.acsUrl} validate basic username ${params.acsUsername} password ${params.acsPassword}`,
+    `!   tr069-mgmt 1 tag pri ${pri} vlan ${vid}`,
+    `end`,
+    `write`
+  );
   return lines.join('\n');
 }
 
@@ -1589,6 +1789,8 @@ export interface ParsedRunningConfigOnu {
   pppoePassword: string | null;
   tr069Enabled: boolean;
   tr069AcsUrl: string | null;
+  tr069VlanId?: number | null;
+  voipEnabled?: boolean;
   wanRemoteRestrictedIp: string | null;
 }
 
@@ -1960,6 +2162,13 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
     if (trMatch) {
       existing.tr069Enabled = true;
       existing.tr069AcsUrl = trMatch[1].trim();
+    }
+    const trTagMatch = body.match(/tr069-mgmt\s+1\s+tag\s+pri\s+\d+\s+vlan\s+(\d+)/i);
+    if (trTagMatch) {
+      existing.tr069VlanId = parseInt(trTagMatch[1], 10);
+    }
+    if (/voip\s+protocol\s+sip/i.test(body)) {
+      existing.voipEnabled = true;
     }
     const secIpMatch = body.match(/security-mgmt\s+10\s+start-src-ip\s+(\S+)/);
     if (secIpMatch) {

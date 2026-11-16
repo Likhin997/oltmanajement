@@ -15,6 +15,7 @@ import {
   ZoneRecord,
   SectorRecord,
   OdbRecord,
+  Tr069ProfileRecord,
   AppUserRecord,
   buildLiveZteRunningConfig,
 } from './services/mockDatabase';
@@ -23,6 +24,7 @@ import {
   parseZteOnuStateOutput,
   parseZteOpticalAttenuation,
   generateAuthorizeCliScript,
+  generateTr069ProfileOltCliScript,
   findNextAvailableOnuIndex,
 } from './services/oltEngine';
 import { PRODUCTION_CODE_MODULES } from './services/sourceCodeModules';
@@ -224,14 +226,50 @@ export default function App() {
           prevOnu.external_id && !prevOnu.external_id.startsWith('ONU-')
             ? prevOnu.external_id
             : incOnu.external_id,
+        tr069_profile_id: prevOnu.tr069_profile_id ?? incOnu.tr069_profile_id ?? null,
+        tr069_mgmt_vlan_id:
+          prevOnu.tr069_mgmt_vlan_id ?? incOnu.tr069_mgmt_vlan_id ?? null,
+        tr069_status: prevOnu.tr069_status ?? incOnu.tr069_status,
+        voip_enabled: prevOnu.voip_enabled ?? incOnu.voip_enabled,
       };
     });
+
+    const prevVlanByKey = new Map<string, VlanRecord>();
+    for (const pv of prev.vlans || []) {
+      prevVlanByKey.set(`${pv.olt_id}:${pv.vlan_id}`, pv);
+    }
+    const mergedVlans = (incoming.vlans || []).map((iv) => {
+      const pv = prevVlanByKey.get(`${iv.olt_id}:${iv.vlan_id}`);
+      if (!pv) return iv;
+      return {
+        ...iv,
+        description: pv.description || iv.description,
+        default_for: pv.default_for || iv.default_for,
+        used_for_mgmt_tr069_voip: pv.used_for_mgmt_tr069_voip,
+        used_for_iptv: pv.used_for_iptv,
+        dhcp_snooping: pv.dhcp_snooping,
+        lan_to_lan: pv.lan_to_lan,
+        service_type: pv.service_type,
+        is_default: pv.is_default,
+      };
+    });
+    for (const pv of prev.vlans || []) {
+      const k = `${pv.olt_id}:${pv.vlan_id}`;
+      if (!mergedVlans.some((mv) => `${mv.olt_id}:${mv.vlan_id}` === k)) {
+        mergedVlans.push(pv);
+      }
+    }
 
     return {
       ...incoming,
       zones: mergeByIdPreferPrev(prev.zones, incoming.zones),
       sectors: mergeByIdPreferPrev(prev.sectors, incoming.sectors),
       odbs: mergeByIdPreferPrev(prev.odbs, incoming.odbs),
+      vlans: mergedVlans,
+      tr069_profiles:
+        prev.tr069_profiles && prev.tr069_profiles.length > 0
+          ? prev.tr069_profiles
+          : incoming.tr069_profiles,
       onus: mergedOnus,
     };
   };
@@ -769,6 +807,37 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   const [splitterFormLat, setSplitterFormLat] = useState('-6.355');
   const [splitterFormLng, setSplitterFormLng] = useState('106.251');
   const [splitterFormDesc, setSplitterFormDesc] = useState('');
+
+  // ISP TR-069 CWMP ACS Configuration state
+  const [tr069TargetOltId, setTr069TargetOltId] = useState<number>(1);
+  const [showTr069Modal, setShowTr069Modal] = useState<boolean>(false);
+  const [editingTr069Profile, setEditingTr069Profile] =
+    useState<Tr069ProfileRecord | null>(null);
+  const [tr069FormName, setTr069FormName] = useState<string>('');
+  const [tr069FormAcsUrl, setTr069FormAcsUrl] = useState<string>(
+    'http://10.69.69.1:14501'
+  );
+  const [tr069FormAcsUser, setTr069FormAcsUser] = useState<string>('acsNet');
+  const [tr069FormAcsPass, setTr069FormAcsPass] = useState<string>('acsNet@2024');
+  const [tr069FormConnReqUser, setTr069FormConnReqUser] =
+    useState<string>('acsNet');
+  const [tr069FormConnReqPass, setTr069FormConnReqPass] =
+    useState<string>('acsNet@2024');
+  const [tr069FormPeriodicInterval, setTr069FormPeriodicInterval] =
+    useState<number>(300);
+  const [tr069FormMgmtVlanId, setTr069FormMgmtVlanId] = useState<number>(100);
+  const [tr069FormPriority, setTr069FormPriority] = useState<number>(2);
+  const [tr069FormTcontProfile, setTr069FormTcontProfile] = useState<string>(
+    'SMARTOLT-VOIPMNG-10M'
+  );
+  const [tr069FormTrafficProfile, setTr069FormTrafficProfile] = useState<string>(
+    'SMARTOLT-VOIPMNG-10M'
+  );
+  const [tr069FormVoipEnabled, setTr069FormVoipEnabled] = useState<boolean>(true);
+  const [tr069FormSipServer, setTr069FormSipServer] = useState<string>('');
+  const [tr069FormDescription, setTr069FormDescription] = useState<string>('');
+  const [tr069FormIsDefault, setTr069FormIsDefault] = useState<boolean>(false);
+  const [tr069AutoMarkVlan, setTr069AutoMarkVlan] = useState<boolean>(true);
 
   // ==========================================================================
   // ASIA/JAKARTA (WIB / UTC+7) TIMEZONE FORMATTER & OLT GRAPHS STATE
@@ -4742,6 +4811,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             initialTab={initialOltTab}
             onTabChange={(tab) => setInitialOltTab(tab)}
             onBack={() => setActiveView('OLTS_LIST')}
+            onOpenTr069Config={() => {
+              setTr069TargetOltId(selectedOlt.id);
+              setActiveView('VPN_TR069');
+            }}
             onAddVlan={(newVlans, tagUplinkIds, cliScript) => {
               const createdRecords: VlanRecord[] = newVlans.map((nv, idx) => ({
                 ...nv,
@@ -4750,6 +4823,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               const addedVlanNums = newVlans.map((v) => v.vlan_id);
               const logId = Date.now() + 99;
 
+              nextSyncIsUserMutationRef.current = true;
+              lastUserMutationAtRef.current = Date.now();
               setDb((prev) => ({
                 ...prev,
                 vlans: [...prev.vlans, ...createdRecords],
@@ -4797,11 +4872,42 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             }}
             onToggleVlanFlag={(vlanRecordId, field) => {
               const targetVlan = db.vlans.find((v) => v.id === vlanRecordId);
+              nextSyncIsUserMutationRef.current = true;
+              lastUserMutationAtRef.current = Date.now();
               setDb((prev) => ({
                 ...prev,
-                vlans: prev.vlans.map((v) =>
-                  v.id === vlanRecordId ? { ...v, [field]: !v[field] } : v
-                ),
+                vlans: prev.vlans.map((v) => {
+                  if (v.id !== vlanRecordId) return v;
+                  const nextVal = !v[field];
+                  if (field === 'used_for_mgmt_tr069_voip') {
+                    return {
+                      ...v,
+                      used_for_mgmt_tr069_voip: nextVal,
+                      service_type: nextVal
+                        ? 'TR069_MGMT'
+                        : v.used_for_iptv
+                        ? 'IPTV'
+                        : 'PPPOE',
+                      default_for: nextVal
+                        ? 'Mgmt/TR069/VoIP (No Internet)'
+                        : v.default_for === 'Mgmt/TR069/VoIP (No Internet)'
+                        ? 'PPPoE subscribers'
+                        : v.default_for,
+                    };
+                  }
+                  if (field === 'used_for_iptv') {
+                    return {
+                      ...v,
+                      used_for_iptv: nextVal,
+                      service_type: v.used_for_mgmt_tr069_voip
+                        ? 'TR069_MGMT'
+                        : nextVal
+                        ? 'IPTV'
+                        : 'PPPOE',
+                    };
+                  }
+                  return { ...v, [field]: nextVal };
+                }),
               }));
               if (targetVlan && field === 'dhcp_snooping') {
                 const nextEnable = !targetVlan.dhcp_snooping;
@@ -4818,6 +4924,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   cli,
                   Date.now(),
                   `VLAN ${targetVlan.vlan_id} DHCP Snooping`
+                );
+              } else if (targetVlan && field === 'used_for_mgmt_tr069_voip') {
+                const nextVal = !targetVlan.used_for_mgmt_tr069_voip;
+                showToast(
+                  nextVal
+                    ? `VLAN ${targetVlan.vlan_id} di-set sebagai VLAN Mgmt (TR-069 & VoIP Only, tanpa push Internet).`
+                    : `VLAN ${targetVlan.vlan_id} dikembalikan ke mode VLAN Subscriber/Internet.`
                 );
               } else {
                 showToast(`Pengaturan ${field} pada VLAN berhasil diperbarui.`);
@@ -4846,6 +4959,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     ].join('\n')
                   : '';
 
+              nextSyncIsUserMutationRef.current = true;
+              lastUserMutationAtRef.current = Date.now();
               setDb((prev) => ({
                 ...prev,
                 vlans: prev.vlans.filter((v) => !vlanRecordIds.includes(v.id)),
@@ -5313,75 +5428,718 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         {/* ===================================================================
             VIEW 9: VPN & TR069 ACS PROFILES (Settings -> VPN & TR069)
            =================================================================== */}
-        {activeView === 'VPN_TR069' && (
-          <div className="space-y-5 text-xs">
-            <div className="flex items-center justify-between">
-              <div>
-                <h1 className="text-lg font-bold text-white">
-                  VPN Tunnels, TR-069 CWMP ACS Profiles & WAN Remote Access ACLs
-                </h1>
-                <p className="text-slate-300">
-                  Konfigurasi server GenieACS / SmartOLT CWMP (`http://acs.jetcybernet.id:7547/cwmp`) dan kebijakan `WAN remote access` untuk seluruh OLT ZTE.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setUpdatingModeOnu(configuredOnus[1] || configuredOnus[0]);
-                }}
-                className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-4 py-2 text-xs font-bold text-white"
-              >
-                <Sliders className="h-3.5 w-3.5" />
-                Open "Update ONU mode" Modal (RATMI)
-              </button>
-            </div>
+        {activeView === 'VPN_TR069' && (() => {
+          const targetOlt =
+            db.olts.find((o) => o.id === tr069TargetOltId) || db.olts[0];
+          const targetOltVlans = db.vlans.filter(
+            (v) => v.olt_id === (targetOlt?.id || 1)
+          );
+          const targetOltUplinks = db.uplink_ports
+            .filter((u) => u.olt_id === (targetOlt?.id || 1))
+            .map((u) => u.name);
 
-            <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
-              <table className="w-full text-left text-xs">
-                <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
-                  <tr>
-                    <th className="px-4 py-3">Profile Name</th>
-                    <th className="px-4 py-3">ACS CWMP Server URL</th>
-                    <th className="px-4 py-3">ACS Username</th>
-                    <th className="px-4 py-3">Connection Request User</th>
-                    <th className="px-4 py-3">Periodic Inform</th>
-                    <th className="px-4 py-3">Mgmt VLAN</th>
-                    <th className="px-4 py-3">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#1e3a5f]/70">
-                  {db.tr069_profiles.map((p) => (
-                    <tr key={p.id}>
-                      <td className="px-4 py-3 font-bold text-emerald-400">
-                        {p.profile_name}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-sky-300">
-                        {p.acs_url}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-white">
-                        {p.acs_username}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-white">
-                        {p.connection_request_username}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-white">
-                        {p.periodic_inform_interval}s
-                      </td>
-                      <td className="px-4 py-3 font-mono text-white">
-                        VLAN {p.mgmt_vlan_id}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="rounded bg-emerald-600 px-2 py-0.5 text-[10px] font-bold text-white">
-                          ACTIVE
-                        </span>
-                      </td>
+          const openAddTr069Modal = () => {
+            const mgmtVlan =
+              targetOltVlans.find(
+                (v) => v.used_for_mgmt_tr069_voip || v.service_type === 'TR069_MGMT'
+              ) || targetOltVlans[0];
+            setEditingTr069Profile(null);
+            setTr069FormName('');
+            setTr069FormAcsUrl('http://10.69.69.1:14501');
+            setTr069FormAcsUser('acsNet');
+            setTr069FormAcsPass('acsNet@2024');
+            setTr069FormConnReqUser('acsNet');
+            setTr069FormConnReqPass('acsNet@2024');
+            setTr069FormPeriodicInterval(300);
+            setTr069FormMgmtVlanId(mgmtVlan?.vlan_id || 100);
+            setTr069FormPriority(2);
+            setTr069FormTcontProfile('SMARTOLT-VOIPMNG-10M');
+            setTr069FormTrafficProfile('SMARTOLT-VOIPMNG-10M');
+            setTr069FormVoipEnabled(true);
+            setTr069FormSipServer('');
+            setTr069FormDescription('Profil TR-069 CWMP + VoIP ISP');
+            setTr069FormIsDefault(db.tr069_profiles.length === 0);
+            setTr069AutoMarkVlan(true);
+            setShowTr069Modal(true);
+          };
+
+          const openEditTr069Modal = (prof: Tr069ProfileRecord) => {
+            setEditingTr069Profile(prof);
+            setTr069FormName(prof.profile_name);
+            setTr069FormAcsUrl(prof.acs_url);
+            setTr069FormAcsUser(prof.acs_username);
+            setTr069FormAcsPass(prof.acs_password);
+            setTr069FormConnReqUser(prof.connection_request_username);
+            setTr069FormConnReqPass(prof.connection_request_password);
+            setTr069FormPeriodicInterval(prof.periodic_inform_interval || 300);
+            setTr069FormMgmtVlanId(prof.mgmt_vlan_id || 100);
+            setTr069FormPriority(prof.vlan_priority ?? 2);
+            setTr069FormTcontProfile(prof.tcont_profile || 'SMARTOLT-VOIPMNG-10M');
+            setTr069FormTrafficProfile(
+              prof.traffic_profile || 'SMARTOLT-VOIPMNG-10M'
+            );
+            setTr069FormVoipEnabled(prof.voip_enabled !== false);
+            setTr069FormSipServer(prof.voip_sip_server || '');
+            setTr069FormDescription(prof.description || '');
+            setTr069FormIsDefault(Boolean(prof.is_default));
+            setTr069AutoMarkVlan(true);
+            setShowTr069Modal(true);
+          };
+
+          const handlePushTr069ProfileToOlt = (prof: Tr069ProfileRecord) => {
+            if (!targetOlt) return;
+            const cli = generateTr069ProfileOltCliScript({
+              profileName: prof.profile_name,
+              acsUrl: prof.acs_url,
+              acsUsername: prof.acs_username,
+              acsPassword: prof.acs_password,
+              mgmtVlanId: prof.mgmt_vlan_id,
+              priority: prof.vlan_priority ?? 2,
+              tcontProfile: prof.tcont_profile || 'SMARTOLT-VOIPMNG-10M',
+              trafficProfile: prof.traffic_profile || 'SMARTOLT-VOIPMNG-10M',
+              voipEnabled: prof.voip_enabled !== false,
+              tagToUplinks: targetOltUplinks,
+            });
+            const logId = Date.now();
+            nextSyncIsUserMutationRef.current = true;
+            lastUserMutationAtRef.current = Date.now();
+            setDb((prev) => ({
+              ...prev,
+              olts: prev.olts.map((o) =>
+                o.id === targetOlt.id
+                  ? { ...o, tr069_profile_name: prof.profile_name }
+                  : o
+              ),
+              provisioning_logs: [
+                {
+                  id: logId,
+                  olt_id: targetOlt.id,
+                  onu_id: null,
+                  serial_number: 'OLT-TR069',
+                  action_type: 'TR069_PUSH',
+                  interface_target: `vlan ${prof.mgmt_vlan_id} (${prof.profile_name})`,
+                  summary_text: `Push TR-069 ISP Profile "${prof.profile_name}" (VLAN ${prof.mgmt_vlan_id}, CoS ${prof.vlan_priority ?? 2}) to ${targetOlt.name}`,
+                  cli_script: cli,
+                  olt_response: '[Executing on OLT via Telnet...]',
+                  execution_status: 'SUCCESS',
+                  executed_by: currentUser?.username || 'admin',
+                  duration_ms: 0,
+                  created_at: 'Just now',
+                },
+                ...prev.provisioning_logs,
+              ],
+            }));
+            showToast(
+              `Mengirim konfigurasi TR-069 ISP "${prof.profile_name}" (VLAN ${prof.mgmt_vlan_id}) ke OLT ${targetOlt.name}...`
+            );
+            void executeOltCliLive(
+              targetOlt.id,
+              cli,
+              logId,
+              `Push TR-069 ISP (${prof.profile_name})`
+            );
+          };
+
+          const handleSaveTr069Profile = (pushAfterSave: boolean) => {
+            const cleanName = tr069FormName.trim();
+            const cleanUrl = tr069FormAcsUrl.trim();
+            if (!cleanName || !cleanUrl) {
+              showToast('Nama Profil dan ACS CWMP URL wajib diisi.');
+              return;
+            }
+            const cleanVlan =
+              Number.isFinite(tr069FormMgmtVlanId) && tr069FormMgmtVlanId > 0
+                ? tr069FormMgmtVlanId
+                : 100;
+            const profileId = editingTr069Profile
+              ? editingTr069Profile.id
+              : Math.max(0, ...db.tr069_profiles.map((p) => p.id)) + 1;
+            const savedRecord: Tr069ProfileRecord = {
+              id: profileId,
+              profile_name: cleanName,
+              acs_url: cleanUrl,
+              acs_username: tr069FormAcsUser.trim() || 'acsNet',
+              acs_password: tr069FormAcsPass.trim() || 'acsNet@2024',
+              connection_request_username:
+                tr069FormConnReqUser.trim() || tr069FormAcsUser.trim() || 'acsNet',
+              connection_request_password:
+                tr069FormConnReqPass.trim() || tr069FormAcsPass.trim() || 'acsNet@2024',
+              periodic_inform_interval:
+                tr069FormPeriodicInterval > 0 ? tr069FormPeriodicInterval : 300,
+              mgmt_vlan_id: cleanVlan,
+              vlan_priority:
+                tr069FormPriority >= 0 && tr069FormPriority <= 7
+                  ? tr069FormPriority
+                  : 2,
+              tcont_profile: tr069FormTcontProfile.trim() || 'SMARTOLT-VOIPMNG-10M',
+              traffic_profile:
+                tr069FormTrafficProfile.trim() || 'SMARTOLT-VOIPMNG-10M',
+              voip_enabled: tr069FormVoipEnabled,
+              voip_sip_server: tr069FormSipServer.trim(),
+              description: tr069FormDescription.trim(),
+              is_default: tr069FormIsDefault || db.tr069_profiles.length === 0,
+            };
+
+            nextSyncIsUserMutationRef.current = true;
+            lastUserMutationAtRef.current = Date.now();
+            setDb((prev) => {
+              const existingIdx = prev.tr069_profiles.findIndex(
+                (p) => p.id === profileId
+              );
+              const baseList =
+                existingIdx >= 0
+                  ? prev.tr069_profiles.map((p) =>
+                      p.id === profileId ? savedRecord : p
+                    )
+                  : [...prev.tr069_profiles, savedRecord];
+              const nextProfiles = savedRecord.is_default
+                ? baseList.map((p) => ({
+                    ...p,
+                    is_default: p.id === savedRecord.id,
+                  }))
+                : baseList;
+
+              let nextVlans = prev.vlans;
+              if (tr069AutoMarkVlan && targetOlt) {
+                const matchIdx = prev.vlans.findIndex(
+                  (v) => v.olt_id === targetOlt.id && v.vlan_id === cleanVlan
+                );
+                if (matchIdx >= 0) {
+                  nextVlans = prev.vlans.map((v, idx) =>
+                    idx === matchIdx
+                      ? {
+                          ...v,
+                          used_for_mgmt_tr069_voip: true,
+                          service_type: 'TR069_MGMT' as const,
+                          default_for: 'Mgmt/TR069/VoIP (No Internet)',
+                        }
+                      : v
+                  );
+                } else {
+                  nextVlans = [
+                    ...prev.vlans,
+                    {
+                      id: Date.now() + 7,
+                      olt_id: targetOlt.id,
+                      vlan_id: cleanVlan,
+                      name: `MGMT-${cleanVlan}`,
+                      description: `Mgmt TR069 & VoIP (${cleanName})`,
+                      default_for: 'Mgmt/TR069/VoIP (No Internet)',
+                      used_for_mgmt_tr069_voip: true,
+                      used_for_iptv: false,
+                      dhcp_snooping: false,
+                      lan_to_lan: false,
+                      onus_count: 0,
+                      service_type: 'TR069_MGMT' as const,
+                      svlan_id: null,
+                      is_default: false,
+                    },
+                  ];
+                }
+              }
+
+              return {
+                ...prev,
+                tr069_profiles: nextProfiles,
+                vlans: nextVlans,
+                olts:
+                  savedRecord.is_default && targetOlt
+                    ? prev.olts.map((o) =>
+                        o.id === targetOlt.id
+                          ? { ...o, tr069_profile_name: savedRecord.profile_name }
+                          : o
+                      )
+                    : prev.olts,
+              };
+            });
+
+            setShowTr069Modal(false);
+            showToast(
+              `✓ Profil TR-069 ISP "${savedRecord.profile_name}" (VLAN ${cleanVlan}) berhasil disimpan!`
+            );
+            if (pushAfterSave) {
+              handlePushTr069ProfileToOlt(savedRecord);
+            }
+          };
+
+          return (
+            <div className="space-y-5 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h1 className="text-lg font-bold text-white">
+                    Konfigurasi TR-069 CWMP ISP &amp; VLAN Management (TR-069 + VoIP)
+                  </h1>
+                  <p className="text-slate-300">
+                    Atur ACS Server URL, Username/Password, Periodic Inform, CoS Priority, TCONT/Traffic Profile, serta VLAN Mgmt sesuai parameter ISP Anda.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={targetOlt?.id || 1}
+                    onChange={(e) => setTr069TargetOltId(Number(e.target.value))}
+                    className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs font-semibold text-white"
+                  >
+                    {db.olts.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        OLT: {o.name} ({o.ip_address})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={openAddTr069Modal}
+                    className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-4 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Tambah Profil TR-069 ISP
+                  </button>
+                  {configuredOnus.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUpdatingModeOnu(configuredOnus[0]);
+                      }}
+                      className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+                    >
+                      <Sliders className="h-3.5 w-3.5" />
+                      Terapkan ke ONU
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded border border-amber-500/40 bg-amber-950/30 px-4 py-3 text-amber-200">
+                <strong>Aturan VLAN Management (MJMT / TR-069):</strong> Setiap VLAN yang ditandai{' '}
+                <span className="font-mono font-bold text-amber-300">
+                  Used for Mgmt/TR069/VoIP
+                </span>{' '}
+                hanya akan mem-push service <span className="font-mono font-bold">TR-069 CWMP</span> +{' '}
+                <span className="font-mono font-bold">VoIP SIP</span> ke ONU{' '}
+                <strong>tanpa push service Internet (PPPoE / DHCP / LAN Internet)</strong>.
+              </div>
+
+              <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
+                    <tr>
+                      <th className="px-4 py-3">Profil ISP</th>
+                      <th className="px-4 py-3">ACS CWMP URL</th>
+                      <th className="px-4 py-3">ACS Auth</th>
+                      <th className="px-4 py-3">Conn Request</th>
+                      <th className="px-4 py-3">Inform</th>
+                      <th className="px-4 py-3">VLAN Mgmt / CoS</th>
+                      <th className="px-4 py-3">VoIP &amp; Profile GPON</th>
+                      <th className="px-4 py-3">Aksi</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-[#1e3a5f]/70">
+                    {db.tr069_profiles.map((p) => {
+                      const matchedVlan = targetOltVlans.find(
+                        (v) => v.vlan_id === p.mgmt_vlan_id
+                      );
+                      return (
+                        <tr key={p.id} className="hover:bg-[#132842]/50">
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-emerald-400">
+                                {p.profile_name}
+                              </span>
+                              {p.is_default && (
+                                <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                                  DEFAULT
+                                </span>
+                              )}
+                            </div>
+                            {p.description && (
+                              <div className="mt-0.5 text-[11px] text-slate-400">
+                                {p.description}
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 font-mono text-sky-300">
+                            {p.acs_url}
+                          </td>
+                          <td className="px-4 py-3 font-mono text-white">
+                            <div>{p.acs_username}</div>
+                            <div className="text-[10px] text-slate-400">
+                              ••••••
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 font-mono text-white">
+                            {p.connection_request_username}
+                          </td>
+                          <td className="px-4 py-3 font-mono text-white">
+                            {p.periodic_inform_interval}s
+                          </td>
+                          <td className="px-4 py-3 font-mono text-white">
+                            <div className="font-bold text-sky-300">
+                              VLAN {p.mgmt_vlan_id} (Pri {p.vlan_priority ?? 2})
+                            </div>
+                            {matchedVlan &&
+                            (matchedVlan.used_for_mgmt_tr069_voip ||
+                              matchedVlan.service_type === 'TR069_MGMT') ? (
+                              <span className="mt-1 inline-block rounded bg-amber-950/90 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/40">
+                                TR069 + VoIP Only
+                              </span>
+                            ) : (
+                              <span className="mt-1 inline-block text-[10px] text-slate-400">
+                                VLAN belum ditandai Mgmt
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-[11px]">
+                            <div className="text-sky-300 font-semibold">
+                              VoIP SIP: {p.voip_enabled !== false ? 'Aktif' : 'Nonaktif'}
+                            </div>
+                            <div className="font-mono text-slate-400">
+                              {p.tcont_profile || 'SMARTOLT-VOIPMNG-10M'}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handlePushTr069ProfileToOlt(p)}
+                                className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#025aa5]"
+                              >
+                                Push OLT
+                              </button>
+                              {!p.is_default && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    nextSyncIsUserMutationRef.current = true;
+                                    lastUserMutationAtRef.current = Date.now();
+                                    setDb((prev) => ({
+                                      ...prev,
+                                      tr069_profiles: prev.tr069_profiles.map((item) => ({
+                                        ...item,
+                                        is_default: item.id === p.id,
+                                      })),
+                                      olts: targetOlt
+                                        ? prev.olts.map((o) =>
+                                            o.id === targetOlt.id
+                                              ? { ...o, tr069_profile_name: p.profile_name }
+                                              : o
+                                          )
+                                        : prev.olts,
+                                    }));
+                                    showToast(
+                                      `Profil "${p.profile_name}" dijadikan Default TR-069 ISP.`
+                                    );
+                                  }}
+                                  className="rounded border border-emerald-500/50 bg-emerald-950/60 px-2 py-1 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-900/70"
+                                >
+                                  Set Default
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => openEditTr069Modal(p)}
+                                className="rounded bg-slate-700 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-slate-600"
+                              >
+                                Edit
+                              </button>
+                              {db.tr069_profiles.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    nextSyncIsUserMutationRef.current = true;
+                                    lastUserMutationAtRef.current = Date.now();
+                                    setDb((prev) => {
+                                      const remaining = prev.tr069_profiles.filter(
+                                        (item) => item.id !== p.id
+                                      );
+                                      if (
+                                        remaining.length > 0 &&
+                                        !remaining.some((r) => r.is_default)
+                                      ) {
+                                        remaining[0] = {
+                                          ...remaining[0],
+                                          is_default: true,
+                                        };
+                                      }
+                                      return { ...prev, tr069_profiles: remaining };
+                                    });
+                                    showToast(`Profil "${p.profile_name}" dihapus.`);
+                                  }}
+                                  className="rounded bg-[#d9534f] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#c9302c]"
+                                >
+                                  Hapus
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {showTr069Modal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
+                  <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#1e3a5f] bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
+                    <div className="mb-4 flex items-center justify-between border-b border-slate-700 pb-3">
+                      <h3 className="text-base font-bold text-white">
+                        {editingTr069Profile
+                          ? `Edit Profil TR-069 ISP (${editingTr069Profile.profile_name})`
+                          : 'Tambah Profil TR-069 CWMP ISP'}
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={() => setShowTr069Modal(false)}
+                        className="text-slate-400 hover:text-white"
+                      >
+                        <X className="h-5 w-5" />
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="block font-bold text-slate-200">
+                          Nama Profil ISP
+                        </label>
+                        <input
+                          type="text"
+                          value={tr069FormName}
+                          onChange={(e) => setTr069FormName(e.target.value)}
+                          placeholder="misal: ISP-ACS-UTAMA"
+                          className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-200">
+                          ACS CWMP Server URL
+                        </label>
+                        <input
+                          type="text"
+                          value={tr069FormAcsUrl}
+                          onChange={(e) => setTr069FormAcsUrl(e.target.value)}
+                          placeholder="http://acs.isp.co.id:7547"
+                          className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-200">
+                          ACS Username
+                        </label>
+                        <input
+                          type="text"
+                          value={tr069FormAcsUser}
+                          onChange={(e) => setTr069FormAcsUser(e.target.value)}
+                          className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-200">
+                          ACS Password
+                        </label>
+                        <input
+                          type="text"
+                          value={tr069FormAcsPass}
+                          onChange={(e) => setTr069FormAcsPass(e.target.value)}
+                          className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-200">
+                          Connection Request Username
+                        </label>
+                        <input
+                          type="text"
+                          value={tr069FormConnReqUser}
+                          onChange={(e) => setTr069FormConnReqUser(e.target.value)}
+                          className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-200">
+                          Connection Request Password
+                        </label>
+                        <input
+                          type="text"
+                          value={tr069FormConnReqPass}
+                          onChange={(e) => setTr069FormConnReqPass(e.target.value)}
+                          className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-200">
+                          Mgmt VLAN ID (TR-069 &amp; VoIP)
+                        </label>
+                        <div className="mt-1 flex gap-2">
+                          <input
+                            type="number"
+                            min={1}
+                            max={4094}
+                            value={tr069FormMgmtVlanId}
+                            onChange={(e) =>
+                              setTr069FormMgmtVlanId(Number(e.target.value))
+                            }
+                            className="w-28 rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                          />
+                          <select
+                            value=""
+                            onChange={(e) => {
+                              if (e.target.value) {
+                                setTr069FormMgmtVlanId(Number(e.target.value));
+                              }
+                            }}
+                            className="flex-1 rounded border border-slate-600 bg-[#1c2536] px-2 py-2 text-white"
+                          >
+                            <option value="">Pilih dari VLAN OLT...</option>
+                            {targetOltVlans.map((v) => (
+                              <option key={v.id} value={v.vlan_id}>
+                                VLAN {v.vlan_id} - {v.description || v.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block font-bold text-slate-200">
+                            802.1p Priority (0-7)
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={7}
+                            value={tr069FormPriority}
+                            onChange={(e) =>
+                              setTr069FormPriority(Number(e.target.value))
+                            }
+                            className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-200">
+                            Periodic Inform (detik)
+                          </label>
+                          <input
+                            type="number"
+                            min={30}
+                            value={tr069FormPeriodicInterval}
+                            onChange={(e) =>
+                              setTr069FormPeriodicInterval(Number(e.target.value))
+                            }
+                            className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-200">
+                          GPON TCONT Profile
+                        </label>
+                        <input
+                          type="text"
+                          value={tr069FormTcontProfile}
+                          onChange={(e) => setTr069FormTcontProfile(e.target.value)}
+                          className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-200">
+                          GPON Traffic Profile (Downstream)
+                        </label>
+                        <input
+                          type="text"
+                          value={tr069FormTrafficProfile}
+                          onChange={(e) =>
+                            setTr069FormTrafficProfile(e.target.value)
+                          }
+                          className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-200">
+                          VoIP SIP Server (Opsional)
+                        </label>
+                        <input
+                          type="text"
+                          value={tr069FormSipServer}
+                          onChange={(e) => setTr069FormSipServer(e.target.value)}
+                          placeholder="misal: 10.69.69.10:5060"
+                          className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block font-bold text-slate-200">
+                          Keterangan / Catatan ISP
+                        </label>
+                        <input
+                          type="text"
+                          value={tr069FormDescription}
+                          onChange={(e) => setTr069FormDescription(e.target.value)}
+                          className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-4 space-y-2 rounded border border-slate-700 bg-slate-900/60 p-3">
+                      <label className="flex items-center gap-2 text-slate-200">
+                        <input
+                          type="checkbox"
+                          checked={tr069FormVoipEnabled}
+                          onChange={(e) =>
+                            setTr069FormVoipEnabled(e.target.checked)
+                          }
+                        />
+                        Aktifkan layanan VoIP SIP (`voip protocol sip`) pada VLAN Management
+                      </label>
+                      <label className="flex items-center gap-2 text-slate-200">
+                        <input
+                          type="checkbox"
+                          checked={tr069AutoMarkVlan}
+                          onChange={(e) => setTr069AutoMarkVlan(e.target.checked)}
+                        />
+                        Otomatis tandai VLAN {tr069FormMgmtVlanId} sebagai{' '}
+                        <span className="font-bold text-amber-300">
+                          Mgmt/TR069/VoIP Only (Tanpa Push Internet)
+                        </span>
+                      </label>
+                      <label className="flex items-center gap-2 text-slate-200">
+                        <input
+                          type="checkbox"
+                          checked={tr069FormIsDefault}
+                          onChange={(e) =>
+                            setTr069FormIsDefault(e.target.checked)
+                          }
+                        />
+                        Jadikan Profil Default TR-069 untuk OLT &amp; ONU baru
+                      </label>
+                    </div>
+
+                    <div className="mt-5 flex flex-wrap justify-end gap-2 border-t border-slate-700 pt-3">
+                      <button
+                        type="button"
+                        onClick={() => setShowTr069Modal(false)}
+                        className="px-4 py-2 text-slate-300 hover:text-white"
+                      >
+                        Batal
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSaveTr069Profile(false)}
+                        className="rounded bg-[#5cb85c] px-4 py-2 font-bold text-white hover:bg-[#4cae4c]"
+                      >
+                        Simpan Profil
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSaveTr069Profile(true)}
+                        className="rounded bg-[#0275d8] px-4 py-2 font-bold text-white hover:bg-[#025aa5]"
+                      >
+                        Simpan &amp; Push ke OLT
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* ===================================================================
             VIEW 10: ZONES, SECTORS, SPLITTERS, SPEED PROFILES, GRAPHS
@@ -8195,6 +8953,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     const batchScriptsByOlt = new Map<number, string[]>();
                     const allocatedIndexByOnuId = new Map<number, number>();
 
+                    const defaultTr069Prof =
+                      db.tr069_profiles.find((p) => p.is_default) ||
+                      db.tr069_profiles[0];
+                    const isAutoVlanMgmtOnly = Boolean(
+                      ('used_for_mgmt_tr069_voip' in targetVlan &&
+                        targetVlan.used_for_mgmt_tr069_voip) ||
+                        ('service_type' in targetVlan &&
+                          targetVlan.service_type === 'TR069_MGMT')
+                    );
+
                     for (const u of unconfiguredOnus) {
                       const key = `${u.olt_id}-${u.board}-${u.port}`;
                       const usedList = usedMap.get(key) || [];
@@ -8212,16 +8980,35 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         onuType: u.onu_type || 'ALL',
                         customerName: `AUTO-${u.serial_number.slice(-6)}`,
                         address: 'None',
-                        tcontProfile: 'SMARTOLT-1G-UP',
-                        speedProfile: 'SMARTOLT-1G-DOWN',
+                        tcontProfile: isAutoVlanMgmtOnly
+                          ? defaultTr069Prof?.tcont_profile || 'SMARTOLT-VOIPMNG-10M'
+                          : 'SMARTOLT-1G-UP',
+                        speedProfile: isAutoVlanMgmtOnly
+                          ? defaultTr069Prof?.traffic_profile || 'SMARTOLT-VOIPMNG-10M'
+                          : 'SMARTOLT-1G-DOWN',
                         vlanId: targetVlan.vlan_id,
                         onuMode: 'Routing',
                         wanMode: 'PPPOE',
-                        configMethod: 'OMCI',
+                        configMethod: isAutoVlanMgmtOnly ? 'TR069' : 'OMCI',
                         wanRemoteAccess: 'Enabled from everywhere in the internet',
-                        pppoeUsername: `USER-${u.serial_number.slice(-4)}-${String(nextIdx).padStart(2, '0')}`,
-                        pppoePassword: 'jetcyber',
-                        tr069Enabled: false,
+                        pppoeUsername: isAutoVlanMgmtOnly
+                          ? ''
+                          : `USER-${u.serial_number.slice(-4)}-${String(nextIdx).padStart(2, '0')}`,
+                        pppoePassword: isAutoVlanMgmtOnly ? '' : 'jetcyber',
+                        tr069Enabled: isAutoVlanMgmtOnly,
+                        tr069AcsUrl: defaultTr069Prof?.acs_url,
+                        tr069AcsUsername: defaultTr069Prof?.acs_username,
+                        tr069AcsPassword: defaultTr069Prof?.acs_password,
+                        tr069MgmtVlanId: isAutoVlanMgmtOnly
+                          ? targetVlan.vlan_id
+                          : defaultTr069Prof?.mgmt_vlan_id || 100,
+                        tr069Priority: defaultTr069Prof?.vlan_priority ?? 2,
+                        tr069TcontProfile:
+                          defaultTr069Prof?.tcont_profile || 'SMARTOLT-VOIPMNG-10M',
+                        tr069TrafficProfile:
+                          defaultTr069Prof?.traffic_profile || 'SMARTOLT-VOIPMNG-10M',
+                        voipSipEnabled: isAutoVlanMgmtOnly,
+                        mgmtOnlyNoInternet: isAutoVlanMgmtOnly,
                       });
                       const oltIdKey = u.olt_id || oltRec?.id || 1;
                       const list = batchScriptsByOlt.get(oltIdKey) || [];
@@ -8247,6 +9034,14 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             onu_index: allocIdx,
                             customer_name: `AUTO-${u.serial_number.slice(-6)}`,
                             vlan_id: targetVlan.id,
+                            config_method: isAutoVlanMgmtOnly ? 'TR069' : 'OMCI',
+                            tr069_profile_id: isAutoVlanMgmtOnly
+                              ? defaultTr069Prof?.id || 1
+                              : u.tr069_profile_id,
+                            tr069_mgmt_vlan_id: isAutoVlanMgmtOnly
+                              ? targetVlan.vlan_id
+                              : u.tr069_mgmt_vlan_id,
+                            voip_enabled: isAutoVlanMgmtOnly,
                             phase_state: 'working',
                             last_offline_reason: 'None',
                             auth_date_label: 'Just now (Auto)',

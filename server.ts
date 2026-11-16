@@ -1739,38 +1739,48 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
           },
         ];
 
-  // 2. VLANs
+  // 2. VLANs (preserve user-configured flags such as used_for_mgmt_tr069_voip & service_type)
   const otherVlans = state.vlans.filter((v) => v.olt_id !== oltId);
+  const existingOltVlans = state.vlans.filter((v) => v.olt_id === oltId);
+  const existingVlanByVid = new Map(existingOltVlans.map((v) => [v.vlan_id, v]));
   const parsedVlanRows: VlanRecord[] = parsed.vlans.map((v) => {
+    const prevVlan = existingVlanByVid.get(v.vlanId);
     const onuCount = parsed.onus.filter((o) => o.vlanId === v.vlanId).length;
     const vlanLabel =
       v.vlanId === 101 && (!v.name || v.name === 'VLAN0101')
         ? 'PPPOE'
         : v.name;
+    const isMgmtByPattern = v.vlanId === 100 || /tr069|mgmt|mjmt|voip/i.test(v.name);
+    const isMgmt = prevVlan ? prevVlan.used_for_mgmt_tr069_voip : isMgmtByPattern;
     return {
-      id: oltId * 10000 + v.vlanId,
+      id: prevVlan?.id || oltId * 10000 + v.vlanId,
       olt_id: oltId,
       vlan_id: v.vlanId,
-      name: vlanLabel,
-      description: vlanLabel,
-      default_for: v.vlanId === 101 ? 'PPPoE / HSI' : 'None selected',
-      used_for_mgmt_tr069_voip: v.vlanId === 100 || /tr069|mgmt|mjmt/i.test(v.name),
-      used_for_iptv: false,
-      dhcp_snooping: /ip\s+dhcp\s+snooping\s+control-port\s+enable/i.test(rawConfig),
-      lan_to_lan: false,
+      name: prevVlan?.name && prevVlan.name !== `VLAN_${v.vlanId}` ? prevVlan.name : vlanLabel,
+      description: prevVlan?.description || vlanLabel,
+      default_for:
+        prevVlan?.default_for ||
+        (isMgmt
+          ? 'Mgmt (TR069 & VoIP Only)'
+          : v.vlanId === 101
+          ? 'PPPoE / HSI'
+          : 'None selected'),
+      used_for_mgmt_tr069_voip: isMgmt,
+      used_for_iptv: prevVlan ? prevVlan.used_for_iptv : false,
+      dhcp_snooping:
+        prevVlan?.dhcp_snooping ??
+        /ip\s+dhcp\s+snooping\s+control-port\s+enable/i.test(rawConfig),
+      lan_to_lan: prevVlan ? prevVlan.lan_to_lan : false,
       onus_count: onuCount,
-      service_type:
-        v.vlanId === 100 || /tr069|mgmt|mjmt/i.test(v.name)
-          ? 'TR069_MGMT'
-          : v.vlanId === 120 || v.vlanId === 140
-          ? 'HOTSPOT_BRIDGE'
-          : 'PPPOE',
-      svlan_id: null,
-      is_default: v.vlanId === 101 || v.vlanId === 111,
+      service_type: isMgmt
+        ? 'TR069_MGMT'
+        : prevVlan?.service_type ||
+          (v.vlanId === 120 || v.vlanId === 140 ? 'HOTSPOT_BRIDGE' : 'PPPOE'),
+      svlan_id: prevVlan?.svlan_id ?? null,
+      is_default: isMgmt ? false : prevVlan?.is_default ?? (v.vlanId === 101 || v.vlanId === 111),
     };
   });
   // Preserve existing VLANs for this OLT if parsed.vlans was partial
-  const existingOltVlans = state.vlans.filter((v) => v.olt_id === oltId);
   const newVlanIds = new Set(parsedVlanRows.map((v) => v.vlan_id));
   const newVlans: VlanRecord[] = [
     ...parsedVlanRows,
@@ -1896,11 +1906,17 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
       config_method: o.tr069Enabled ? 'TR069' : prevOnu?.config_method || 'OMCI',
       wan_remote_access: o.wanRemoteRestrictedIp
         ? 'Enabled only from NOC subnet'
-        : 'Enabled from everywhere in the internet',
-      wan_remote_allowed_subnet: o.wanRemoteRestrictedIp || '0.0.0.0/0',
-      tr069_profile_id: 1,
-      tr069_status: o.tr069Enabled ? 'ACTIVE_INFORMING' : 'DISABLED',
-      tr069_last_inform: o.tr069Enabled ? nowStr : null,
+        : prevOnu?.wan_remote_access || 'Enabled from everywhere in the internet',
+      wan_remote_allowed_subnet:
+        o.wanRemoteRestrictedIp || prevOnu?.wan_remote_allowed_subnet || '0.0.0.0/0',
+      tr069_profile_id: prevOnu?.tr069_profile_id || 1,
+      tr069_mgmt_vlan_id: o.tr069VlanId || prevOnu?.tr069_mgmt_vlan_id || null,
+      tr069_status:
+        o.tr069Enabled || prevOnu?.config_method === 'TR069'
+          ? 'ACTIVE_INFORMING'
+          : prevOnu?.tr069_status || 'DISABLED',
+      tr069_last_inform: o.tr069Enabled ? nowStr : prevOnu?.tr069_last_inform || null,
+      voip_enabled: o.voipEnabled || prevOnu?.voip_enabled || false,
       wifi_ssid: prevOnu?.wifi_ssid || null,
       wifi_password: prevOnu?.wifi_password || null,
       pppoe_username:
@@ -4001,8 +4017,10 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         wan_remote_access: 'Enabled from everywhere in the internet',
         wan_remote_allowed_subnet: '0.0.0.0/0',
         tr069_profile_id: 1,
+        tr069_mgmt_vlan_id: cfgOnu?.tr069VlanId || null,
         tr069_status: cfgOnu?.tr069Enabled ? 'ACTIVE_INFORMING' : 'DISABLED',
         tr069_last_inform: cfgOnu?.tr069Enabled ? nowStr : null,
+        voip_enabled: cfgOnu?.voipEnabled || false,
         wifi_ssid: null,
         wifi_password: null,
         pppoe_username: cfgOnu?.pppoeUsername || wanInfo?.username || resolvedName.toLowerCase(),

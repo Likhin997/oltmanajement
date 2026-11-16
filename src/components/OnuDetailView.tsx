@@ -16,6 +16,7 @@ import {
   generateDeleteOnuCliScript,
   generateTr069CwmpRpcPreview,
   generateOnuEthPortCliScript,
+  buildTr069CliLines,
   parseZteOpticalAttenuation,
   parseZteOnuDetailInfo,
   parseZteWanIpOutput,
@@ -118,7 +119,23 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const odb = db.odbs.find((o) => o.id === onu.odb_id);
   const tr069Profile =
     db.tr069_profiles.find((p) => p.id === onu.tr069_profile_id) ||
+    db.tr069_profiles.find((p) => p.is_default) ||
     db.tr069_profiles[0];
+  const oltMgmtVlan = db.vlans.find(
+    (v) =>
+      v.olt_id === olt.id &&
+      (v.used_for_mgmt_tr069_voip || v.service_type === 'TR069_MGMT')
+  );
+  const effectiveMgmtVlan =
+    onu.tr069_mgmt_vlan_id ||
+    tr069Profile?.mgmt_vlan_id ||
+    oltMgmtVlan?.vlan_id ||
+    100;
+  const isOnuMgmtOnly = Boolean(
+    vlan &&
+      (('used_for_mgmt_tr069_voip' in vlan && vlan.used_for_mgmt_tr069_voip) ||
+        ('service_type' in vlan && vlan.service_type === 'TR069_MGMT'))
+  );
 
   const cleanPppoeUser =
     onu.pppoe_username &&
@@ -288,7 +305,7 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const [mgmtIpInput, setMgmtIpInput] = useState(
     onu.mgmt_ip || '10.100.3.8'
   );
-  const [mgmtVlanInput, setMgmtVlanInput] = useState(100);
+  const [mgmtVlanInput, setMgmtVlanInput] = useState(effectiveMgmtVlan);
   const [selectedSpeedId, setSelectedSpeedId] = useState(
     onu.speed_profile_id || 1
   );
@@ -568,14 +585,20 @@ Username:              ${onu.pppoe_username || onu.customer_name || onu.serial_n
       vlanId: vlan?.vlan_id || 101,
       onuMode: onu.onu_mode,
       wanMode: onu.wan_mode,
-      configMethod: onu.config_method,
+      configMethod: isOnuMgmtOnly ? 'TR069' : onu.config_method,
       wanRemoteAccess: onu.wan_remote_access,
       pppoeUsername: onu.pppoe_username || onu.customer_name || onu.serial_number,
       pppoePassword: onu.pppoe_password || 'jetcyber',
-      tr069Enabled: onu.config_method === 'TR069',
+      tr069Enabled: isOnuMgmtOnly || onu.config_method === 'TR069',
       tr069AcsUrl: tr069Profile?.acs_url,
       tr069AcsUsername: tr069Profile?.acs_username,
       tr069AcsPassword: tr069Profile?.acs_password,
+      tr069MgmtVlanId: effectiveMgmtVlan,
+      tr069Priority: tr069Profile?.vlan_priority ?? 2,
+      tr069TcontProfile: tr069Profile?.tcont_profile || 'SMARTOLT-VOIPMNG-10M',
+      tr069TrafficProfile: tr069Profile?.traffic_profile || 'SMARTOLT-VOIPMNG-10M',
+      voipSipEnabled: onu.voip_enabled ?? tr069Profile?.voip_enabled ?? isOnuMgmtOnly,
+      mgmtOnlyNoInternet: isOnuMgmtOnly,
     });
     setActiveConsoleOutput({
       title: `Show running-config — ${onuInterface} (Fetching from OLT...)`,
@@ -642,39 +665,78 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
   };
 
   const handleTr069Push = () => {
-    const acsUrl = tr069Profile?.acs_url || 'http://103.42.242.66:7547';
-    const acsUser = tr069Profile?.acs_username || 'SmartOLT';
-    const acsPass = tr069Profile?.acs_password || 'SmartOLT';
-    const cli = [
-      `configure terminal`,
-      `interface ${onuInterface}`,
-      `  tcont 2 profile SMARTOLT-VOIPMNG-10M`,
-      `  gemport 2 tcont 2`,
-      `  gemport 2 traffic-limit downstream SMARTOLT-VOIPMNG-10M`,
-      `  service-port 2 vport 2 user-vlan 100 vlan 100`,
-      `exit`,
-      `pon-onu-mng ${onuInterface}`,
-      `  flow 2 pri 2 vlan 100`,
-      `  gemport 2 flow 2`,
-      `  switchport-bind switch_0/1 iphost 2`,
-      `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
-      `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
-      `  vlan-filter iphost 2 pri 2 vlan 100`,
-      `  tr069-mgmt 1 state unlock`,
-      `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
-      `  tr069-mgmt 1 tag pri 2 vlan 100`,
-      `exit`,
-      `end`,
-      `write`,
-    ].join('\n');
+    const acsUrl = tr069Profile?.acs_url || 'http://10.69.69.1:14501';
+    const acsUser = tr069Profile?.acs_username || 'acsNet';
+    const acsPass = tr069Profile?.acs_password || 'acsNet@2024';
+    const tr069Pri = tr069Profile?.vlan_priority ?? 2;
+    const mgmtTcont = tr069Profile?.tcont_profile || 'SMARTOLT-VOIPMNG-10M';
+    const mgmtTraffic = tr069Profile?.traffic_profile || 'SMARTOLT-VOIPMNG-10M';
+    const voipEnabled = Boolean(
+      isOnuMgmtOnly || onu.voip_enabled || tr069Profile?.voip_enabled
+    );
+
+    const cli = isOnuMgmtOnly
+      ? [
+          `! VLAN Mgmt ${effectiveMgmtVlan}: TR-069 & VoIP Only (Tanpa Push Internet)`,
+          `configure terminal`,
+          `interface ${onuInterface}`,
+          `  tcont 1 profile ${mgmtTcont}`,
+          `  gemport 1 tcont 1`,
+          `  gemport 1 traffic-limit downstream ${mgmtTraffic}`,
+          `  no service-port 1`,
+          `  no service-port 2`,
+          `  service-port 1 vport 1 user-vlan ${effectiveMgmtVlan} vlan ${effectiveMgmtVlan}`,
+          `exit`,
+          `pon-onu-mng ${onuInterface}`,
+          `  no pppoe 1`,
+          ...buildTr069CliLines({
+            enabled: true,
+            acsUrl,
+            acsUsername: acsUser,
+            acsPassword: acsPass,
+            vlanId: effectiveMgmtVlan,
+            priority: tr069Pri,
+            usePrimaryFlow: true,
+            voipSipEnabled: true,
+          }),
+          `exit`,
+          `end`,
+          `write`,
+        ].join('\n')
+      : [
+          `configure terminal`,
+          `interface ${onuInterface}`,
+          `  tcont 2 profile ${mgmtTcont}`,
+          `  gemport 2 tcont 2`,
+          `  gemport 2 traffic-limit downstream ${mgmtTraffic}`,
+          `  no service-port 2`,
+          `  service-port 2 vport 2 user-vlan ${effectiveMgmtVlan} vlan ${effectiveMgmtVlan}`,
+          `exit`,
+          `pon-onu-mng ${onuInterface}`,
+          ...buildTr069CliLines({
+            enabled: true,
+            acsUrl,
+            acsUsername: acsUser,
+            acsPassword: acsPass,
+            vlanId: effectiveMgmtVlan,
+            priority: tr069Pri,
+            usePrimaryFlow: false,
+            voipSipEnabled: voipEnabled,
+          }),
+          `exit`,
+          `end`,
+          `write`,
+        ].join('\n');
 
     const rpcPreview = generateTr069CwmpRpcPreview({
       serialNumber: onu.serial_number,
-      vlanId: vlan?.vlan_id || 101,
+      vlanId: isOnuMgmtOnly ? effectiveMgmtVlan : vlan?.vlan_id || 101,
       onuMode: onu.onu_mode || 'Routing',
       wanMode: onu.wan_mode || 'PPPOE',
-      pppoeUsername: onu.pppoe_username || onu.customer_name || onu.serial_number,
-      pppoePassword: onu.pppoe_password || 'jetcyber',
+      pppoeUsername: isOnuMgmtOnly
+        ? '(Mgmt Only - No Internet PPPoE)'
+        : onu.pppoe_username || onu.customer_name || onu.serial_number,
+      pppoePassword: isOnuMgmtOnly ? '-' : onu.pppoe_password || 'jetcyber',
       wanRemoteAccess:
         onu.wan_remote_access || 'Enabled from everywhere in the internet',
       acsUrl,
@@ -688,10 +750,13 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       cli,
       {
         config_method: 'TR069',
+        tr069_profile_id: tr069Profile?.id || onu.tr069_profile_id || 1,
+        tr069_mgmt_vlan_id: effectiveMgmtVlan,
+        voip_enabled: voipEnabled,
         tr069_status: 'ACTIVE_INFORMING',
         tr069_last_inform: `${new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ')} WIB`,
       },
-      `TR-069 CWMP & OMCI Push (${onu.serial_number})\n${rpcPreview}`
+      `TR-069 CWMP & OMCI Push (${onu.serial_number} · VLAN ${effectiveMgmtVlan}${isOnuMgmtOnly ? ' · Mgmt/VoIP Only' : ''})\n${rpcPreview}`
     );
   };
 
@@ -715,7 +780,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       vlanId: vlan?.vlan_id || 101,
       onuMode: onu.onu_mode || 'Routing',
       wanMode: onu.wan_mode || 'PPPOE',
-      configMethod: onu.config_method || 'OMCI',
+      configMethod: isOnuMgmtOnly ? 'TR069' : onu.config_method || 'OMCI',
       wanRemoteAccess:
         onu.wan_remote_access || 'Enabled from everywhere in the internet',
       pppoeUsername: onu.pppoe_username || onu.customer_name || onu.serial_number,
@@ -723,6 +788,12 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       tr069AcsUrl: tr069Profile?.acs_url,
       tr069AcsUsername: tr069Profile?.acs_username,
       tr069AcsPassword: tr069Profile?.acs_password,
+      tr069MgmtVlanId: effectiveMgmtVlan,
+      tr069Priority: tr069Profile?.vlan_priority ?? 2,
+      tr069TcontProfile: tr069Profile?.tcont_profile || 'SMARTOLT-VOIPMNG-10M',
+      tr069TrafficProfile: tr069Profile?.traffic_profile || 'SMARTOLT-VOIPMNG-10M',
+      voipSipEnabled: onu.voip_enabled ?? tr069Profile?.voip_enabled ?? isOnuMgmtOnly,
+      mgmtOnlyNoInternet: isOnuMgmtOnly,
     });
     void executeAndDisplayLivePush(
       'RESYNC_CONFIG',
@@ -731,7 +802,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
         onu_type: 'ALL',
         phase_state: 'working',
       },
-      `Full Resync Config (type ALL + PPPoE) — ${onuInterface}`
+      `Full Resync Config (${isOnuMgmtOnly ? `Mgmt VLAN ${effectiveMgmtVlan} TR069+VoIP` : 'type ALL + PPPoE'}) — ${onuInterface}`
     );
   };
 
@@ -1295,10 +1366,21 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <div className="col-span-8 flex flex-wrap items-center gap-2.5 text-white">
                 <span className="inline-flex items-center gap-1 rounded bg-emerald-950/80 px-2 py-0.5 font-mono text-[11px] font-semibold text-emerald-300 border border-emerald-600/40">
                   <Radio className="h-3 w-3" />
-                  {tr069Profile?.profile_name || 'JETCYBER'} (
+                  {tr069Profile?.profile_name || 'Default ACS'} (VLAN{' '}
+                  {effectiveMgmtVlan} ·{' '}
                   {onu.config_method === 'TR069' ? 'CWMP Active' : 'OMCI + ACS'}
                   )
                 </span>
+                {tr069Profile?.acs_url && (
+                  <span className="font-mono text-[10px] text-slate-400">
+                    {tr069Profile.acs_url}
+                  </span>
+                )}
+                {isOnuMgmtOnly && (
+                  <span className="rounded bg-amber-950/80 px-2 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/40">
+                    MGMT VLAN (TR069 + VoIP Only, No Internet)
+                  </span>
+                )}
                 <button
                   type="button"
                   onClick={() => setShowUpdateModeModal(true)}
@@ -1327,6 +1409,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                   type="button"
                   onClick={() => {
                     setMgmtIpInput(onu.mgmt_ip || '10.100.3.8');
+                    setMgmtVlanInput(effectiveMgmtVlan);
                     setActiveEditDialog('MGMT_IP');
                   }}
                   className="text-sky-400 hover:underline"
@@ -2246,7 +2329,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <h3 className="text-base font-bold text-white">
                 {activeEditDialog === 'MOVE_ONU' && 'Move ONU to Another PON Port'}
                 {activeEditDialog === 'METADATA' && 'Edit & Push ONU Details (Name, SN, PPPoE, Zone)'}
-                {activeEditDialog === 'MGMT_IP' && 'Configure ONU Management IP (VLAN 100 TR069)'}
+                {activeEditDialog === 'MGMT_IP' && `Configure ONU Management IP (VLAN ${effectiveMgmtVlan} TR069)`}
                 {activeEditDialog === 'SPEED_PROFILE' && 'Configure ONU Speed Profile'}
                 {activeEditDialog === 'WIFI' && 'Configure ONU WiFi (OMCI / TR-069 CWMP)'}
               </h3>
@@ -2277,7 +2360,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     vlanId: vlan?.vlan_id || 101,
                     onuMode: onu.onu_mode || 'Routing',
                     wanMode: onu.wan_mode || 'PPPOE',
-                    configMethod: onu.config_method || 'OMCI',
+                    configMethod: isOnuMgmtOnly ? 'TR069' : onu.config_method || 'OMCI',
                     wanRemoteAccess:
                       onu.wan_remote_access ||
                       'Enabled from everywhere in the internet',
@@ -2286,6 +2369,16 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                       onu.customer_name ||
                       onu.serial_number,
                     pppoePassword: onu.pppoe_password || 'jetcyber',
+                    tr069Enabled: isOnuMgmtOnly || onu.config_method === 'TR069',
+                    tr069AcsUrl: tr069Profile?.acs_url,
+                    tr069AcsUsername: tr069Profile?.acs_username,
+                    tr069AcsPassword: tr069Profile?.acs_password,
+                    tr069MgmtVlanId: effectiveMgmtVlan,
+                    tr069Priority: tr069Profile?.vlan_priority ?? 2,
+                    tr069TcontProfile: tr069Profile?.tcont_profile || 'SMARTOLT-VOIPMNG-10M',
+                    tr069TrafficProfile: tr069Profile?.traffic_profile || 'SMARTOLT-VOIPMNG-10M',
+                    voipSipEnabled: onu.voip_enabled ?? tr069Profile?.voip_enabled ?? isOnuMgmtOnly,
+                    mgmtOnlyNoInternet: isOnuMgmtOnly,
                   });
                   const cli = [
                     'configure terminal',
@@ -2795,13 +2888,28 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  const cli = `configure terminal\npon-onu-mng ${onuInterface}\n  mgmt-ip onu-ip ${mgmtIpInput} 255.255.0.0 7 mgmt-vlan ${mgmtVlanInput}\n  tr069-mgmt 1 state unlock\n  tr069-mgmt 1 tag pri 7 vlan ${mgmtVlanInput}\nexit\nend\nwrite`;
+                  const pri = tr069Profile?.vlan_priority ?? 2;
+                  const acsUrl = tr069Profile?.acs_url || 'http://10.69.69.1:14501';
+                  const acsUser = tr069Profile?.acs_username || 'acsNet';
+                  const acsPass = tr069Profile?.acs_password || 'acsNet@2024';
+                  const cli = [
+                    `configure terminal`,
+                    `pon-onu-mng ${onuInterface}`,
+                    `  mgmt-ip onu-ip ${mgmtIpInput} 255.255.0.0 ${pri} mgmt-vlan ${mgmtVlanInput}`,
+                    `  tr069-mgmt 1 state unlock`,
+                    `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
+                    `  tr069-mgmt 1 tag pri ${pri} vlan ${mgmtVlanInput}`,
+                    `exit`,
+                    `end`,
+                    `write`,
+                  ].join('\n');
                   setActiveEditDialog(null);
                   void executeAndDisplayLivePush(
                     'RESYNC_CONFIG',
                     cli,
                     {
                       mgmt_ip: mgmtIpInput,
+                      tr069_mgmt_vlan_id: mgmtVlanInput,
                     },
                     `Configure Mgmt IP (${mgmtIpInput} on VLAN ${mgmtVlanInput}) — ${onuInterface}`
                   );

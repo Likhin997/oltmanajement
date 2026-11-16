@@ -94,6 +94,7 @@ interface OltDetailViewProps {
   onImportRunningConfig?: (oltId: number, rawConfig: string) => void;
   onSyncOltLive?: (oltId: number) => Promise<void>;
   onTabChange?: (tab: OltDetailTab) => void;
+  onOpenTr069Config?: () => void;
 }
 
 export const OltDetailView: React.FC<OltDetailViewProps> = ({
@@ -115,6 +116,7 @@ export const OltDetailView: React.FC<OltDetailViewProps> = ({
   onImportRunningConfig,
   onSyncOltLive,
   onTabChange,
+  onOpenTr069Config,
 }) => {
   const [activeTab, setActiveTab] = useState<OltDetailTab>(initialTab);
 
@@ -289,6 +291,17 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
   const [copiedCli, setCopiedCli] = useState(false);
 
   const oltVlans = db.vlans.filter((v) => v.olt_id === olt.id);
+  const defaultTr069Profile =
+    db.tr069_profiles.find((p) => p.profile_name === olt.tr069_profile_name) ||
+    db.tr069_profiles.find((p) => p.is_default) ||
+    db.tr069_profiles[0];
+  const oltMgmtVlan =
+    oltVlans.find(
+      (v) => v.used_for_mgmt_tr069_voip || v.service_type === 'TR069_MGMT'
+    ) ||
+    oltVlans.find((v) => v.vlan_id === (defaultTr069Profile?.mgmt_vlan_id || 100));
+  const activeMgmtVlanId =
+    defaultTr069Profile?.mgmt_vlan_id || oltMgmtVlan?.vlan_id || 100;
   const oltCards: OltCardRecord[] = db.olt_cards.filter((c) => c.olt_id === olt.id);
   const uplinkPorts: UplinkPortRecord[] = db.uplink_ports.filter(
     (u) => u.olt_id === olt.id
@@ -1772,14 +1785,22 @@ ${oltVlans
                         {v.description}
                       </td>
                       <td className="px-4 py-3">
-                        <input
-                          type="checkbox"
-                          checked={v.used_for_mgmt_tr069_voip}
-                          onChange={() =>
-                            onToggleVlanFlag(v.id, 'used_for_mgmt_tr069_voip')
-                          }
-                          className="h-4 w-4 rounded accent-sky-500"
-                        />
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={v.used_for_mgmt_tr069_voip}
+                            onChange={() =>
+                              onToggleVlanFlag(v.id, 'used_for_mgmt_tr069_voip')
+                            }
+                            className="h-4 w-4 rounded accent-sky-500"
+                          />
+                          {(v.used_for_mgmt_tr069_voip ||
+                            v.service_type === 'TR069_MGMT') && (
+                            <span className="rounded bg-amber-950/90 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/40">
+                              TR069 + VoIP Only (No Internet)
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3">
                         <input
@@ -1871,15 +1892,15 @@ ${oltVlans
                     ONU Management & TR-069 IP Pools — {olt.name}
                   </h3>
                   <p className="text-xs text-slate-300">
-                    Digunakan untuk menginjeksi IP Management (`pon-onu-mng` `mgmt-ip`) pada VLAN 100 TR069.
+                    Digunakan untuk menginjeksi IP Management (`pon-onu-mng` `mgmt-ip`) pada VLAN {activeMgmtVlanId} TR069 &amp; VoIP (tanpa push internet).
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() =>
                     setLastCliBanner({
-                      title: `ONU Management IP Pool Synced to OLT`,
-                      cli: `configure terminal\nip-pool mgmt-tr069 vlan 100 subnet 10.100.0.0 255.255.0.0 gateway 10.100.0.1\nend\nwrite`,
+                      title: `ONU Management IP Pool (VLAN ${activeMgmtVlanId}) Synced to OLT`,
+                      cli: `configure terminal\nip-pool mgmt-tr069 vlan ${activeMgmtVlanId} subnet 10.100.0.0 255.255.0.0 gateway 10.100.0.1\nend\nwrite`,
                     })
                   }
                   className="rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white"
@@ -1900,7 +1921,7 @@ ${oltVlans
                 <tbody>
                   <tr className="border-b border-[#1e3a5f]/50">
                     <td className="px-3 py-2 font-mono text-sky-400">
-                      100 (TR069)
+                      {activeMgmtVlanId} (TR069 + VoIP Only)
                     </td>
                     <td className="px-3 py-2 font-mono">
                       10.100.0.0 / 255.255.0.0
@@ -1910,7 +1931,7 @@ ${oltVlans
                       10.100.0.2 - 10.100.255.254
                     </td>
                     <td className="px-3 py-2 font-mono text-emerald-400">
-                      29 allocated
+                      {db.onus.filter((u) => u.olt_id === olt.id && u.config_method === 'TR069').length} allocated
                     </td>
                   </tr>
                 </tbody>
@@ -1963,9 +1984,20 @@ ${oltVlans
 
           {activeTab === 'PROFILES' && (
             <div className="space-y-4">
-              <h3 className="text-sm font-bold text-white">
-                TR-069 CWMP ACS Profiles & GPON TCONT / Traffic Profiles
-              </h3>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-white">
+                  TR-069 CWMP ACS Profiles & GPON TCONT / Traffic Profiles
+                </h3>
+                {onOpenTr069Config && (
+                  <button
+                    type="button"
+                    onClick={onOpenTr069Config}
+                    className="rounded bg-[#5cb85c] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                  >
+                    Kelola / Edit Profil TR-069 ISP
+                  </button>
+                )}
+              </div>
               <table className="w-full text-left text-xs">
                 <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
                   <tr>
@@ -1973,14 +2005,23 @@ ${oltVlans
                     <th className="px-3 py-2">ACS CWMP URL</th>
                     <th className="px-3 py-2">ACS Username</th>
                     <th className="px-3 py-2">Periodic Inform</th>
-                    <th className="px-3 py-2">Mgmt VLAN</th>
+                    <th className="px-3 py-2">Mgmt VLAN / CoS</th>
+                    <th className="px-3 py-2">VoIP SIP</th>
+                    <th className="px-3 py-2">TCONT / Traffic</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#1e3a5f]/60">
                   {db.tr069_profiles.map((prof) => (
                     <tr key={prof.id}>
                       <td className="px-3 py-2 font-bold text-emerald-400">
-                        {prof.profile_name}
+                        <div className="flex items-center gap-2">
+                          <span>{prof.profile_name}</span>
+                          {prof.is_default && (
+                            <span className="rounded bg-emerald-700/80 px-1.5 py-0.5 text-[10px] text-white">
+                              DEFAULT
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-3 py-2 font-mono text-sky-300">
                         {prof.acs_url}
@@ -1989,7 +2030,21 @@ ${oltVlans
                       <td className="px-3 py-2 font-mono">
                         {prof.periodic_inform_interval}s
                       </td>
-                      <td className="px-3 py-2 font-mono">{prof.mgmt_vlan_id}</td>
+                      <td className="px-3 py-2 font-mono">
+                        VLAN {prof.mgmt_vlan_id} (Pri {prof.vlan_priority ?? 2})
+                      </td>
+                      <td className="px-3 py-2">
+                        {prof.voip_enabled !== false ? (
+                          <span className="rounded bg-sky-900/70 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300">
+                            SIP Enabled
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">Off</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-[11px] text-slate-300">
+                        {prof.tcont_profile || 'SMARTOLT-VOIPMNG-10M'}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -2362,6 +2417,15 @@ ${oltVlans
                   LAN to LAN
                 </label>
               </div>
+
+              {newVlanTr069 && (
+                <div className="rounded border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200">
+                  <strong>Mode VLAN Management (TR-069 + VoIP Only):</strong> VLAN ini akan otomatis dikonfigurasi hanya untuk layanan{' '}
+                  <span className="font-mono font-bold">TR-069 CWMP</span> &amp;{' '}
+                  <span className="font-mono font-bold">VoIP SIP</span> pada ONU,{' '}
+                  <strong>tanpa push service Internet (PPPoE/DHCP/LAN Internet)</strong>.
+                </div>
+              )}
 
               {/* Auto-Tag to Uplink Ports Checkboxes */}
               <div className="space-y-2 rounded border border-emerald-500/40 bg-emerald-950/20 p-3.5">
