@@ -226,11 +226,27 @@ export default function App() {
           prevOnu.external_id && !prevOnu.external_id.startsWith('ONU-')
             ? prevOnu.external_id
             : incOnu.external_id,
-        tr069_profile_id: prevOnu.tr069_profile_id ?? incOnu.tr069_profile_id ?? null,
+        tr069_profile_id:
+          prevOnu.tr069_profile_id !== undefined
+            ? prevOnu.tr069_profile_id
+            : incOnu.tr069_profile_id ?? null,
+        tr069_interface: prevOnu.tr069_interface ?? incOnu.tr069_interface,
         tr069_mgmt_vlan_id:
           prevOnu.tr069_mgmt_vlan_id ?? incOnu.tr069_mgmt_vlan_id ?? null,
         tr069_status: prevOnu.tr069_status ?? incOnu.tr069_status,
         voip_enabled: prevOnu.voip_enabled ?? incOnu.voip_enabled,
+        attached_vlan_ids:
+          prevOnu.attached_vlan_ids && prevOnu.attached_vlan_ids.length > 0
+            ? prevOnu.attached_vlan_ids
+            : incOnu.attached_vlan_ids,
+        mgmt_ip_mode: prevOnu.mgmt_ip_mode ?? incOnu.mgmt_ip_mode,
+        mgmt_ip: prevOnu.mgmt_ip ?? incOnu.mgmt_ip,
+        mgmt_subnet_mask: prevOnu.mgmt_subnet_mask ?? incOnu.mgmt_subnet_mask,
+        mgmt_gateway: prevOnu.mgmt_gateway ?? incOnu.mgmt_gateway,
+        mgmt_keep_service_port:
+          prevOnu.mgmt_keep_service_port ?? incOnu.mgmt_keep_service_port,
+        mgmt_allow_remote_access:
+          prevOnu.mgmt_allow_remote_access ?? incOnu.mgmt_allow_remote_access,
       };
     });
 

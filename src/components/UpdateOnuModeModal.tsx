@@ -97,23 +97,15 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
     onu.static_dns1 || '8.8.8.8'
   );
 
-  // TR-069 & VoIP Mgmt specific fields
+  // Preserve existing TR-069 & WiFi values on ONU without editing them inside Update ONU Mode
   const defaultTrProfile =
     db.tr069_profiles.find((p) => p.id === onu.tr069_profile_id) ||
     db.tr069_profiles.find((p) => p.is_default) ||
     db.tr069_profiles[0];
-  const [tr069ProfileId, setTr069ProfileId] = useState<number>(
-    defaultTrProfile?.id || 1
-  );
-  const [voipSipEnabled, setVoipSipEnabled] = useState<boolean>(
-    onu.voip_enabled ?? defaultTrProfile?.voip_enabled ?? true
-  );
-  const [wifiSsid, setWifiSsid] = useState<string>(
-    onu.wifi_ssid || `${(onu.customer_name || 'SmartOLT').split(' ')[0]}_5G`
-  );
-  const [wifiPassword, setWifiPassword] = useState<string>(
-    onu.wifi_password || 'jetcyber123'
-  );
+  const tr069ProfileId = onu.tr069_profile_id ?? defaultTrProfile?.id ?? 1;
+  const voipSipEnabled = onu.voip_enabled ?? defaultTrProfile?.voip_enabled ?? true;
+  const wifiSsid = onu.wifi_ssid || '';
+  const wifiPassword = onu.wifi_password || '';
   const [showCliPreview, setShowCliPreview] = useState<boolean>(true);
   const [copied, setCopied] = useState<boolean>(false);
 
@@ -601,82 +593,6 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
                     placeholder="103.144.22.0/24"
                     className="w-full rounded-md border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-xs text-white"
                   />
-                </div>
-              </div>
-            )}
-
-            {/* Conditional TR-069 CWMP ACS & VoIP Configuration Box */}
-            {effectiveConfigMethod === 'TR069' && (
-              <div className="space-y-3 rounded-lg border border-emerald-500/40 bg-emerald-950/20 p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs font-bold text-emerald-400">
-                    TR-069 (CWMP ACS) &amp; VoIP Management — VLAN {effectiveMgmtVlanId} (Pri {selectedTr069Profile?.vlan_priority ?? 2})
-                  </span>
-                  <span className="font-mono text-[11px] text-slate-400">
-                    Inform Interval: {selectedTr069Profile?.periodic_inform_interval || 300}s
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <div className="sm:col-span-3">
-                    <label className="block text-xs font-medium text-slate-300">
-                      TR-069 ACS Server Profile (ISP)
-                    </label>
-                    <select
-                      value={tr069ProfileId}
-                      onChange={(e) => {
-                        const nextId = Number(e.target.value);
-                        setTr069ProfileId(nextId);
-                        const prof = db.tr069_profiles.find((p) => p.id === nextId);
-                        if (prof && typeof prof.voip_enabled === 'boolean') {
-                          setVoipSipEnabled(prof.voip_enabled);
-                        }
-                      }}
-                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 font-mono text-xs text-white"
-                    >
-                      {db.tr069_profiles.map((prof) => (
-                        <option key={prof.id} value={prof.id}>
-                          {prof.profile_name} — {prof.acs_url} (VLAN {prof.mgmt_vlan_id})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="sm:col-span-3">
-                    <label className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-sky-300">
-                      <input
-                        type="checkbox"
-                        checked={isSelectedVlanMgmtOnly ? true : voipSipEnabled}
-                        disabled={isSelectedVlanMgmtOnly}
-                        onChange={(e) => setVoipSipEnabled(e.target.checked)}
-                        className="h-3.5 w-3.5 rounded accent-sky-500"
-                      />
-                      Aktifkan Service VoIP SIP (`voip protocol sip` + `veip 1`) pada VLAN {effectiveMgmtVlanId}
-                    </label>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300">
-                      Remote WiFi SSID (TR-069)
-                    </label>
-                    <input
-                      type="text"
-                      value={wifiSsid}
-                      onChange={(e) => setWifiSsid(e.target.value)}
-                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 font-mono text-xs text-white"
-                    />
-                  </div>
-                  <div className="sm:col-span-2">
-                    <label className="block text-xs font-medium text-slate-300">
-                      Remote WiFi WPA2/WPA3 Passphrase (TR-069)
-                    </label>
-                    <input
-                      type="text"
-                      value={wifiPassword}
-                      onChange={(e) => setWifiPassword(e.target.value)}
-                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 font-mono text-xs text-white"
-                    />
-                  </div>
                 </div>
               </div>
             )}

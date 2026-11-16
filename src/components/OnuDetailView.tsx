@@ -16,6 +16,8 @@ import {
   generateDeleteOnuCliScript,
   generateTr069CwmpRpcPreview,
   generateOnuEthPortCliScript,
+  generateUpdateAttachedVlansCliScript,
+  generateUpdateMgmtAndTr069CliScript,
   buildTr069CliLines,
   parseZteOpticalAttenuation,
   parseZteOnuDetailInfo,
@@ -40,6 +42,12 @@ import {
   AlertTriangle,
   Power,
   X,
+  Search,
+  ChevronDown,
+  Settings,
+  Server,
+  Info,
+  XCircle,
 } from 'lucide-react';
 
 interface EthPortSetting {
@@ -225,6 +233,7 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   const [activeEditDialog, setActiveEditDialog] = useState<
     | 'MOVE_ONU'
     | 'METADATA'
+    | 'ATTACHED_VLANS'
     | 'MGMT_IP'
     | 'SPEED_PROFILE'
     | 'WIFI'
@@ -302,10 +311,90 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     setActiveEditDialog('METADATA');
   };
 
+  const currentAttachedVlanIds: number[] =
+    Array.isArray(onu.attached_vlan_ids) && onu.attached_vlan_ids.length > 0
+      ? onu.attached_vlan_ids
+      : [
+          vlan?.vlan_id || 101,
+          ...(onu.hotspot_bridge_vlan &&
+          onu.hotspot_bridge_vlan !== (vlan?.vlan_id || 101)
+            ? [onu.hotspot_bridge_vlan]
+            : []),
+        ];
+
+  const [selectedAttachedVlans, setSelectedAttachedVlans] = useState<number[]>(
+    currentAttachedVlanIds
+  );
+  const [attachedVlanSearch, setAttachedVlanSearch] = useState<string>('');
+  const [attachedVlanDropdownOpen, setAttachedVlanDropdownOpen] =
+    useState<boolean>(true);
+
+  const [mgmtTr069ProfileId, setMgmtTr069ProfileId] = useState<number | 'NONE'>(
+    onu.tr069_profile_id ?? tr069Profile?.id ?? 1
+  );
+  const [mgmtTr069Interface, setMgmtTr069Interface] = useState<'MGMT_IP' | 'WAN'>(
+    onu.tr069_interface || 'MGMT_IP'
+  );
+  const [mgmtIpModeInput, setMgmtIpModeInput] = useState<
+    'INACTIVE' | 'STATIC_IP' | 'DHCP'
+  >(
+    onu.mgmt_ip_mode ||
+      (onu.mgmt_ip === 'DHCP'
+        ? 'DHCP'
+        : onu.mgmt_ip
+        ? 'STATIC_IP'
+        : 'DHCP')
+  );
   const [mgmtIpInput, setMgmtIpInput] = useState(
-    onu.mgmt_ip || '10.100.3.8'
+    onu.mgmt_ip && onu.mgmt_ip !== 'DHCP' ? onu.mgmt_ip : '10.100.3.8'
+  );
+  const [mgmtMaskInput, setMgmtMaskInput] = useState(
+    onu.mgmt_subnet_mask || '255.255.0.0'
+  );
+  const [mgmtGwInput, setMgmtGwInput] = useState(
+    onu.mgmt_gateway || '10.100.0.1'
+  );
+  const [mgmtKeepServicePort, setMgmtKeepServicePort] = useState<boolean>(
+    onu.mgmt_keep_service_port ?? true
+  );
+  const [mgmtAllowRemoteAccess, setMgmtAllowRemoteAccess] = useState<boolean>(
+    onu.mgmt_allow_remote_access ?? false
   );
   const [mgmtVlanInput, setMgmtVlanInput] = useState(effectiveMgmtVlan);
+
+  const openAttachedVlansDialog = () => {
+    setSelectedAttachedVlans(currentAttachedVlanIds);
+    setAttachedVlanSearch('');
+    setAttachedVlanDropdownOpen(true);
+    setActiveEditDialog('ATTACHED_VLANS');
+  };
+
+  const openMgmtAndTr069Dialog = () => {
+    setMgmtTr069ProfileId(
+      onu.tr069_profile_id === null
+        ? 'NONE'
+        : onu.tr069_profile_id ?? tr069Profile?.id ?? 1
+    );
+    setMgmtTr069Interface(onu.tr069_interface || 'MGMT_IP');
+    setMgmtIpModeInput(
+      onu.mgmt_ip_mode ||
+        (onu.mgmt_ip === 'DHCP'
+          ? 'DHCP'
+          : onu.mgmt_ip
+          ? 'STATIC_IP'
+          : 'DHCP')
+    );
+    setMgmtIpInput(
+      onu.mgmt_ip && onu.mgmt_ip !== 'DHCP' ? onu.mgmt_ip : '10.100.3.8'
+    );
+    setMgmtMaskInput(onu.mgmt_subnet_mask || '255.255.0.0');
+    setMgmtGwInput(onu.mgmt_gateway || '10.100.0.1');
+    setMgmtKeepServicePort(onu.mgmt_keep_service_port ?? true);
+    setMgmtAllowRemoteAccess(onu.mgmt_allow_remote_access ?? false);
+    setMgmtVlanInput(effectiveMgmtVlan);
+    setActiveEditDialog('MGMT_IP');
+  };
+
   const [selectedSpeedId, setSelectedSpeedId] = useState(
     onu.speed_profile_id || 1
   );
@@ -1366,12 +1455,13 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <div className="col-span-8 flex flex-wrap items-center gap-2.5 text-white">
                 <span className="inline-flex items-center gap-1 rounded bg-emerald-950/80 px-2 py-0.5 font-mono text-[11px] font-semibold text-emerald-300 border border-emerald-600/40">
                   <Radio className="h-3 w-3" />
-                  {tr069Profile?.profile_name || 'Default ACS'} (VLAN{' '}
-                  {effectiveMgmtVlan} ·{' '}
-                  {onu.config_method === 'TR069' ? 'CWMP Active' : 'OMCI + ACS'}
-                  )
+                  {onu.tr069_profile_id === null
+                    ? 'No profile'
+                    : `${tr069Profile?.profile_name || 'JETCYBER'} (via ${
+                        onu.tr069_interface === 'WAN' ? 'WAN' : 'Mgmt IP'
+                      } · VLAN ${effectiveMgmtVlan})`}
                 </span>
-                {tr069Profile?.acs_url && (
+                {onu.tr069_profile_id !== null && tr069Profile?.acs_url && (
                   <span className="font-mono text-[10px] text-slate-400">
                     {tr069Profile.acs_url}
                   </span>
@@ -1383,7 +1473,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 )}
                 <button
                   type="button"
-                  onClick={() => setShowUpdateModeModal(true)}
+                  onClick={openMgmtAndTr069Dialog}
                   className="text-sky-400 hover:underline"
                 >
                   Configure
@@ -1404,14 +1494,18 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 Mgmt IP
               </div>
               <div className="col-span-8 flex items-center gap-3 text-white">
-                <span className="font-mono">{onu.mgmt_ip || 'Inactive'}</span>
+                <span className="font-mono">
+                  {onu.mgmt_ip_mode === 'INACTIVE'
+                    ? 'Inactive'
+                    : onu.mgmt_ip_mode === 'DHCP' || onu.mgmt_ip === 'DHCP'
+                    ? `DHCP (VLAN ${effectiveMgmtVlan})`
+                    : onu.mgmt_ip
+                    ? `${onu.mgmt_ip} (VLAN ${effectiveMgmtVlan})`
+                    : 'Inactive'}
+                </span>
                 <button
                   type="button"
-                  onClick={() => {
-                    setMgmtIpInput(onu.mgmt_ip || '10.100.3.8');
-                    setMgmtVlanInput(effectiveMgmtVlan);
-                    setActiveEditDialog('MGMT_IP');
-                  }}
+                  onClick={openMgmtAndTr069Dialog}
                   className="text-sky-400 hover:underline"
                 >
                   Configure
@@ -1424,13 +1518,20 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <div className="col-span-4 font-semibold text-slate-300">
                 Attached VLANs
               </div>
-              <div className="col-span-8 flex items-center gap-3 text-white">
+              <div className="col-span-8 flex flex-wrap items-center gap-2 text-white">
                 <span className="font-mono font-bold">
-                  {vlan?.vlan_id || 101}
+                  {currentAttachedVlanIds
+                    .map((vid) => {
+                      const vObj = db.vlans.find(
+                        (v) => v.olt_id === olt.id && v.vlan_id === vid
+                      ) || db.vlans.find((v) => v.vlan_id === vid);
+                      return vObj ? `${vid} (${vObj.name})` : `${vid}`;
+                    })
+                    .join(', ')}
                 </span>
                 <button
                   type="button"
-                  onClick={() => setShowUpdateModeModal(true)}
+                  onClick={openAttachedVlansDialog}
                   className="text-sky-400 hover:underline"
                 >
                   Configure
@@ -2320,16 +2421,23 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       )}
 
       {/* ===================================================================
-          MODAL: MOVE ONU / METADATA / MGMT IP / SPEED PROFILE / WIFI
+          MODAL: MOVE ONU / METADATA / ATTACHED VLANS / MGMT IP / SPEED PROFILE / WIFI
          =================================================================== */}
       {activeEditDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
-            <div className="mb-3 flex items-center justify-between border-b border-slate-700 pb-3">
+          <div
+            className={`w-full ${
+              activeEditDialog === 'MGMT_IP' || activeEditDialog === 'ATTACHED_VLANS'
+                ? 'max-w-lg'
+                : 'max-w-md'
+            } rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl`}
+          >
+            <div className="mb-4 flex items-center justify-between border-b border-slate-700 pb-3">
               <h3 className="text-base font-bold text-white">
                 {activeEditDialog === 'MOVE_ONU' && 'Move ONU to Another PON Port'}
                 {activeEditDialog === 'METADATA' && 'Edit & Push ONU Details (Name, SN, PPPoE, Zone)'}
-                {activeEditDialog === 'MGMT_IP' && `Configure ONU Management IP (VLAN ${effectiveMgmtVlan} TR069)`}
+                {activeEditDialog === 'ATTACHED_VLANS' && 'Update attached VLANs'}
+                {activeEditDialog === 'MGMT_IP' && 'Update Management and VoIP IP'}
                 {activeEditDialog === 'SPEED_PROFILE' && 'Configure ONU Speed Profile'}
                 {activeEditDialog === 'WIFI' && 'Configure ONU WiFi (OMCI / TR-069 CWMP)'}
               </h3>
@@ -2884,70 +2992,532 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               </form>
             )}
 
-            {activeEditDialog === 'MGMT_IP' && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const pri = tr069Profile?.vlan_priority ?? 2;
-                  const acsUrl = tr069Profile?.acs_url || 'http://10.69.69.1:14501';
-                  const acsUser = tr069Profile?.acs_username || 'acsNet';
-                  const acsPass = tr069Profile?.acs_password || 'acsNet@2024';
-                  const cli = [
-                    `configure terminal`,
-                    `pon-onu-mng ${onuInterface}`,
-                    `  mgmt-ip onu-ip ${mgmtIpInput} 255.255.0.0 ${pri} mgmt-vlan ${mgmtVlanInput}`,
-                    `  tr069-mgmt 1 state unlock`,
-                    `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
-                    `  tr069-mgmt 1 tag pri ${pri} vlan ${mgmtVlanInput}`,
-                    `exit`,
-                    `end`,
-                    `write`,
-                  ].join('\n');
-                  setActiveEditDialog(null);
-                  void executeAndDisplayLivePush(
-                    'RESYNC_CONFIG',
-                    cli,
-                    {
-                      mgmt_ip: mgmtIpInput,
-                      tr069_mgmt_vlan_id: mgmtVlanInput,
-                    },
-                    `Configure Mgmt IP (${mgmtIpInput} on VLAN ${mgmtVlanInput}) — ${onuInterface}`
-                  );
-                }}
-                className="space-y-3"
-              >
-                <div>
-                  <label className="block font-bold">
-                    ONU Management IPv4 Address
-                  </label>
-                  <input
-                    type="text"
-                    value={mgmtIpInput}
-                    onChange={(e) => setMgmtIpInput(e.target.value)}
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 font-mono text-white"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold">
-                    Management / TR-069 VLAN
-                  </label>
-                  <input
-                    type="number"
-                    value={mgmtVlanInput}
-                    onChange={(e) => setMgmtVlanInput(Number(e.target.value))}
-                    className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 font-mono text-white"
-                  />
-                </div>
-                <div className="flex justify-end gap-2 pt-2">
-                  <button
-                    type="submit"
-                    className="rounded bg-[#4caf50] px-4 py-1.5 font-bold text-white"
-                  >
-                    Save & Push Mgmt IP
-                  </button>
-                </div>
-              </form>
-            )}
+            {activeEditDialog === 'ATTACHED_VLANS' && (() => {
+              const oltVlanList =
+                db.vlans.filter((v) => v.olt_id === olt.id).length > 0
+                  ? db.vlans.filter((v) => v.olt_id === olt.id)
+                  : db.vlans;
+              const filteredVlans = oltVlanList.filter((v) => {
+                if (!attachedVlanSearch.trim()) return true;
+                const q = attachedVlanSearch.trim().toLowerCase();
+                return (
+                  String(v.vlan_id).includes(q) ||
+                  (v.name || '').toLowerCase().includes(q) ||
+                  (v.description || '').toLowerCase().includes(q)
+                );
+              });
+              const allFilteredSelected =
+                filteredVlans.length > 0 &&
+                filteredVlans.every((v) =>
+                  selectedAttachedVlans.includes(v.vlan_id)
+                );
+              const selectedSummaryLabel =
+                selectedAttachedVlans.length > 0
+                  ? selectedAttachedVlans
+                      .map((vid) => {
+                        const match = oltVlanList.find((v) => v.vlan_id === vid);
+                        return match
+                          ? `${vid} - ${match.name || match.description}`
+                          : `${vid}`;
+                      })
+                      .join(', ')
+                  : 'Select VLANs...';
+
+              return (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const finalVlans =
+                      selectedAttachedVlans.length > 0
+                        ? selectedAttachedVlans
+                        : [vlan?.vlan_id || 101];
+                    const cli = generateUpdateAttachedVlansCliScript({
+                      ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
+                      onuIndex: onu.onu_index || 1,
+                      attachedVlanIds: finalVlans,
+                    });
+                    const primaryVlanObj = oltVlanList.find(
+                      (v) => v.vlan_id === finalVlans[0]
+                    );
+                    setActiveEditDialog(null);
+                    void executeAndDisplayLivePush(
+                      'RESYNC_CONFIG',
+                      cli,
+                      {
+                        attached_vlan_ids: finalVlans,
+                        vlan_id: primaryVlanObj?.id || onu.vlan_id,
+                        hotspot_bridge_vlan:
+                          finalVlans.length > 1 ? finalVlans[1] : null,
+                      },
+                      `Update Attached VLANs (${finalVlans.join(', ')}) — ${onuInterface}`
+                    );
+                  }}
+                  className="space-y-4"
+                >
+                  <div className="grid grid-cols-12 items-start gap-3">
+                    <label className="col-span-3 pt-2.5 text-right text-sm font-bold text-slate-200">
+                      VLANs
+                    </label>
+                    <div className="relative col-span-9">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setAttachedVlanDropdownOpen((prev) => !prev)
+                        }
+                        className="flex w-full items-center justify-between rounded-md border border-blue-500 bg-[#1c2536] px-3.5 py-2.5 text-left text-sm font-medium text-white shadow-inner"
+                      >
+                        <span className="truncate">{selectedSummaryLabel}</span>
+                        <ChevronDown className="h-4 w-4 shrink-0 text-slate-300" />
+                      </button>
+
+                      {attachedVlanDropdownOpen && (
+                        <div className="mt-1 overflow-hidden rounded-md border border-slate-700 bg-[#0f1722] shadow-2xl">
+                          {/* Search Box inside Dropdown (Screenshot 1) */}
+                          <div className="p-2.5 border-b border-slate-800">
+                            <div className="flex items-center overflow-hidden rounded border border-slate-700 bg-[#182232]">
+                              <div className="flex items-center justify-center px-2.5 text-slate-400 border-r border-slate-700 py-2">
+                                <Search className="h-4 w-4" />
+                              </div>
+                              <input
+                                type="text"
+                                value={attachedVlanSearch}
+                                onChange={(e) =>
+                                  setAttachedVlanSearch(e.target.value)
+                                }
+                                placeholder="Search"
+                                className="w-full bg-transparent px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-hidden"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setAttachedVlanSearch('')}
+                                className="flex items-center justify-center border-l border-slate-700 px-2.5 py-2 text-slate-300 hover:text-white"
+                              >
+                                <XCircle className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Select All Checkbox */}
+                          <label className="flex cursor-pointer items-center gap-3 border-b border-slate-800/80 px-4 py-2.5 text-sm font-bold text-white hover:bg-[#16263d]">
+                            <input
+                              type="checkbox"
+                              checked={allFilteredSelected}
+                              onChange={() => {
+                                if (allFilteredSelected) {
+                                  const filteredIds = new Set(
+                                    filteredVlans.map((v) => v.vlan_id)
+                                  );
+                                  const remaining = selectedAttachedVlans.filter(
+                                    (id) => !filteredIds.has(id)
+                                  );
+                                  setSelectedAttachedVlans(remaining);
+                                } else {
+                                  const combined = Array.from(
+                                    new Set([
+                                      ...selectedAttachedVlans,
+                                      ...filteredVlans.map((v) => v.vlan_id),
+                                    ])
+                                  );
+                                  setSelectedAttachedVlans(combined);
+                                }
+                              }}
+                              className="h-4 w-4 rounded accent-blue-500"
+                            />
+                            <span>Select all</span>
+                          </label>
+
+                          {/* Multi-Select VLAN Checkboxes */}
+                          <div className="max-h-52 overflow-y-auto divide-y divide-slate-800/60">
+                            {filteredVlans.map((v) => {
+                              const isChecked = selectedAttachedVlans.includes(
+                                v.vlan_id
+                              );
+                              return (
+                                <label
+                                  key={v.id}
+                                  className={`flex cursor-pointer items-center gap-3 px-4 py-2.5 text-sm text-white transition ${
+                                    isChecked
+                                      ? 'bg-[#12263f] font-semibold'
+                                      : 'hover:bg-[#162234]'
+                                  }`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={() => {
+                                      setSelectedAttachedVlans((prev) =>
+                                        prev.includes(v.vlan_id)
+                                          ? prev.filter((id) => id !== v.vlan_id)
+                                          : [...prev, v.vlan_id]
+                                      );
+                                    }}
+                                    className="h-4 w-4 rounded accent-blue-500"
+                                  />
+                                  <span>
+                                    {v.vlan_id} - {v.name || v.description}
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Helper Info Box (Screenshot 1) */}
+                  <div className="space-y-2 rounded-md border border-slate-700/80 bg-[#182232] p-3.5 text-xs leading-relaxed text-slate-300">
+                    <div className="flex items-start gap-2">
+                      <Info className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
+                      <span>
+                        Select from the list the VLANs you want to attach to this ONU.
+                      </span>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
+                      <span>
+                        After changing the attached VLANs list, go to Ethernet ports or WiFi sections to assign VLANs as desired.
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-4 border-t border-slate-700 pt-4">
+                    <button
+                      type="button"
+                      onClick={() => setActiveEditDialog(null)}
+                      className="px-3 py-2 text-sm font-semibold text-sky-400 hover:text-sky-300"
+                    >
+                      Close
+                    </button>
+                    <button
+                      type="submit"
+                      className="rounded-md bg-[#4caf50] px-5 py-2 text-sm font-bold text-white shadow hover:bg-[#43a047]"
+                    >
+                      Update
+                    </button>
+                  </div>
+                </form>
+              );
+            })()}
+
+            {activeEditDialog === 'MGMT_IP' && (() => {
+              const selectedProf =
+                mgmtTr069ProfileId === 'NONE'
+                  ? null
+                  : db.tr069_profiles.find((p) => p.id === mgmtTr069ProfileId) ||
+                    tr069Profile;
+              const oltVlanOptions =
+                db.vlans.filter((v) => v.olt_id === olt.id).length > 0
+                  ? db.vlans.filter((v) => v.olt_id === olt.id)
+                  : db.vlans;
+              const hasVlan100 = oltVlanOptions.some((v) => v.vlan_id === 100);
+
+              return (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const trEnabled = mgmtTr069ProfileId !== 'NONE' && Boolean(selectedProf);
+                    const cli = generateUpdateMgmtAndTr069CliScript({
+                      ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
+                      onuIndex: onu.onu_index || 1,
+                      tr069Enabled: trEnabled,
+                      tr069Interface: mgmtTr069Interface,
+                      acsUrl: selectedProf?.acs_url,
+                      acsUsername: selectedProf?.acs_username,
+                      acsPassword: selectedProf?.acs_password,
+                      mgmtIpMode: mgmtIpModeInput,
+                      mgmtIpAddress: mgmtIpInput,
+                      mgmtSubnetMask: mgmtMaskInput,
+                      mgmtGateway: mgmtGwInput,
+                      keepServicePortActive: mgmtKeepServicePort,
+                      allowRemoteAccessToMgmtIp: mgmtAllowRemoteAccess,
+                      mgmtVlanId: mgmtVlanInput,
+                      wanVlanId: vlan?.vlan_id || 101,
+                      priority: selectedProf?.vlan_priority ?? 2,
+                      tcontProfile:
+                        selectedProf?.tcont_profile || 'SMARTOLT-VOIPMNG-10M',
+                      trafficProfile:
+                        selectedProf?.traffic_profile || 'SMARTOLT-VOIPMNG-10M',
+                      voipSipEnabled: selectedProf?.voip_enabled !== false,
+                    });
+
+                    setActiveEditDialog(null);
+                    void executeAndDisplayLivePush(
+                      'TR069_PUSH',
+                      cli,
+                      {
+                        tr069_profile_id:
+                          mgmtTr069ProfileId === 'NONE'
+                            ? null
+                            : selectedProf?.id || 1,
+                        tr069_interface: mgmtTr069Interface,
+                        config_method: trEnabled ? 'TR069' : 'OMCI',
+                        tr069_status: trEnabled ? 'ACTIVE_INFORMING' : 'DISABLED',
+                        tr069_last_inform: trEnabled
+                          ? `${new Date(Date.now() + 7 * 3600 * 1000)
+                              .toISOString()
+                              .slice(0, 19)
+                              .replace('T', ' ')} WIB`
+                          : onu.tr069_last_inform,
+                        mgmt_ip_mode: mgmtIpModeInput,
+                        mgmt_ip:
+                          mgmtIpModeInput === 'INACTIVE'
+                            ? null
+                            : mgmtIpModeInput === 'DHCP'
+                            ? 'DHCP'
+                            : mgmtIpInput,
+                        mgmt_subnet_mask:
+                          mgmtIpModeInput === 'STATIC_IP' ? mgmtMaskInput : null,
+                        mgmt_gateway:
+                          mgmtIpModeInput === 'STATIC_IP' ? mgmtGwInput : null,
+                        mgmt_keep_service_port: mgmtKeepServicePort,
+                        mgmt_allow_remote_access: mgmtAllowRemoteAccess,
+                        tr069_mgmt_vlan_id: mgmtVlanInput,
+                      },
+                      `Update Management & VoIP IP (${
+                        trEnabled ? selectedProf?.profile_name : 'No TR069'
+                      } · Mgmt ${mgmtIpModeInput} · VLAN ${mgmtVlanInput}) — ${onuInterface}`
+                    );
+                  }}
+                  className="space-y-4"
+                >
+                  {/* Section 1: TR069 Profile (Screenshot 2) */}
+                  <div className="rounded-lg border border-slate-700/90 bg-[#16202e]">
+                    <div className="flex items-center gap-2 border-b border-slate-700/80 px-4 py-2.5 text-sm font-bold text-sky-400">
+                      <Settings className="h-4 w-4" />
+                      <span>TR069 Profile</span>
+                    </div>
+                    <div className="space-y-4 p-4">
+                      <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-12">
+                        <label className="text-sm font-bold text-sky-400 sm:col-span-4 sm:text-right sm:pr-3">
+                          TR069 Profile
+                        </label>
+                        <div className="sm:col-span-8">
+                          <select
+                            value={mgmtTr069ProfileId}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val === 'NONE') {
+                                setMgmtTr069ProfileId('NONE');
+                              } else {
+                                const nextId = Number(val);
+                                setMgmtTr069ProfileId(nextId);
+                                const prof = db.tr069_profiles.find(
+                                  (p) => p.id === nextId
+                                );
+                                if (prof && prof.mgmt_vlan_id) {
+                                  setMgmtVlanInput(prof.mgmt_vlan_id);
+                                }
+                              }
+                            }}
+                            className="w-full rounded-md border border-blue-500 bg-[#1c2536] px-3.5 py-2 text-sm font-medium text-white focus:outline-hidden"
+                          >
+                            {db.tr069_profiles.map((prof) => (
+                              <option key={prof.id} value={prof.id}>
+                                {prof.profile_name}
+                              </option>
+                            ))}
+                            <option value="NONE">No profile</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-12">
+                        <label className="text-sm font-bold text-slate-200 sm:col-span-4 sm:text-right sm:pr-3">
+                          Tr069 interface
+                        </label>
+                        <div className="flex items-center gap-3 text-sm text-white sm:col-span-8">
+                          <label className="flex cursor-pointer items-center gap-2">
+                            <input
+                              type="radio"
+                              name="tr069Interface"
+                              checked={mgmtTr069Interface === 'MGMT_IP'}
+                              onChange={() => setMgmtTr069Interface('MGMT_IP')}
+                              className="h-4 w-4 accent-blue-500"
+                            />
+                            <span>via Mgmt IP</span>
+                          </label>
+                          <span className="text-slate-500">/</span>
+                          <label className="flex cursor-pointer items-center gap-2">
+                            <input
+                              type="radio"
+                              name="tr069Interface"
+                              checked={mgmtTr069Interface === 'WAN'}
+                              onChange={() => setMgmtTr069Interface('WAN')}
+                              className="h-4 w-4 accent-blue-500"
+                            />
+                            <span>via WAN</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Section 2: Mgmt IP (Screenshot 2) */}
+                  <div className="rounded-lg border border-slate-700/90 bg-[#16202e]">
+                    <div className="flex items-center gap-2 border-b border-slate-700/80 px-4 py-2.5 text-sm font-bold text-sky-400">
+                      <Server className="h-4 w-4" />
+                      <span>Mgmt IP</span>
+                    </div>
+                    <div className="space-y-4 p-4">
+                      <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-12">
+                        <label className="text-sm font-bold text-slate-200 sm:col-span-4 sm:text-right sm:pr-3">
+                          Mgmt IP mode
+                        </label>
+                        <div className="flex flex-wrap items-center gap-4 text-sm text-white sm:col-span-8">
+                          <label className="flex cursor-pointer items-center gap-2">
+                            <input
+                              type="radio"
+                              name="mgmtIpMode"
+                              checked={mgmtIpModeInput === 'INACTIVE'}
+                              onChange={() => setMgmtIpModeInput('INACTIVE')}
+                              className="h-4 w-4 accent-blue-500"
+                            />
+                            <span>Inactive</span>
+                          </label>
+                          <label className="flex cursor-pointer items-center gap-2">
+                            <input
+                              type="radio"
+                              name="mgmtIpMode"
+                              checked={mgmtIpModeInput === 'STATIC_IP'}
+                              onChange={() => setMgmtIpModeInput('STATIC_IP')}
+                              className="h-4 w-4 accent-blue-500"
+                            />
+                            <span>Static IP</span>
+                          </label>
+                          <label className="flex cursor-pointer items-center gap-2">
+                            <input
+                              type="radio"
+                              name="mgmtIpMode"
+                              checked={mgmtIpModeInput === 'DHCP'}
+                              onChange={() => setMgmtIpModeInput('DHCP')}
+                              className="h-4 w-4 accent-blue-500"
+                            />
+                            <span>DHCP</span>
+                          </label>
+                        </div>
+                      </div>
+
+                      {mgmtIpModeInput === 'STATIC_IP' && (
+                        <div className="grid grid-cols-1 gap-2.5 rounded border border-slate-700 bg-slate-900/60 p-3 sm:col-span-8 sm:col-start-5">
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-300">
+                              IPv4 Address
+                            </label>
+                            <input
+                              type="text"
+                              value={mgmtIpInput}
+                              onChange={(e) => setMgmtIpInput(e.target.value)}
+                              className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-2.5 py-1.5 font-mono text-xs text-white"
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-300">
+                                Subnet Mask
+                              </label>
+                              <input
+                                type="text"
+                                value={mgmtMaskInput}
+                                onChange={(e) => setMgmtMaskInput(e.target.value)}
+                                className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-2.5 py-1.5 font-mono text-xs text-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-300">
+                                Gateway
+                              </label>
+                              <input
+                                type="text"
+                                value={mgmtGwInput}
+                                onChange={(e) => setMgmtGwInput(e.target.value)}
+                                className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-2.5 py-1.5 font-mono text-xs text-white"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+                        <div className="space-y-3 sm:col-span-8 sm:col-start-5">
+                          <label className="flex cursor-pointer items-center gap-2.5 text-sm text-white">
+                            <input
+                              type="checkbox"
+                              checked={mgmtKeepServicePort}
+                              onChange={(e) =>
+                                setMgmtKeepServicePort(e.target.checked)
+                              }
+                              className="h-4 w-4 rounded accent-blue-500"
+                            />
+                            <span>Keep service port active</span>
+                            <span
+                              title="Menjaga service-port VLAN Mgmt tetap aktif meskipun mode IP diatur ke Inactive"
+                              className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-sky-500 text-[10px] font-bold text-slate-950"
+                            >
+                              i
+                            </span>
+                          </label>
+
+                          <label className="flex cursor-pointer items-start gap-2.5 text-sm text-white">
+                            <input
+                              type="checkbox"
+                              checked={mgmtAllowRemoteAccess}
+                              onChange={(e) =>
+                                setMgmtAllowRemoteAccess(e.target.checked)
+                              }
+                              className="mt-0.5 h-4 w-4 rounded accent-blue-500"
+                            />
+                            <span className="leading-snug">
+                              Allow remote access to Mgmt IP from everywhere
+                            </span>
+                          </label>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-12">
+                        <label className="text-sm font-bold text-slate-200 sm:col-span-4 sm:text-right sm:pr-3">
+                          Mgmt VLAN-ID
+                        </label>
+                        <div className="sm:col-span-8">
+                          <select
+                            value={mgmtVlanInput}
+                            onChange={(e) =>
+                              setMgmtVlanInput(Number(e.target.value))
+                            }
+                            className="w-full rounded-md border border-slate-600 bg-[#1c2536] px-3.5 py-2 text-sm font-medium text-white focus:border-blue-500 focus:outline-hidden"
+                          >
+                            {!hasVlan100 && (
+                              <option value={100}>100 - TR069</option>
+                            )}
+                            {oltVlanOptions.map((v) => (
+                              <option key={v.id} value={v.vlan_id}>
+                                {v.vlan_id} - {v.name || v.description}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-4 border-t border-slate-700 pt-4">
+                    <button
+                      type="button"
+                      onClick={() => setActiveEditDialog(null)}
+                      className="px-3 py-2 text-sm font-semibold text-sky-400 hover:text-sky-300"
+                    >
+                      Close
+                    </button>
+                    <button
+                      type="submit"
+                      className="rounded-md bg-[#4caf50] px-5 py-2 text-sm font-bold text-white shadow hover:bg-[#43a047]"
+                    >
+                      Update
+                    </button>
+                  </div>
+                </form>
+              );
+            })()}
 
             {activeEditDialog === 'SPEED_PROFILE' && (
               <form

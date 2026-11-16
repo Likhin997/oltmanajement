@@ -319,6 +319,7 @@ async function tryConnectSingleHost(
   password: string,
   targetDb: string
 ): Promise<{ pool: pg.Pool; resolvedDb: string }> {
+  const timeoutMs = isAiStudioWorkspace ? 800 : 2500;
   // 1. Try connecting directly to targetDb first
   const directPool = new Pool({
     host,
@@ -327,7 +328,7 @@ async function tryConnectSingleHost(
     password,
     database: targetDb,
     max: 15,
-    connectionTimeoutMillis: 2500,
+    connectionTimeoutMillis: timeoutMs,
   });
 
   try {
@@ -403,17 +404,19 @@ async function initPostgresConnection(cfg: PgConnectionConfig): Promise<{
     'smartolt-postgres',
   ].includes(cfg.host.trim().toLowerCase());
   const candidateHosts = isLocalTarget
-    ? Array.from(
-        new Set([
-          'localhost',
-          '127.0.0.1',
-          'host.docker.internal',
-          'smartolt-postgres',
-          '172.17.0.1',
-          '172.18.0.1',
-          cfg.host.trim(),
-        ])
-      )
+    ? isAiStudioWorkspace
+      ? ['127.0.0.1']
+      : Array.from(
+          new Set([
+            'localhost',
+            '127.0.0.1',
+            'host.docker.internal',
+            'smartolt-postgres',
+            '172.17.0.1',
+            '172.18.0.1',
+            cfg.host.trim(),
+          ])
+        )
     : [cfg.host.trim()];
 
   const errorsByHost: string[] = [];
@@ -1899,6 +1902,10 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
       odb_id: prevOnu ? prevOnu.odb_id : null,
       odb_port: prevOnu ? prevOnu.odb_port : o.onuIndex,
       vlan_id: matchedVlan ? matchedVlan.id : prevOnu?.vlan_id || o.vlanId,
+      attached_vlan_ids:
+        prevOnu?.attached_vlan_ids && prevOnu.attached_vlan_ids.length > 0
+          ? prevOnu.attached_vlan_ids
+          : Array.from(new Set([o.vlanId, ...o.extraFlowVlans].filter(Boolean))),
       speed_profile_id: prevOnu?.speed_profile_id || 1,
       tcont_profile_id: prevOnu?.tcont_profile_id || 1,
       onu_mode: prevOnu?.onu_mode || 'Routing',
@@ -1909,7 +1916,9 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
         : prevOnu?.wan_remote_access || 'Enabled from everywhere in the internet',
       wan_remote_allowed_subnet:
         o.wanRemoteRestrictedIp || prevOnu?.wan_remote_allowed_subnet || '0.0.0.0/0',
-      tr069_profile_id: prevOnu?.tr069_profile_id || 1,
+      tr069_profile_id:
+        prevOnu?.tr069_profile_id !== undefined ? prevOnu.tr069_profile_id : 1,
+      tr069_interface: prevOnu?.tr069_interface || 'MGMT_IP',
       tr069_mgmt_vlan_id: o.tr069VlanId || prevOnu?.tr069_mgmt_vlan_id || null,
       tr069_status:
         o.tr069Enabled || prevOnu?.config_method === 'TR069'
@@ -1917,6 +1926,12 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
           : prevOnu?.tr069_status || 'DISABLED',
       tr069_last_inform: o.tr069Enabled ? nowStr : prevOnu?.tr069_last_inform || null,
       voip_enabled: o.voipEnabled || prevOnu?.voip_enabled || false,
+      mgmt_ip_mode: prevOnu?.mgmt_ip_mode || (o.tr069VlanId ? 'DHCP' : 'INACTIVE'),
+      mgmt_ip: prevOnu?.mgmt_ip || null,
+      mgmt_subnet_mask: prevOnu?.mgmt_subnet_mask || null,
+      mgmt_gateway: prevOnu?.mgmt_gateway || null,
+      mgmt_keep_service_port: prevOnu?.mgmt_keep_service_port ?? true,
+      mgmt_allow_remote_access: prevOnu?.mgmt_allow_remote_access ?? false,
       wifi_ssid: prevOnu?.wifi_ssid || null,
       wifi_password: prevOnu?.wifi_password || null,
       pppoe_username:
@@ -6184,8 +6199,6 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
 // 4. VITE MIDDLEWARE (DEV) OR STATIC ASSETS (PROD / DOCKER PORT 3004)
 // ============================================================================
 async function startServer() {
-  await initPostgresConnection(currentPgConfig);
-
   const isProd = process.env.NODE_ENV === 'production';
   const port = Number(process.env.PORT) || 3000;
 
@@ -6207,6 +6220,7 @@ async function startServer() {
     console.log(
       `[JETCYBERNET SmartOLT Server] Running on http://0.0.0.0:${port} | Target DB: ${currentPgConfig.user}@${currentPgConfig.host}:${currentPgConfig.port}/${currentPgConfig.database}`
     );
+    void initPostgresConnection(currentPgConfig);
   });
 }
 

@@ -220,6 +220,7 @@ export interface OnuRecord {
   odb_id: number | null;
   odb_port: number | null;
   vlan_id: number | null;
+  attached_vlan_ids?: number[];
   speed_profile_id: number | null;
   tcont_profile_id: number | null;
   onu_mode: OnuModeOption;
@@ -228,11 +229,17 @@ export interface OnuRecord {
   wan_remote_access: WanRemoteAccessOption;
   wan_remote_allowed_subnet: string;
   tr069_profile_id: number | null;
+  tr069_interface?: 'MGMT_IP' | 'WAN';
   tr069_mgmt_vlan_id?: number | null;
   tr069_status: 'ACTIVE_INFORMING' | 'PENDING_INFORM' | 'DISABLED';
   tr069_last_inform: string | null;
   voip_enabled?: boolean;
+  mgmt_ip_mode?: 'INACTIVE' | 'STATIC_IP' | 'DHCP';
   mgmt_ip?: string | null;
+  mgmt_subnet_mask?: string | null;
+  mgmt_gateway?: string | null;
+  mgmt_keep_service_port?: boolean;
+  mgmt_allow_remote_access?: boolean;
   wifi_enabled?: boolean;
   wifi_ssid: string | null;
   wifi_password: string | null;

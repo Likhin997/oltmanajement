@@ -1420,6 +1420,183 @@ export function generateTr069ProfileOltCliScript(params: {
 }
 
 /**
+ * 6c. GENERATOR CLI KHUSUS MODAL "Update attached VLANs" (Multi-VLAN Tanpa Mengubah Setting WAN / PPPoE)
+ */
+export function generateUpdateAttachedVlansCliScript(params: {
+  ponInterface: string;
+  onuIndex: number;
+  attachedVlanIds: number[];
+}): string {
+  const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
+  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const uniqueVlans = Array.from(
+    new Set(params.attachedVlanIds.filter((v) => Number.isFinite(v) && v > 0))
+  );
+  const vlans = uniqueVlans.length > 0 ? uniqueVlans : [101];
+  const primaryVlan = vlans[0];
+  const extraVlans = vlans.slice(1);
+
+  const lines: string[] = [
+    `! Update Attached VLANs (${vlans.join(', ')}) — Tanpa Mengubah Setting WAN PPPoE`,
+    `configure terminal`,
+    `interface ${onuIf}`,
+    `  service-port 1 vport 1 user-vlan ${primaryVlan} vlan ${primaryVlan}`,
+  ];
+
+  extraVlans.forEach((vid, idx) => {
+    const spId = idx + 3; // Gunakan service-port 3+ agar service-port 2 (TR069/Mgmt) tidak terganggu
+    lines.push(`  service-port ${spId} vport 1 user-vlan ${vid} vlan ${vid}`);
+  });
+
+  lines.push(
+    `exit`,
+    `pon-onu-mng ${onuIf}`,
+    `  flow mode 1 tag-filter vlan-filter untag-filter discard`
+  );
+
+  for (const vid of vlans) {
+    lines.push(`  flow 1 pri 0 vlan ${vid}`);
+  }
+
+  lines.push(`  gemport 1 flow 1`, `exit`, `end`, `write`);
+  return lines.join('\n');
+}
+
+/**
+ * 6d. GENERATOR CLI KHUSUS MODAL "Update Management and VoIP IP" (TR069 Profile + Mgmt IP Terpisah dari ONU Mode / Tanpa Edit WAN PPPoE)
+ */
+export function generateUpdateMgmtAndTr069CliScript(params: {
+  ponInterface: string;
+  onuIndex: number;
+  tr069Enabled: boolean;
+  tr069Interface: 'MGMT_IP' | 'WAN';
+  acsUrl?: string;
+  acsUsername?: string;
+  acsPassword?: string;
+  mgmtIpMode: 'INACTIVE' | 'STATIC_IP' | 'DHCP';
+  mgmtIpAddress?: string;
+  mgmtSubnetMask?: string;
+  mgmtGateway?: string;
+  keepServicePortActive: boolean;
+  allowRemoteAccessToMgmtIp: boolean;
+  mgmtVlanId: number;
+  wanVlanId?: number;
+  priority?: number;
+  tcontProfile?: string;
+  trafficProfile?: string;
+  voipSipEnabled?: boolean;
+}): string {
+  const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
+  const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const mgmtVlan = params.mgmtVlanId > 0 ? params.mgmtVlanId : 100;
+  const pri =
+    typeof params.priority === 'number' && params.priority >= 0 && params.priority <= 7
+      ? params.priority
+      : 2;
+  const tcont = params.tcontProfile || 'SMARTOLT-VOIPMNG-10M';
+  const traffic = params.trafficProfile || 'SMARTOLT-VOIPMNG-10M';
+  const acsUrl = (params.acsUrl || 'http://10.69.69.1:14501').trim();
+  const acsUser = (params.acsUsername || 'acsNet').trim();
+  const acsPass = (params.acsPassword || 'acsNet@2024').trim();
+
+  const needMgmtServicePort =
+    params.mgmtIpMode !== 'INACTIVE' ||
+    params.keepServicePortActive ||
+    (params.tr069Enabled && params.tr069Interface === 'MGMT_IP');
+
+  const lines: string[] = [
+    `! Update Management and VoIP IP (${onuIf}) — Tanpa Edit Setting WAN PPPoE`,
+    `configure terminal`,
+    `interface ${onuIf}`,
+  ];
+
+  if (needMgmtServicePort) {
+    lines.push(
+      `  tcont 2 profile ${tcont}`,
+      `  gemport 2 tcont 2`,
+      `  gemport 2 traffic-limit downstream ${traffic}`,
+      `  no service-port 2`,
+      `  service-port 2 vport 2 user-vlan ${mgmtVlan} vlan ${mgmtVlan}`
+    );
+  } else {
+    lines.push(`  no service-port 2`);
+  }
+
+  lines.push(`exit`, `pon-onu-mng ${onuIf}`);
+
+  if (params.voipSipEnabled !== false && needMgmtServicePort) {
+    lines.push(`  voip protocol sip`);
+  }
+
+  if (needMgmtServicePort) {
+    lines.push(
+      `  flow 2 switch switch_0/1`,
+      `  flow mode 2 tag-filter vlan-filter untag-filter discard`,
+      `  flow 2 pri ${pri} vlan ${mgmtVlan}`,
+      `  gemport 2 flow 2`,
+      `  switchport-bind switch_0/1 iphost 2`
+    );
+
+    if (params.mgmtIpMode === 'DHCP') {
+      lines.push(
+        `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
+        `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
+        `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlan}`
+      );
+    } else if (params.mgmtIpMode === 'STATIC_IP') {
+      const ip = (params.mgmtIpAddress || '10.100.3.8').trim();
+      const mask = (params.mgmtSubnetMask || '255.255.0.0').trim();
+      const gw = (params.mgmtGateway || '10.100.0.1').trim();
+      lines.push(
+        `  ip-host 2 ip ${ip} mask ${mask} gateway ${gw}`,
+        `  mgmt-ip onu-ip ${ip} ${mask} ${pri} mgmt-vlan ${mgmtVlan}`,
+        `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
+        `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlan}`
+      );
+    } else {
+      lines.push(
+        `  no ip-host 2`,
+        `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
+        `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlan}`
+      );
+    }
+
+    if (params.voipSipEnabled !== false) {
+      lines.push(`  veip 1 port udp 1232 host 2`);
+    }
+  } else {
+    lines.push(`  no ip-host 2`);
+  }
+
+  if (params.tr069Enabled) {
+    const trTargetVlan =
+      params.tr069Interface === 'WAN'
+        ? params.wanVlanId || mgmtVlan
+        : mgmtVlan;
+    const trPri = params.tr069Interface === 'WAN' ? 0 : pri;
+    lines.push(
+      `  tr069-mgmt 1 state unlock`,
+      `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
+      `  tr069-mgmt 1 tag pri ${trPri} vlan ${trTargetVlan}`
+    );
+  } else {
+    lines.push(`  no tr069-mgmt 1`);
+  }
+
+  if (params.allowRemoteAccessToMgmtIp) {
+    lines.push(
+      `  security-mgmt 2 state enable mode forward ingress-type iphost 2 protocol web https telnet ssh snmp`,
+      `  security-mgmt 2 start-src-ip 0.0.0.0 end-src-ip 255.255.255.255`
+    );
+  } else {
+    lines.push(`  no security-mgmt 2`);
+  }
+
+  lines.push(`exit`, `end`, `write`);
+  return lines.join('\n');
+}
+
+/**
  * 7. GENERATOR PAYLOAD TR-069 CWMP (`SetParameterValues`) UNTUK PROVISIONING VIA ACS
  */
 export function generateTr069CwmpRpcPreview(params: {
