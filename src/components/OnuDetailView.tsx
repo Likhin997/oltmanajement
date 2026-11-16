@@ -796,11 +796,8 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
 
     const cli = isOnuMgmtOnly
       ? [
-          `! VLAN Mgmt ${effectiveMgmtVlan}: Service List TR069 ONLY (Tanpa Internet / Tanpa VEIP / Tanpa NAT)`,
+          `! VLAN Mgmt ${effectiveMgmtVlan}: TR-069 Management Only`,
           `configure terminal`,
-          `gpon`,
-          `  onu profile vlan SMARTOLT-vlan${effectiveMgmtVlan} tag-mode tag cvlan ${effectiveMgmtVlan} priority ${tr069Pri}`,
-          `exit`,
           `interface ${onuInterface}`,
           `  tcont 1 profile ${mgmtTcont}`,
           `  gemport 1 tcont 1`,
@@ -827,9 +824,6 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
         ].join('\n')
       : [
           `configure terminal`,
-          `gpon`,
-          `  onu profile vlan SMARTOLT-vlan${effectiveMgmtVlan} tag-mode tag cvlan ${effectiveMgmtVlan} priority ${tr069Pri}`,
-          `exit`,
           `interface ${onuInterface}`,
           `  tcont 2 profile ${mgmtTcont}`,
           `  gemport 2 tcont 2`,

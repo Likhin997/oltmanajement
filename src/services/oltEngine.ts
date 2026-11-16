@@ -897,9 +897,6 @@ export function buildTr069CliLines(params: {
   if (params.enabled === false) {
     return [
       `  no tr069-mgmt 1`,
-      `  no wan 2`,
-      `  no wan-ip 2`,
-      `  no veip 1 port udp 1232 host 2`,
       `  no vlan-filter iphost 2`,
       `  no vlan-filter-mode iphost 2`,
       `  no ip-host 2`,
@@ -918,15 +915,8 @@ export function buildTr069CliLines(params: {
       : 0;
 
   if (params.usePrimaryFlow) {
-    // Pure TR069 Only on Mgmt VLAN: NO `ip-host 1` (which forces `omci_ipv4_dhcp_1` = `TR069_INTERNET`),
-    // NO `veip 1`, explicitly `wan-ip 1` + `wan-ip 1 nat disable` + `wan 1 service tr069 host 1`.
+    // Primary Flow 1 (`iphost 1`) untuk ONU khusus Management / TR-069 tanpa Internet PPPoE
     return [
-      `  no wan 1`,
-      `  no pppoe 1`,
-      `  no wan-ip 1`,
-      `  no veip 1 port udp 1232 host 1`,
-      `  no veip 1 port udp 1232 host 2`,
-      `  no switchport-bind switch_0/1 veip 1`,
       `  no tr069-mgmt 1`,
       `  no vlan-filter iphost 1`,
       `  no vlan-filter-mode iphost 1`,
@@ -935,26 +925,18 @@ export function buildTr069CliLines(params: {
       `  flow 1 pri ${pri} vlan ${tr069Vlan}`,
       `  gemport 1 flow 1`,
       `  switchport-bind switch_0/1 iphost 1`,
+      `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
       `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
       `  vlan-filter iphost 1 pri ${pri} vlan ${tr069Vlan}`,
       `  tr069-mgmt 1 state unlock`,
       `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
       `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`,
-      `  wan-ip 1 mode dhcp vlan-profile SMARTOLT-vlan${tr069Vlan} host 1`,
-      `  wan-ip 1 nat disable`,
-      `  wan-ip 1 ping-response enable traceroute-response enable`,
-      `  wan 1 service tr069 host 1`,
     ];
   }
 
-  // Secondary Flow 2 (`iphost 2` / `wan-ip 2`) strictly for Service List = `TR069` ONLY with NAT DISABLED:
-  // Penting: JANGAN kirim `ip-host 2 dhcp-enable enable` karena OMCI ME #134 memaksa `omci_ipv4_dhcp_2`
-  // dengan Service List `TR069_INTERNET` & NAT ON serta membentrokkan `host 2` sehingga `wan-ip 2` gagal.
+  // Secondary Flow 2 (`iphost 2`) untuk TR-069 Management pada ONU `type ALL` sesuai running-config OLT ZTE
   return [
     `  no tr069-mgmt 1`,
-    `  no wan 2`,
-    `  no wan-ip 2`,
-    `  no veip 1 port udp 1232 host 2`,
     `  no vlan-filter iphost 2`,
     `  no vlan-filter-mode iphost 2`,
     `  no ip-host 2`,
@@ -966,15 +948,12 @@ export function buildTr069CliLines(params: {
     `  flow 2 pri ${pri} vlan ${tr069Vlan}`,
     `  gemport 2 flow 2`,
     `  switchport-bind switch_0/1 iphost 2`,
+    `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
     `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
     `  vlan-filter iphost 2 pri ${pri} vlan ${tr069Vlan}`,
     `  tr069-mgmt 1 state unlock`,
     `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
     `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`,
-    `  wan-ip 2 mode dhcp vlan-profile SMARTOLT-vlan${tr069Vlan} host 2`,
-    `  wan-ip 2 nat disable`,
-    `  wan-ip 2 ping-response enable traceroute-response enable`,
-    `  wan 2 service tr069 host 2`,
   ];
 }
 
@@ -1037,22 +1016,15 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
   const mgmtTcontProfile = params.tr069TcontProfile || 'SMARTOLT-VOIPMNG-10M';
   const mgmtTrafficProfile = params.tr069TrafficProfile || 'SMARTOLT-VOIPMNG-10M';
 
-  const lines: string[] = [`configure terminal`];
-  if (isMgmtOnly || configMethod === 'TR069' || params.tr069Enabled) {
-    lines.push(
-      `gpon`,
-      `  onu profile vlan SMARTOLT-vlan${mgmtVlanId} tag-mode tag cvlan ${mgmtVlanId} priority ${tr069Pri}`,
-      `exit`
-    );
-  }
-  lines.push(
+  const lines: string[] = [
+    `configure terminal`,
     `interface ${oltIf}`,
     `  onu ${params.onuIndex} type ${zteOnuType} sn ${params.serialNumber}`,
     `exit`,
     `interface ${onuIf}`,
     `  name ${cleanName}`,
     `  description ${cleanDesc}`,
-  );
+  ];
 
   if (isMgmtOnly) {
     // VLAN Mgmt / MJMT: hanya service TR-069 & VoIP saja, tanpa push internet!
@@ -1261,13 +1233,6 @@ export function generateUpdateOnuModeCliScript(params: {
   const mgmtTrafficProfile = params.tr069TrafficProfile || 'SMARTOLT-VOIPMNG-10M';
 
   const lines: string[] = [`configure terminal`];
-  if (isMgmtOnly || params.configMethod === 'TR069') {
-    lines.push(
-      `gpon`,
-      `  onu profile vlan SMARTOLT-vlan${mgmtVlanId} tag-mode tag cvlan ${mgmtVlanId} priority ${tr069Pri}`,
-      `exit`
-    );
-  }
 
   if (isMgmtOnly) {
     // VLAN Mgmt / MJMT: Service List TR069 ONLY (tanpa internet, tanpa VEIP, tanpa NAT)!
@@ -1630,11 +1595,8 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
     (params.tr069Enabled && params.tr069Interface === 'MGMT_IP');
 
   const lines: string[] = [
-    `! Update Management & TR069 (${onuIf}) — VLAN ${mgmtVlan} Service List: TR069 ONLY & NAT DISABLED (Tanpa Internet & Tanpa Edit WAN PPPoE)`,
+    `! Update Management & TR069 (${onuIf}) — VLAN ${mgmtVlan} (Tanpa Mengubah Setting WAN PPPoE)`,
     `configure terminal`,
-    `gpon`,
-    `  onu profile vlan SMARTOLT-vlan${mgmtVlan} tag-mode tag cvlan ${mgmtVlan} priority ${pri}`,
-    `exit`,
     `interface ${onuIf}`,
   ];
 
@@ -1653,11 +1615,7 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
   lines.push(
     `exit`,
     `pon-onu-mng ${onuIf}`,
-    // Hapus binding lama pada wan 2 / wan-ip 2 / ip-host 2 / flow 2 terlebih dahulu agar `TR069_INTERNET` (`omci_ipv4_dhcp_2`) & NAT lama terhapus bersih
     `  no tr069-mgmt 1`,
-    `  no wan 2`,
-    `  no wan-ip 2`,
-    `  no veip 1 port udp 1232 host 2`,
     `  no vlan-filter iphost 2`,
     `  no vlan-filter-mode iphost 2`,
     `  no ip-host 2`,
@@ -1677,14 +1635,30 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
       `  flow mode 2 tag-filter vlan-filter untag-filter discard`,
       `  flow 2 pri ${pri} vlan ${mgmtVlan}`,
       `  gemport 2 flow 2`,
-      `  switchport-bind switch_0/1 iphost 2`,
+      `  switchport-bind switch_0/1 iphost 2`
+    );
+    if (params.mgmtIpMode === 'STATIC_IP') {
+      const ip = (params.mgmtIpAddress || '10.100.3.8').trim();
+      const mask = (params.mgmtSubnetMask || '255.255.0.0').trim();
+      const gw = (params.mgmtGateway || '10.100.0.1').trim();
+      lines.push(
+        `  ip-host 2 ip ${ip} mask ${mask} gateway ${gw}`,
+        `  mgmt-ip onu-ip ${ip} ${mask} ${pri} mgmt-vlan ${mgmtVlan}`
+      );
+    } else if (
+      params.mgmtIpMode === 'DHCP' ||
+      (params.tr069Enabled && params.tr069Interface === 'MGMT_IP')
+    ) {
+      lines.push(
+        `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`
+      );
+    }
+    lines.push(
       `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
       `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlan}`
     );
   }
 
-  // Konfigurasi `tr069-mgmt 1` lalu `wan-ip 2` + `wan-ip 2 nat disable` + `wan 2 service tr069 host 2`
-  // Tanpa `ip-host 2 dhcp-enable` agar Service List murni `TR069` ONLY & Enable NAT NONAKTIF
   if (params.tr069Enabled) {
     const trTargetVlan =
       params.tr069Interface === 'WAN'
@@ -1696,27 +1670,6 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
       `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
       `  tr069-mgmt 1 tag pri ${trPri} vlan ${trTargetVlan}`
     );
-  }
-
-  if (needMgmtServicePort) {
-    if (params.mgmtIpMode === 'DHCP') {
-      lines.push(
-        `  wan-ip 2 mode dhcp vlan-profile SMARTOLT-vlan${mgmtVlan} host 2`,
-        `  wan-ip 2 nat disable`,
-        `  wan-ip 2 ping-response enable traceroute-response enable`,
-        ...(params.tr069Enabled ? [`  wan 2 service tr069 host 2`] : [])
-      );
-    } else if (params.mgmtIpMode === 'STATIC_IP') {
-      const ip = (params.mgmtIpAddress || '10.100.3.8').trim();
-      const mask = (params.mgmtSubnetMask || '255.255.0.0').trim();
-      const gw = (params.mgmtGateway || '10.100.0.1').trim();
-      lines.push(
-        `  ip-host 2 ip ${ip} mask ${mask} gateway ${gw}`,
-        `  wan-ip 2 nat disable`,
-        ...(params.tr069Enabled ? [`  wan 2 service tr069 host 2`] : []),
-        `  mgmt-ip onu-ip ${ip} ${mask} ${pri} mgmt-vlan ${mgmtVlan}`
-      );
-    }
   }
 
   if (params.allowRemoteAccessToMgmtIp) {

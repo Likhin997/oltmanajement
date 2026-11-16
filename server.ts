@@ -1033,8 +1033,8 @@ export function normalizeCliCommandsForExecution(
       continue;
     }
 
-    if (line === '!') {
-      if (inConfigMode && inSubBlock && !hasExplicitExits) {
+    if (line.startsWith('!')) {
+      if (line === '!' && inConfigMode && inSubBlock && !hasExplicitExits) {
         result.push('exit');
         inSubBlock = false;
       }
@@ -1076,6 +1076,7 @@ export function normalizeCliCommandsForExecution(
 function hasCliPromptAtEnd(buffer: string): {
   isPrompt: boolean;
   isUserMode: boolean;
+  mode: string;
 } {
   const cleaned = buffer
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
@@ -1089,22 +1090,23 @@ function hasCliPromptAtEnd(buffer: string): {
       break;
     }
   }
-  if (!lastLine) return { isPrompt: false, isUserMode: false };
+  if (!lastLine) return { isPrompt: false, isUserMode: false, mode: '' };
 
   // Avoid matching comment lines or separator lines
   if (lastLine.startsWith('!') || lastLine.startsWith('#') || lastLine.startsWith('---')) {
-    return { isPrompt: false, isUserMode: false };
+    return { isPrompt: false, isUserMode: false, mode: '' };
   }
 
   // Standard ZTE/Huawei prompt: `ZXAN#`, `ZXAN>`, `ZXAN(config)#`, `ZXAN(config-if)#`, `ZXAN(gpon-onu-mng)#`
-  const promptRegex = /^[A-Za-z0-9_.\-]+(?:\([^\r\n()]{1,48}\))?([>#])\s*$/;
+  const promptRegex = /^[A-Za-z0-9_.\-]+(?:\(([^\r\n()]{1,48})\))?([>#])\s*$/;
   const match = lastLine.match(promptRegex);
   if (!match) {
-    return { isPrompt: false, isUserMode: false };
+    return { isPrompt: false, isUserMode: false, mode: '' };
   }
   return {
     isPrompt: true,
-    isUserMode: match[1] === '>',
+    isUserMode: match[2] === '>',
+    mode: (match[1] || '').trim().toLowerCase(),
   };
 }
 
@@ -1153,6 +1155,9 @@ async function executeTelnetSession(params: {
     let currentCmd = '';
     let waitingForPrompt = false;
     let sawOnuRegistration = false;
+    let currentPromptMode = '';
+    let inConfigTerminal = false;
+    let autoReConfigCount = 0;
     let stepTimer: NodeJS.Timeout | null = null;
     let wakeTimer: NodeJS.Timeout | null = null;
     let promptDebounceTimer: NodeJS.Timeout | null = null;
@@ -1223,7 +1228,49 @@ async function executeTelnetSession(params: {
       }
 
       const prevCmd = currentCmd;
-      currentCmd = cmdQueue[cmdIndex++];
+      let nextCmd = '';
+      while (cmdIndex < cmdQueue.length) {
+        const candidate = cmdQueue[cmdIndex++];
+        // Guard: if OLT is ALREADY at ZXAN(config)# and more config lines remain before `end`/`write`,
+        // skip `exit` so a failed sub-block (e.g. `gpon`) never drops out of configure terminal!
+        if (/^exit$/i.test(candidate) && currentPromptMode === 'config' && inConfigTerminal) {
+          const remaining = cmdQueue.slice(cmdIndex);
+          const hasMoreConfigAfterExit = remaining.some(
+            (c) => !/^(end|write|wr|exit)$/i.test(c.trim())
+          );
+          if (hasMoreConfigAfterExit) {
+            continue;
+          }
+        }
+        nextCmd = candidate;
+        break;
+      }
+
+      if (!nextCmd) {
+        stage = 'DONE';
+        setTimeout(() => finish(true, fullOutput), 300);
+        return;
+      }
+
+      // Guard: if we unexpectedly fell back to privileged EXEC (`ZXAN#`, mode === '') while still
+      // supposed to be inside `configure terminal`, automatically re-enter `configure terminal`.
+      if (
+        inConfigTerminal &&
+        currentPromptMode === '' &&
+        autoReConfigCount < 3 &&
+        !/^(configure\s+terminal|conf\s+t|end|write|wr|exit|terminal\s+|show\s+)/i.test(nextCmd)
+      ) {
+        autoReConfigCount++;
+        cmdIndex--;
+        nextCmd = 'configure terminal';
+      }
+
+      currentCmd = nextCmd;
+      if (/^(configure\s+terminal|conf\s+t)$/i.test(currentCmd)) {
+        inConfigTerminal = true;
+      } else if (/^end$/i.test(currentCmd)) {
+        inConfigTerminal = false;
+      }
       if (/^onu\s+\d+\s+type\s+/i.test(currentCmd)) {
         sawOnuRegistration = true;
       }
@@ -1405,6 +1452,7 @@ async function executeTelnetSession(params: {
 
           const promptCheck = hasCliPromptAtEnd(stepBuffer);
           if (promptCheck.isPrompt) {
+            currentPromptMode = promptCheck.mode;
             if (promptDebounceTimer) clearTimeout(promptDebounceTimer);
             promptDebounceTimer = setTimeout(() => {
               if (waitingForPrompt && stage === 'EXEC_CMDS' && !settled) {

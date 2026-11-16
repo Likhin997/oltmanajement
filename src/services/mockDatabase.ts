@@ -689,6 +689,7 @@ export function buildLiveZteRunningConfig(
         `  flow 1 pri ${pri} vlan ${vlanNum}`,
         `  gemport 1 flow 1`,
         `  switchport-bind switch_0/1 iphost 1`,
+        `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
         `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
         `  vlan-filter iphost 1 pri ${pri} vlan ${vlanNum}`
       );
@@ -699,11 +700,6 @@ export function buildLiveZteRunningConfig(
           `  tr069-mgmt 1 tag pri ${pri} vlan ${vlanNum}`
         );
       }
-      lines.push(
-        `  wan-ip 1 mode dhcp vlan-profile SMARTOLT-vlan${vlanNum} host 1`,
-        `  wan-ip 1 nat disable`,
-        `  wan 1 service tr069 host 1`
-      );
     } else {
       lines.push(
         `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
@@ -733,14 +729,12 @@ export function buildLiveZteRunningConfig(
           `  flow 2 pri ${pri} vlan ${mgmtVlanNum}`,
           `  gemport 2 flow 2`,
           `  switchport-bind switch_0/1 iphost 2`,
+          `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
           `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
           `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlanNum}`,
           `  tr069-mgmt 1 state unlock`,
           `  tr069-mgmt 1 acs ${trProfile.acs_url} validate basic username ${trProfile.acs_username} password ${trProfile.acs_password}`,
-          `  tr069-mgmt 1 tag pri ${pri} vlan ${mgmtVlanNum}`,
-          `  wan-ip 2 mode dhcp vlan-profile SMARTOLT-vlan${mgmtVlanNum} host 2`,
-          `  wan-ip 2 nat disable`,
-          `  wan 2 service tr069 host 2`
+          `  tr069-mgmt 1 tag pri ${pri} vlan ${mgmtVlanNum}`
         );
       }
     }
