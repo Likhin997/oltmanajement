@@ -753,6 +753,36 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
     }
   };
 
+  const syncTr069ServiceListToAcs = async (
+    acsUrl?: string,
+    mgmtVlan?: number
+  ) => {
+    try {
+      const resp = await fetch('/api/tr069/enforce-service-list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          serialNumber: onu.serial_number,
+          acsUrl: acsUrl || tr069Profile?.acs_url || 'http://10.69.69.1:14501',
+          mgmtVlanId: mgmtVlan || effectiveMgmtVlan,
+        }),
+      });
+      const json = await resp.json();
+      if (json?.message) {
+        setActiveConsoleOutput((prev) =>
+          prev
+            ? {
+                ...prev,
+                content: `${prev.content}\n\n--- [ACS CWMP ServiceList Sync] ---\n${json.message}`,
+              }
+            : prev
+        );
+      }
+    } catch {
+      // Non-blocking ACS sync
+    }
+  };
+
   const handleTr069Push = () => {
     const acsUrl = tr069Profile?.acs_url || 'http://10.69.69.1:14501';
     const acsUser = tr069Profile?.acs_username || 'acsNet';
@@ -768,6 +798,9 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       ? [
           `! VLAN Mgmt ${effectiveMgmtVlan}: Service List TR069 ONLY (Tanpa Internet / Tanpa VEIP / Tanpa NAT)`,
           `configure terminal`,
+          `gpon`,
+          `  onu profile vlan SMARTOLT-vlan${effectiveMgmtVlan} tag-mode tag cvlan ${effectiveMgmtVlan} priority ${tr069Pri}`,
+          `exit`,
           `interface ${onuInterface}`,
           `  tcont 1 profile ${mgmtTcont}`,
           `  gemport 1 tcont 1`,
@@ -794,6 +827,9 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
         ].join('\n')
       : [
           `configure terminal`,
+          `gpon`,
+          `  onu profile vlan SMARTOLT-vlan${effectiveMgmtVlan} tag-mode tag cvlan ${effectiveMgmtVlan} priority ${tr069Pri}`,
+          `exit`,
           `interface ${onuInterface}`,
           `  tcont 2 profile ${mgmtTcont}`,
           `  gemport 2 tcont 2`,
@@ -845,8 +881,8 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
         tr069_status: 'ACTIVE_INFORMING',
         tr069_last_inform: `${new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ')} WIB`,
       },
-      `TR-069 CWMP & OMCI Push (${onu.serial_number} · VLAN ${effectiveMgmtVlan}${isOnuMgmtOnly ? ' · Mgmt/VoIP Only' : ''})\n${rpcPreview}`
-    );
+      `TR-069 CWMP & OMCI Push (${onu.serial_number} · VLAN ${effectiveMgmtVlan}${isOnuMgmtOnly ? ' · Mgmt Only' : ''})\n${rpcPreview}`
+    ).then(() => syncTr069ServiceListToAcs(acsUrl, effectiveMgmtVlan));
   };
 
   const handleReboot = () => {
@@ -2616,12 +2652,22 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     vlanId: vlan?.vlan_id || 101,
                     onuMode: onu.onu_mode || 'Routing',
                     wanMode: onu.wan_mode || 'PPPOE',
-                    configMethod: onu.config_method || 'OMCI',
+                    configMethod: isOnuMgmtOnly ? 'TR069' : onu.config_method || 'OMCI',
                     wanRemoteAccess:
                       onu.wan_remote_access ||
                       'Enabled from everywhere in the internet',
                     pppoeUsername: cleanPppoeUserVal,
                     pppoePassword: cleanPppoePassVal,
+                    tr069AcsUrl: tr069Profile?.acs_url,
+                    tr069AcsUsername: tr069Profile?.acs_username,
+                    tr069AcsPassword: tr069Profile?.acs_password,
+                    tr069MgmtVlanId: effectiveMgmtVlan,
+                    tr069Priority: tr069Profile?.vlan_priority ?? 2,
+                    tr069TcontProfile:
+                      tr069Profile?.tcont_profile || 'SMARTOLT-VOIPMNG-10M',
+                    tr069TrafficProfile:
+                      tr069Profile?.traffic_profile || 'SMARTOLT-VOIPMNG-10M',
+                    mgmtOnlyNoInternet: isOnuMgmtOnly,
                   });
 
                   void executeAndDisplayLivePush(
@@ -3302,7 +3348,14 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                       `Update Management & VoIP IP (${
                         trEnabled ? selectedProf?.profile_name : 'No TR069'
                       } · Mgmt ${mgmtIpModeInput} · VLAN ${mgmtVlanInput}) — ${onuInterface}`
-                    );
+                    ).then(() => {
+                      if (trEnabled) {
+                        return syncTr069ServiceListToAcs(
+                          selectedProf?.acs_url,
+                          mgmtVlanInput
+                        );
+                      }
+                    });
                   }}
                   className="space-y-4"
                 >

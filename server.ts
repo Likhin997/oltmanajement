@@ -3502,6 +3502,150 @@ app.post('/api/telnet/exec', async (req, res) => {
   });
 });
 
+// POST /api/tr069/enforce-service-list — Enforce X_ZTE-COM_ServiceList = "TR069" ONLY & NATEnabled = false
+// directly on GenieACS NBI API (if reachable on the ACS server host) alongside OLT OMCI push.
+app.post('/api/tr069/enforce-service-list', async (req, res) => {
+  const { serialNumber, acsUrl, mgmtVlanId } = (req.body || {}) as {
+    serialNumber?: string;
+    acsUrl?: string;
+    mgmtVlanId?: number;
+  };
+  const cleanSn = String(serialNumber || '').trim();
+  const targetVlan = Number(mgmtVlanId) || 100;
+  if (!cleanSn) {
+    res.status(400).json({ ok: false, acsSynced: false, message: 'serialNumber is required' });
+    return;
+  }
+
+  let parsedHost = '10.69.69.1';
+  let parsedPort = '';
+  try {
+    const u = new URL((acsUrl || 'http://10.69.69.1:14501').trim());
+    parsedHost = u.hostname || '10.69.69.1';
+    parsedPort = u.port || '';
+  } catch {
+    // Fallback to default ACS host
+  }
+
+  const candidateBases = Array.from(
+    new Set([
+      `http://${parsedHost}:7557`,
+      ...(parsedPort && parsedPort !== '7557' ? [`http://${parsedHost}:${parsedPort}`] : []),
+    ])
+  );
+
+  for (const baseUrl of candidateBases) {
+    try {
+      const queryJson = encodeURIComponent(
+        JSON.stringify({
+          $or: [
+            { '_deviceId._SerialNumber': cleanSn },
+            { _id: { $regex: `${cleanSn}$`, $options: 'i' } },
+          ],
+        })
+      );
+      const lookupResp = await fetch(`${baseUrl}/devices?query=${queryJson}`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(1500),
+      });
+      if (!lookupResp.ok) continue;
+      const devices = (await lookupResp.json()) as Array<Record<string, any>>;
+      if (!Array.isArray(devices) || devices.length === 0) {
+        res.json({
+          ok: true,
+          acsSynced: false,
+          message: `GenieACS NBI (${baseUrl}) reachable, device SN ${cleanSn} not yet registered in ACS.`,
+        });
+        return;
+      }
+
+      const dev = devices[0];
+      const deviceId = String(dev._id);
+      const wanConDevs = dev?.InternetGatewayDevice?.WANDevice?.['1']?.WANConnectionDevice || {};
+      const parameterValues: Array<[string, string | boolean, string]> = [];
+
+      for (const [wcdKey, wcdVal] of Object.entries(wanConDevs)) {
+        if (!wcdVal || typeof wcdVal !== 'object' || wcdKey.startsWith('_')) continue;
+        const wcdObj = wcdVal as Record<string, any>;
+        const linkVlan = Number(wcdObj?.['X_ZTE-COM_WANEponLinkConfig']?.VLANIDMark?._value);
+        const wanIpConns = wcdObj?.WANIPConnection || {};
+        for (const [ipKey, ipVal] of Object.entries(wanIpConns)) {
+          if (!ipVal || typeof ipVal !== 'object' || ipKey.startsWith('_')) continue;
+          const ipObj = ipVal as Record<string, any>;
+          const connName = String(ipObj?.Name?._value || '');
+          const svcList = String(ipObj?.['X_ZTE-COM_ServiceList']?._value || '');
+          const isMgmtOrTr069 =
+            linkVlan === targetVlan ||
+            /tr069|omci_ipv4_dhcp_2/i.test(connName) ||
+            /TR069/i.test(svcList);
+          if (isMgmtOrTr069) {
+            const prefix = `InternetGatewayDevice.WANDevice.1.WANConnectionDevice.${wcdKey}.WANIPConnection.${ipKey}`;
+            parameterValues.push(
+              [`${prefix}.X_ZTE-COM_ServiceList`, 'TR069', 'xsd:string'],
+              [`${prefix}.NATEnabled`, false, 'xsd:boolean'],
+              [`${prefix}.X_ZTE-COM_LanInterface`, '', 'xsd:string']
+            );
+          }
+        }
+      }
+
+      if (parameterValues.length === 0) {
+        // Default target WANConnectionDevice.2.WANIPConnection.1
+        parameterValues.push(
+          [
+            'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANIPConnection.1.X_ZTE-COM_ServiceList',
+            'TR069',
+            'xsd:string',
+          ],
+          [
+            'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANIPConnection.1.NATEnabled',
+            false,
+            'xsd:boolean',
+          ],
+          [
+            'InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANIPConnection.1.X_ZTE-COM_LanInterface',
+            '',
+            'xsd:string',
+          ]
+        );
+      }
+
+      const taskResp = await fetch(
+        `${baseUrl}/devices/${encodeURIComponent(deviceId)}/tasks?connection_request`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: 'setParameterValues',
+            parameterValues,
+          }),
+          signal: AbortSignal.timeout(2500),
+        }
+      );
+
+      res.json({
+        ok: true,
+        acsSynced: taskResp.ok,
+        deviceId,
+        nbiUrl: baseUrl,
+        parametersPushed: parameterValues.length,
+        message: taskResp.ok
+          ? `ACS GenieACS (${baseUrl}) task queued for ${deviceId}: ServiceList=TR069, NATEnabled=false`
+          : `ACS GenieACS (${baseUrl}) returned HTTP ${taskResp.status}`,
+      });
+      return;
+    } catch {
+      // Try next candidate or fall through gracefully
+    }
+  }
+
+  res.json({
+    ok: true,
+    acsSynced: false,
+    message: `ACS NBI on ${parsedHost}:7557 tidak terjangkau dari server (OLT OMCI push tetap dijalankan).`,
+  });
+});
+
 // POST /api/olts/:id/sync-live — Automatically fetch `show card`, `show gpon onu uncfg`,
 // `show gpon onu state`, `show running-config`, plus optical power & MikroTik WAN PPPoE IPs!
 app.post('/api/olts/:id/sync-live', async (req, res) => {

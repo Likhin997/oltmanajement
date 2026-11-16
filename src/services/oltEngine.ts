@@ -897,6 +897,8 @@ export function buildTr069CliLines(params: {
   if (params.enabled === false) {
     return [
       `  no tr069-mgmt 1`,
+      `  no wan 2`,
+      `  no wan-ip 2`,
       `  no veip 1 port udp 1232 host 2`,
       `  no vlan-filter iphost 2`,
       `  no vlan-filter-mode iphost 2`,
@@ -916,9 +918,10 @@ export function buildTr069CliLines(params: {
       : 0;
 
   if (params.usePrimaryFlow) {
-    // Pure TR069 Only on Mgmt VLAN: NO `veip 1` and explicitly `wan-ip 1 nat disable`
-    // so the ZTE ONU sets Service List to `TR069` only and disables NAT.
+    // Pure TR069 Only on Mgmt VLAN: NO `ip-host 1` (which forces `omci_ipv4_dhcp_1` = `TR069_INTERNET`),
+    // NO `veip 1`, explicitly `wan-ip 1` + `wan-ip 1 nat disable` + `wan 1 service tr069 host 1`.
     return [
+      `  no wan 1`,
       `  no pppoe 1`,
       `  no wan-ip 1`,
       `  no veip 1 port udp 1232 host 1`,
@@ -937,18 +940,19 @@ export function buildTr069CliLines(params: {
       `  tr069-mgmt 1 state unlock`,
       `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
       `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`,
-      `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
       `  wan-ip 1 mode dhcp vlan-profile SMARTOLT-vlan${tr069Vlan} host 1`,
       `  wan-ip 1 nat disable`,
       `  wan-ip 1 ping-response enable traceroute-response enable`,
+      `  wan 1 service tr069 host 1`,
     ];
   }
 
-  // Secondary Flow 2 (`iphost 2` / `omci_ipv4_dhcp_2`) strictly for TR069 Only with NAT DISABLED:
-  // 1. Tear down any existing `wan-ip 2` / `ip-host 2` / `veip 1` / `flow 2` first so old `TR069_INTERNET` + NAT is removed.
-  // 2. Configure `tr069-mgmt 1` tag BEFORE `ip-host 2` and explicitly push `wan-ip 2 nat disable`.
+  // Secondary Flow 2 (`iphost 2` / `wan-ip 2`) strictly for Service List = `TR069` ONLY with NAT DISABLED:
+  // Penting: JANGAN kirim `ip-host 2 dhcp-enable enable` karena OMCI ME #134 memaksa `omci_ipv4_dhcp_2`
+  // dengan Service List `TR069_INTERNET` & NAT ON serta membentrokkan `host 2` sehingga `wan-ip 2` gagal.
   return [
     `  no tr069-mgmt 1`,
+    `  no wan 2`,
     `  no wan-ip 2`,
     `  no veip 1 port udp 1232 host 2`,
     `  no vlan-filter iphost 2`,
@@ -967,10 +971,10 @@ export function buildTr069CliLines(params: {
     `  tr069-mgmt 1 state unlock`,
     `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
     `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`,
-    `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
     `  wan-ip 2 mode dhcp vlan-profile SMARTOLT-vlan${tr069Vlan} host 2`,
     `  wan-ip 2 nat disable`,
     `  wan-ip 2 ping-response enable traceroute-response enable`,
+    `  wan 2 service tr069 host 2`,
   ];
 }
 
@@ -1649,8 +1653,9 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
   lines.push(
     `exit`,
     `pon-onu-mng ${onuIf}`,
-    // Hapus binding lama pada iphost 2 / wan-ip 2 / flow 2 terlebih dahulu agar `TR069_INTERNET` & NAT lama terhapus bersih
+    // Hapus binding lama pada wan 2 / wan-ip 2 / ip-host 2 / flow 2 terlebih dahulu agar `TR069_INTERNET` (`omci_ipv4_dhcp_2`) & NAT lama terhapus bersih
     `  no tr069-mgmt 1`,
+    `  no wan 2`,
     `  no wan-ip 2`,
     `  no veip 1 port udp 1232 host 2`,
     `  no vlan-filter iphost 2`,
@@ -1678,8 +1683,8 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
     );
   }
 
-  // Konfigurasi `tr069-mgmt 1` SEBELUM `ip-host 2` + `wan-ip 2 nat disable` agar Enable NAT NONAKTIF
-  // dan Service List = `TR069` ONLY pada VLAN Management
+  // Konfigurasi `tr069-mgmt 1` lalu `wan-ip 2` + `wan-ip 2 nat disable` + `wan 2 service tr069 host 2`
+  // Tanpa `ip-host 2 dhcp-enable` agar Service List murni `TR069` ONLY & Enable NAT NONAKTIF
   if (params.tr069Enabled) {
     const trTargetVlan =
       params.tr069Interface === 'WAN'
@@ -1696,10 +1701,10 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
   if (needMgmtServicePort) {
     if (params.mgmtIpMode === 'DHCP') {
       lines.push(
-        `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
         `  wan-ip 2 mode dhcp vlan-profile SMARTOLT-vlan${mgmtVlan} host 2`,
         `  wan-ip 2 nat disable`,
-        `  wan-ip 2 ping-response enable traceroute-response enable`
+        `  wan-ip 2 ping-response enable traceroute-response enable`,
+        ...(params.tr069Enabled ? [`  wan 2 service tr069 host 2`] : [])
       );
     } else if (params.mgmtIpMode === 'STATIC_IP') {
       const ip = (params.mgmtIpAddress || '10.100.3.8').trim();
@@ -1708,6 +1713,7 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
       lines.push(
         `  ip-host 2 ip ${ip} mask ${mask} gateway ${gw}`,
         `  wan-ip 2 nat disable`,
+        ...(params.tr069Enabled ? [`  wan 2 service tr069 host 2`] : []),
         `  mgmt-ip onu-ip ${ip} ${mask} ${pri} mgmt-vlan ${mgmtVlan}`
       );
     }
@@ -1753,6 +1759,7 @@ export function generateTr069CwmpRpcPreview(params: {
     `    ["InternetGatewayDevice.ManagementServer.PeriodicInformInterval", ${params.periodicInterval}, "xsd:unsignedInt"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANIPConnection.1.X_ZTE-COM_ServiceList", "TR069", "xsd:string"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANIPConnection.1.NATEnabled", false, "xsd:boolean"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANIPConnection.1.X_ZTE-COM_LanInterface", "", "xsd:string"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.X_ZTE-COM_WANEponLinkConfig.VLANIDMark", ${params.vlanId}, "xsd:unsignedInt"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Enable", ${params.onuMode === 'Routing' ? 'true' : 'false'}, "xsd:boolean"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.ConnectionType", "${params.onuMode === 'Bridging' ? 'PPPoE_Bridged' : 'IP_Routed'}", "xsd:string"],`,
