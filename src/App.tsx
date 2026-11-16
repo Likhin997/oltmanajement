@@ -710,6 +710,11 @@ export default function App() {
     updatingModeOnu,
   ]);
 
+  // Unconfigured ONUs Discovery State (Only `show gpon onu uncfg`, no full OLT sync)
+  const [uncfgOltFilter, setUncfgOltFilter] = useState<'ALL' | number>('ALL');
+  const [isPollingUncfg, setIsPollingUncfg] = useState(false);
+  const [lastUncfgCliOutput, setLastUncfgCliOutput] = useState<string | null>(null);
+
   // Configured ONUs Filter State
   const [searchQuery, setSearchQuery] = useState('');
   const [filterOlt, setFilterOlt] = useState<string>('ANY');
@@ -1802,6 +1807,82 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       showToast(`⚠ Gagal menghubungi endpoint sync OLT: ${(err as Error).message}`);
     } finally {
       setIsSyncingAllOnus(false);
+    }
+  };
+
+  // Dedicated Unconfigured ONUs Scanner — strictly executes `show gpon onu uncfg` on the OLT
+  // WITHOUT running full OLT sync (`show running-config`, `show card`, etc.).
+  const pollUnconfiguredOnusOnly = async (targetOltFilter: 'ALL' | number = 'ALL') => {
+    const targetOlts =
+      targetOltFilter === 'ALL'
+        ? visibleOlts
+        : visibleOlts.filter((o) => o.id === targetOltFilter);
+
+    if (targetOlts.length === 0) {
+      showToast('Tidak ada OLT yang tersedia untuk scan ONU unconfigured.');
+      return;
+    }
+
+    setIsPollingUncfg(true);
+    showToast(
+      `Menjalankan perintah "show gpon onu uncfg" pada ${targetOlts.length} OLT (tanpa sinkronisasi ulang OLT)...`
+    );
+
+    let totalDiscovered = 0;
+    const cliLogs: string[] = [];
+    const scannedOltIds = new Set<number>();
+
+    try {
+      for (const o of targetOlts) {
+        const resp = await fetch(`/api/olts/${o.id}/poll-uncfg`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ oltRecord: o }),
+        });
+        const data = await resp.json();
+        const header = `# [${o.id} - ${o.name} (${o.ip_address}:${o.telnet_port})] show gpon onu uncfg`;
+        if (data.rawOutput && String(data.rawOutput).trim()) {
+          cliLogs.push(`${header}\n${String(data.rawOutput).trim()}`);
+        } else if (data.error) {
+          cliLogs.push(`${header}\n[ERROR] ${data.error}`);
+        }
+
+        if (data.ok && data.state) {
+          scannedOltIds.add(o.id);
+          totalDiscovered += Number(data.discoveredCount || 0);
+          skipNextServerSyncRef.current = true;
+          const serverUncfg = (data.state.onus as OnuRecord[]).filter(
+            (u) => u.olt_id === o.id && !u.is_authorized
+          );
+          setDb((prev) => ({
+            ...prev,
+            onus: [
+              ...prev.onus.filter((u) => u.olt_id !== o.id || u.is_authorized),
+              ...serverUncfg,
+            ],
+          }));
+        } else if (!data.ok) {
+          showToast(
+            `⚠ OLT ${o.name}: ${data.error || 'Gagal menjalankan show gpon onu uncfg via Telnet'}`
+          );
+        }
+      }
+
+      if (cliLogs.length > 0) {
+        setLastUncfgCliOutput(cliLogs.join('\n\n'));
+      }
+
+      if (scannedOltIds.size > 0) {
+        showToast(
+          totalDiscovered > 0
+            ? `✓ Ditemukan ${totalDiscovered} ONU baru belum terdaftar (show gpon onu uncfg).`
+            : `✓ Scan selesai: Tidak ada ONU baru yang belum terdaftar di port PON.`
+        );
+      }
+    } catch (err) {
+      showToast(`⚠ Gagal scan unconfigured ONU: ${(err as Error).message}`);
+    } finally {
+      setIsPollingUncfg(false);
     }
   };
 
@@ -3304,9 +3385,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {db.olts.length > 0 &&
-                (activeView === 'CONFIGURED' ||
-                  activeView === 'UNCONFIGURED' ||
-                  activeView === 'DASHBOARD') && (
+                (activeView === 'CONFIGURED' || activeView === 'DASHBOARD') && (
                   <button
                     type="button"
                     disabled={isSyncingAllOnus}
@@ -3785,16 +3864,23 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           )}
 
         {/* ===================================================================
-            VIEW 2: UNCONFIGURED ONUS (Live Telnet Poll & Manual SN Registration)
+            VIEW 2: UNCONFIGURED ONUS (Strict `show gpon onu uncfg` Poll Only — No Full OLT Sync)
            =================================================================== */}
         {activeView === 'UNCONFIGURED' && (
           <div className="space-y-5 text-xs">
-            {/* Top Row: OLT Selector + Refresh on Left, Auto actions on Right */}
+            {/* Top Row: OLT Selector + Scan Unconfigured Only on Left, Auto actions on Right */}
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-bold text-white">OLT</span>
-                <select className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white">
-                  <option>All selected ({visibleOlts.length})</option>
+                <select
+                  value={uncfgOltFilter}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setUncfgOltFilter(val === 'ALL' ? 'ALL' : Number(val));
+                  }}
+                  className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                >
+                  <option value="ALL">All selected ({visibleOlts.length})</option>
                   {visibleOlts.map((o) => (
                     <option key={o.id} value={o.id}>
                       {o.id} - {o.name}
@@ -3803,19 +3889,18 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </select>
                 <button
                   type="button"
-                  onClick={async () => {
-                    if (visibleOlts.length === 0) {
-                      showToast('Tidak ada OLT yang tersedia untuk di-poll.');
-                      return;
-                    }
-                    for (const o of visibleOlts) {
-                      await syncOltFromTelnetLive(o.id, o);
-                    }
+                  disabled={isPollingUncfg}
+                  onClick={() => {
+                    void pollUnconfiguredOnusOnly(uncfgOltFilter);
                   }}
-                  className="flex items-center gap-1 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+                  className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-60"
                 >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  Poll &amp; Sync OLT (Telnet)
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 ${isPollingUncfg ? 'animate-spin' : ''}`}
+                  />
+                  {isPollingUncfg
+                    ? 'Checking show gpon onu uncfg...'
+                    : 'Scan Unconfigured ONU (Telnet)'}
                 </button>
                 <button
                   type="button"
@@ -3825,7 +3910,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       setActiveView('ADD_OLT');
                       return;
                     }
-                    setManualUncfgOltId(visibleOlts[0].id);
+                    setManualUncfgOltId(
+                      uncfgOltFilter === 'ALL' ? visibleOlts[0].id : uncfgOltFilter
+                    );
                     setShowAddUncfgModal(true);
                   }}
                   className="flex items-center gap-1 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
@@ -3875,9 +3962,32 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               </div>
             </div>
 
+            {lastUncfgCliOutput && (
+              <div className="rounded border border-sky-500/30 bg-[#081424] p-3">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="font-mono text-[11px] font-bold text-sky-300">
+                    Output Perintah Langsung OLT (`show gpon onu uncfg`)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setLastUncfgCliOutput(null)}
+                    className="text-[11px] text-slate-400 hover:text-white"
+                  >
+                    Tutup Output
+                  </button>
+                </div>
+                <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-emerald-300">
+                  {lastUncfgCliOutput}
+                </pre>
+              </div>
+            )}
+
             {/* Per-OLT Unconfigured Sections matching Screenshot _C1DBB18F */}
             <div className="space-y-4">
-              {visibleOlts.map((oltItem) => {
+              {(uncfgOltFilter === 'ALL'
+                ? visibleOlts
+                : visibleOlts.filter((o) => o.id === uncfgOltFilter)
+              ).map((oltItem) => {
                 const oltUncfg = unconfiguredOnus.filter(
                   (u) => u.olt_id === oltItem.id
                 );

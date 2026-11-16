@@ -11,6 +11,7 @@ import {
   INITIAL_DB_STATE,
   DEFAULT_APP_USERS,
   SmartOltDatabaseState,
+  OltRecord,
   PonPortRecord,
   UplinkPortRecord,
   OltCardRecord,
@@ -4105,12 +4106,8 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       });
     }
 
-    // Refresh unconfigured ONUs for this OLT
-    const configuredSns = new Set(
-      updatedOnus
-        .filter((u) => u.is_authorized)
-        .map((u) => u.serial_number.toUpperCase())
-    );
+    // Refresh unconfigured ONUs for this OLT from live `show gpon onu uncfg`
+    const seenUncfgSns = new Set<string>();
     const prevUncfgBySn = new Map(
       latestState.onus
         .filter((u) => u.olt_id === olt.id && !u.is_authorized)
@@ -4121,8 +4118,8 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
     for (let i = 0; i < parsedUncfg.length; i++) {
       const d = parsedUncfg[i];
       const snUpper = d.serialNumber.toUpperCase();
-      if (configuredSns.has(snUpper)) continue;
-      configuredSns.add(snUpper);
+      if (seenUncfgSns.has(snUpper)) continue;
+      seenUncfgSns.add(snUpper);
       const prev = prevUncfgBySn.get(snUpper);
       nextUncfgOnus.push({
         id: prev?.id || Date.now() + i + 5000,
@@ -5975,86 +5972,38 @@ app.post('/api/olts/:id/import-config', async (req, res) => {
   }
 });
 
-// POST /api/olts/:id/poll-uncfg — Live Telnet poll `show gpon onu uncfg` & `show gpon onu state`
+// POST /api/olts/:id/poll-uncfg — Strictly executes `show gpon onu uncfg` via Telnet (NO full OLT sync!)
 app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
   try {
     const oltId = Number(req.params.id);
-    const { manualCliOutput, fullSync } = (req.body || {}) as {
+    const { manualCliOutput, oltRecord } = (req.body || {}) as {
       manualCliOutput?: string;
-      fullSync?: boolean;
+      oltRecord?: Partial<OltRecord>;
     };
     const state = await loadDatabaseState();
-    const olt = state.olts.find((o) => o.id === oltId) || state.olts[0];
+    const dbOlt = state.olts.find((o) => o.id === oltId) || state.olts[0];
+    const olt = dbOlt
+      ? { ...dbOlt, ...(oltRecord || {}), id: dbOlt.id }
+      : oltRecord?.ip_address
+      ? ({
+          id: oltId,
+          name: oltRecord.name || `OLT-${oltId}`,
+          ip_address: oltRecord.ip_address,
+          telnet_port: Number(oltRecord.telnet_port || 23),
+          olt_username: oltRecord.olt_username || 'zte',
+          olt_password: oltRecord.olt_password || '',
+          enable_password: oltRecord.enable_password || oltRecord.olt_password || 'zxr10',
+        } as OltRecord)
+      : undefined;
+
     if (!olt) {
-      res.status(404).json({ error: 'OLT not found in database' });
+      res.status(404).json({ ok: false, error: 'OLT not found in database' });
       return;
     }
 
-    const oltHasVlans = state.vlans.some((v) => v.olt_id === olt.id);
-    const oltConfiguredOnusCount = state.onus.filter(
-      (o) => o.olt_id === olt.id && o.is_authorized
-    ).length;
-    const shouldRunFullSync =
-      fullSync === true || !oltHasVlans || oltConfiguredOnusCount <= 1;
-
-    if (!manualCliOutput && shouldRunFullSync) {
-      const syncRes = await executeTelnetSession({
-        host: olt.ip_address,
-        port: olt.telnet_port,
-        username: olt.olt_username,
-        password: olt.olt_password,
-        enablePassword: olt.enable_password,
-        commands: [
-          'show card',
-          'show gpon onu uncfg',
-          'show gpon onu state',
-          'show gpon onu baseinfo',
-          'show running-config',
-        ],
-        timeoutMs: 55000,
-      });
-
-      if (syncRes.reachable && syncRes.output.trim()) {
-        const extraEnrich = await fetchMissingOnuConfigsFromOlt({
-          host: olt.ip_address,
-          port: olt.telnet_port,
-          username: olt.olt_username,
-          password: olt.olt_password,
-          enablePassword: olt.enable_password,
-          combinedOutputSoFar: syncRes.output,
-          existingOnusInDb: state.onus,
-          oltId: olt.id,
-        });
-        const freshStateForSync = await loadDatabaseState();
-        const combinedOut = `${syncRes.output}\n${extraEnrich}`;
-        const { nextState, summary } = applyRunningConfigAndLiveTelemetryToState({
-          state: freshStateForSync,
-          oltId: olt.id,
-          rawConfig: combinedOut,
-          rawUncfgOutput: combinedOut,
-          rawStateOutput: combinedOut,
-          rawCardOutput: combinedOut,
-          rawTelemetryOutput: extraEnrich,
-          sourceLabel: 'Live Telnet Poll & Sync',
-        });
-        await saveDatabaseState(nextState);
-        res.json({
-          ok: true,
-          telnetReachable: true,
-          discoveredCount: summary.uncfgOnus,
-          synced: {
-            ...summary,
-            configuredOnus: summary.onus,
-            unconfiguredOnus: summary.uncfgOnus,
-          },
-          state: nextState,
-        });
-        return;
-      }
-    }
-
     let rawOutput = manualCliOutput || '';
-    let telnetReachable = false;
+    let telnetReachable = Boolean(manualCliOutput);
+    let telnetError: string | undefined;
 
     if (!rawOutput) {
       const telnetRes = await executeTelnetSession({
@@ -6063,120 +6012,52 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
         username: olt.olt_username,
         password: olt.olt_password,
         enablePassword: olt.enable_password,
-        commands: ['show gpon onu uncfg', 'show gpon onu state'],
-        timeoutMs: 14000,
+        commands: ['show gpon onu uncfg'],
+        timeoutMs: 12000,
       });
       telnetReachable = telnetRes.reachable;
       rawOutput = telnetRes.output;
+      telnetError = telnetRes.error;
+
+      if (!telnetRes.reachable) {
+        res.json({
+          ok: false,
+          telnetReachable: false,
+          discoveredCount: 0,
+          discovered: [],
+          rawOutput,
+          error: telnetError || `Gagal terhubung ke OLT ${olt.ip_address}:${olt.telnet_port} via Telnet`,
+          state,
+        });
+        return;
+      }
     }
 
     const discovered = parseZteUncfgOutput(rawOutput);
-    const parsedStates = parseZteOnuStateOutput(rawOutput);
-    const stateByIf = new Map<string, (typeof parsedStates)[number]>();
-    for (const st of parsedStates) {
-      stateByIf.set(st.fullInterface.toLowerCase(), st);
-    }
-
     const latestState = await loadDatabaseState();
-    const existingIfKeys = new Set<string>();
-    const updatedExistingOnus = latestState.onus
-      .filter((u) => u.olt_id !== olt.id || u.is_authorized)
-      .map((u) => {
-        if (u.olt_id !== olt.id || !u.is_authorized || u.onu_index === null)
-          return u;
-        const key = `gpon-onu_1/${u.board}/${u.port}:${u.onu_index}`.toLowerCase();
-        existingIfKeys.add(key);
-        const st = stateByIf.get(key);
-        if (!st) return u;
-        return {
-          ...u,
-          admin_state: st.adminState,
-          phase_state: st.phaseState,
-          last_offline_reason:
-            st.phaseState === 'LOS'
-              ? 'LOS'
-              : st.phaseState === 'DyingGasp'
-              ? 'Power Fail'
-              : st.phaseState === 'OffLine'
-              ? 'Offline'
-              : 'None',
-        };
-      });
 
-    // Also add any ONU index seen in `show gpon onu state` that wasn't in `state.onus`
-    for (const st of parsedStates) {
-      const key = st.fullInterface.toLowerCase();
-      if (existingIfKeys.has(key)) continue;
-      const m = st.fullInterface.match(/(\d+)\/(\d+)\/(\d+):(\d+)/);
-      if (!m) continue;
-      const board = parseInt(m[2], 10);
-      const port = parseInt(m[3], 10);
-      const onuIndex = parseInt(m[4], 10);
-      existingIfKeys.add(key);
-      updatedExistingOnus.push({
-        id: olt.id * 100000 + board * 10000 + port * 1000 + onuIndex,
-        olt_id: olt.id,
-        pon_port_id: olt.id * 100 + port,
-        board,
-        port,
-        onu_index: onuIndex,
-        serial_number: `ONU-${board}-${port}-${onuIndex}`,
-        onu_type: 'ALL',
-        is_authorized: true,
-        customer_name: `ONU-${board}-${port}-${onuIndex}`,
-        address: 'none',
-        external_id: `ONU-${board}-${port}-${onuIndex}`,
-        zone_id: state.zones[0]?.id || null,
-        odb_id: state.odbs[0]?.id || null,
-        odb_port: onuIndex,
-        vlan_id: state.vlans.find((v) => v.vlan_id === 101)?.id || 101,
-        speed_profile_id: 1,
-        tcont_profile_id: 1,
-        onu_mode: 'Routing',
-        wan_mode: 'PPPOE',
-        config_method: 'OMCI',
-        wan_remote_access: 'Enabled from everywhere in the internet',
-        wan_remote_allowed_subnet: '0.0.0.0/0',
-        tr069_profile_id: 1,
-        tr069_status: 'DISABLED',
-        tr069_last_inform: null,
-        wifi_ssid: null,
-        wifi_password: null,
-        pppoe_username: null,
-        pppoe_password: 'jetcyber',
-        hotspot_bridge_vlan: null,
-        admin_state: st.adminState,
-        phase_state: st.phaseState,
-        onu_rx_dbm: null,
-        onu_tx_dbm: null,
-        olt_rx_dbm: null,
-        distance_m: 500,
-        temperature_c: 40,
-        ip_address: null,
-        firmware_ver: 'V2.1.0',
-        auth_date_label: formatJakartaDateTimeFull(Date.now()).slice(0, 10),
-        last_online_at: formatJakartaDateTimeFull(Date.now()),
-        last_offline_reason:
-          st.phaseState === 'LOS'
-            ? 'LOS'
-            : st.phaseState === 'DyingGasp'
-            ? 'Power Fail'
-            : 'None',
-      });
-    }
-
-    const configuredSns = new Set(
-      updatedExistingOnus
-        .filter((o) => o.is_authorized)
-        .map((o) => o.serial_number.toUpperCase())
+    // Pertahankan seluruh ONU terkonfigurasi tanpa menyentuh konfigurasi/VLAN/Zone/ODP OLT!
+    const preservedOnus = latestState.onus.filter(
+      (u) => u.olt_id !== olt.id || u.is_authorized
     );
+    const prevUncfgBySn = new Map(
+      latestState.onus
+        .filter((u) => u.olt_id === olt.id && !u.is_authorized)
+        .map((u) => [u.serial_number.toUpperCase(), u])
+    );
+
+    const seenUncfgSns = new Set<string>();
     const newUnconfiguredOnus: OnuRecord[] = [];
 
-    for (const d of discovered) {
-      if (configuredSns.has(d.serialNumber.toUpperCase())) continue;
-      configuredSns.add(d.serialNumber.toUpperCase());
+    for (let i = 0; i < discovered.length; i++) {
+      const d = discovered[i];
+      const snUpper = d.serialNumber.toUpperCase();
+      if (seenUncfgSns.has(snUpper)) continue;
+      seenUncfgSns.add(snUpper);
+      const prev = prevUncfgBySn.get(snUpper);
+
       newUnconfiguredOnus.push({
-        id: Date.now() + Math.floor(Math.random() * 10000),
+        id: prev?.id || Date.now() + i + Math.floor(Math.random() * 10000),
         olt_id: olt.id,
         pon_port_id: olt.id * 100 + d.port,
         board: d.slot,
@@ -6191,7 +6072,10 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
         zone_id: null,
         odb_id: null,
         odb_port: null,
-        vlan_id: state.vlans.find((v) => v.vlan_id === 101)?.id || 101,
+        vlan_id:
+          latestState.vlans.find((v) => v.olt_id === olt.id && v.vlan_id === 101)?.id ||
+          latestState.vlans.find((v) => v.vlan_id === 101)?.id ||
+          101,
         speed_profile_id: 1,
         tcont_profile_id: 1,
         onu_mode: 'Routing',
@@ -6224,7 +6108,7 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
 
     const nextState: SmartOltDatabaseState = {
       ...latestState,
-      onus: [...updatedExistingOnus, ...newUnconfiguredOnus],
+      onus: [...preservedOnus, ...newUnconfiguredOnus],
     };
     await saveDatabaseState(nextState);
 
@@ -6232,10 +6116,12 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
       ok: true,
       telnetReachable,
       discoveredCount: newUnconfiguredOnus.length,
+      discovered,
+      rawOutput,
       state: nextState,
     });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
 

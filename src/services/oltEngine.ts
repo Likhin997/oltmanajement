@@ -100,71 +100,117 @@ export function cleanZteCliText(raw: string): string {
 
 /**
  * 1. ALGORITMA REGEX PARSER: `show gpon onu uncfg`
- * Mendukung output ZTE C300/C320 (`uncfg-onu-display-info model sn pw`)
+ * Mendukung seluruh format output ZTE C300/C320 (V1.2.5P3, V2.1.0, hex 16-char SN, 2-kolom tanpa state, dll.)
  */
 export function parseZteUncfgOutput(rawOutput: string): UncfgOnuParsed[] {
   const results: UncfgOnuParsed[] = [];
+  const seenKeys = new Set<string>();
   const cleaned = cleanZteCliText(rawOutput);
   const lines = cleaned.split(/[\r\n]+/);
 
-  const regexV21 =
-    /gpon-(?:onu|olt)_(\d+)\/(\d+)\/(\d+)(?::\d+)?\s+([A-Z0-9]{12,16})\s+(unknown|uncfg|[A-Za-z0-9\-_.]+)/i;
-  const regexModelSn =
-    /gpon-(?:onu|olt)_(\d+)\/(\d+)\/(\d+)(?::\d+)?\s+([A-Za-z0-9\-_.]+)\s+([A-Z0-9]{12,16})(?:\s+([A-Za-z0-9.\-_]+))?/i;
+  const isLikelySerialNumber = (tok: string): boolean => {
+    const t = tok.trim().toUpperCase();
+    if (!t || t.length < 8 || t.length > 20) return false;
+    const ignored = new Set([
+      'UNKNOWN',
+      'UNCFG',
+      'UNCONFIGURED',
+      'INITIAL',
+      'PASSWORD',
+      'ONUINDEX',
+      'OLTINDEX',
+      'SERIALNUMBER',
+      'WORKING',
+      'OFFLINE',
+      'DYINGGASP',
+    ]);
+    if (ignored.has(t)) return false;
+    // Standard 12-char GPON SN (e.g. ZTEGC6A394D4, ZICGB370351A, HWTC1A2B3C4D)
+    // or 16-char Hex SN (e.g. 4857544312345678, 5A544547AABBCCDD)
+    // or 8-16 alphanumeric token containing at least 4 hex digits and letters
+    return (
+      /^[A-Z]{4}[0-9A-F]{8}$/i.test(t) ||
+      /^[A-Z]{4}[A-Z0-9]{8,12}$/i.test(t) ||
+      /^[0-9A-F]{16}$/i.test(t) ||
+      (/^[A-Z0-9]{10,16}$/i.test(t) && /[A-Z]/i.test(t) && /\d/.test(t))
+    );
+  };
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
-    if (!line || line.startsWith('---') || line.toLowerCase().startsWith('onuindex')) {
-      continue;
-    }
-
-    const matchModelSn = line.match(regexModelSn);
     if (
-      matchModelSn &&
-      matchModelSn[5] &&
-      /^[A-Z]{4}[A-Z0-9]{8}$/i.test(matchModelSn[5])
+      !line ||
+      line.startsWith('---') ||
+      line.startsWith('%') ||
+      /^(?:onuindex|oltindex|interface|no\s+related)/i.test(line)
     ) {
-      const rack = parseInt(matchModelSn[1], 10);
-      const shelf = parseInt(matchModelSn[2], 10);
-      const slotPort = parseInt(matchModelSn[3], 10);
-      results.push({
-        ponInterface: `gpon-olt_${rack}/${shelf}/${slotPort}`,
-        rack,
-        shelf,
-        slot: shelf,
-        port: slotPort,
-        onuModel: matchModelSn[4].toUpperCase(),
-        serialNumber: matchModelSn[5].toUpperCase(),
-        firmwareVersion: matchModelSn[6] || 'V2.1.0',
-      });
       continue;
     }
 
-    const matchV21 = line.match(regexV21);
-    if (matchV21) {
-      const rack = parseInt(matchV21[1], 10);
-      const shelf = parseInt(matchV21[2], 10);
-      const port = parseInt(matchV21[3], 10);
-      const sn = matchV21[4].toUpperCase();
-      const stateOrModel = matchV21[5];
-      const inferredModel =
-        stateOrModel.toLowerCase() === 'unknown' || stateOrModel.toLowerCase() === 'uncfg'
-          ? sn.startsWith('ZTEGCF')
-            ? 'F670LV9.0'
-            : 'ALL'
-          : stateOrModel.toUpperCase();
-
-      results.push({
-        ponInterface: `gpon-olt_${rack}/${shelf}/${port}`,
-        rack,
-        shelf,
-        slot: shelf,
-        port,
-        serialNumber: sn,
-        onuModel: inferredModel,
-        firmwareVersion: 'V2.1.0',
-      });
+    // Match `gpon-onu_1/3/3:1` or `gpon-olt_1/3/3` (or bare `1/3/3:1` on uncfg lines)
+    const ifMatch = line.match(
+      /(?:gpon-(?:onu|olt)_)?(\d+)\/(\d+)\/(\d+)(?::(\d+))?\s+(.+)$/i
+    );
+    if (!ifMatch) continue;
+    // Avoid false positive from non-interface version/date strings unless prefix or uncfg context
+    if (!/gpon-(?:onu|olt)_/i.test(line) && !/(unknown|uncfg|n\/a)/i.test(line)) {
+      continue;
     }
+
+    const rack = parseInt(ifMatch[1], 10);
+    const shelf = parseInt(ifMatch[2], 10);
+    const port = parseInt(ifMatch[3], 10);
+    const restTokens = ifMatch[5].trim().split(/\s+/).filter(Boolean);
+    if (restTokens.length === 0) continue;
+
+    let sn = '';
+    let model = 'ALL';
+    let fw = 'V2.1.0';
+
+    const snIdx = restTokens.findIndex((tok) => isLikelySerialNumber(tok));
+    if (snIdx === -1) continue;
+
+    sn = restTokens[snIdx].toUpperCase();
+    // If there is a token before SN (not just numeric index like "1"), treat as model
+    for (let i = 0; i < snIdx; i++) {
+      const tok = restTokens[i];
+      if (!/^\d+$/.test(tok) && !/^(n\/a|-|none)$/i.test(tok)) {
+        model = tok.toUpperCase();
+      }
+    }
+    // Check tokens after SN for model / firmware if model wasn't set before SN
+    for (let i = snIdx + 1; i < restTokens.length; i++) {
+      const tok = restTokens[i];
+      const low = tok.toLowerCase();
+      if (low === 'unknown' || low === 'uncfg' || low === 'n/a' || low === '-') {
+        continue;
+      }
+      if (/^v\d+/i.test(tok)) {
+        fw = tok;
+      } else if (model === 'ALL') {
+        model = tok.toUpperCase();
+      }
+    }
+
+    if (model === 'ALL' && sn.startsWith('ZTEGCF')) {
+      model = 'F670LV9.0';
+    }
+
+    const ponInterface = `gpon-olt_${rack}/${shelf}/${port}`;
+    const dedupKey = `${ponInterface}:${sn}`;
+    if (seenKeys.has(dedupKey)) continue;
+    seenKeys.add(dedupKey);
+
+    results.push({
+      ponInterface,
+      rack,
+      shelf,
+      slot: shelf,
+      port,
+      serialNumber: sn,
+      onuModel: model,
+      firmwareVersion: fw,
+    });
   }
 
   return results;
@@ -870,10 +916,11 @@ export function buildTr069CliLines(params: {
       : 0;
 
   if (params.usePrimaryFlow) {
-    // Pure TR069 Only on Mgmt VLAN: NO `switchport-bind switch_0/1 veip 1` and NO `veip 1 port udp 1232`
-    // so the ZTE ONU sets Service List to `TR069` only (without INTERNET and without NAT).
+    // Pure TR069 Only on Mgmt VLAN: NO `veip 1` and explicitly `wan-ip 1 nat disable`
+    // so the ZTE ONU sets Service List to `TR069` only and disables NAT.
     return [
       `  no pppoe 1`,
+      `  no wan-ip 1`,
       `  no veip 1 port udp 1232 host 1`,
       `  no veip 1 port udp 1232 host 2`,
       `  no switchport-bind switch_0/1 veip 1`,
@@ -891,14 +938,18 @@ export function buildTr069CliLines(params: {
       `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
       `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`,
       `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
+      `  wan-ip 1 mode dhcp vlan-profile SMARTOLT-vlan${tr069Vlan} host 1`,
+      `  wan-ip 1 nat disable`,
+      `  wan-ip 1 ping-response enable traceroute-response enable`,
     ];
   }
 
-  // Secondary Flow 2 (`iphost 2` / `omci_ipv4_dhcp_2`) strictly for TR069 Only (NO Internet / NO VEIP / NO NAT):
-  // 1. Tear down any existing `ip-host 2` / `veip 1` / `flow 2` first so old `TR069_INTERNET` is removed.
-  // 2. Configure `tr069-mgmt 1` tag BEFORE `ip-host 2 dhcp-enable enable` and never bind `veip 1` to `host 2`.
+  // Secondary Flow 2 (`iphost 2` / `omci_ipv4_dhcp_2`) strictly for TR069 Only with NAT DISABLED:
+  // 1. Tear down any existing `wan-ip 2` / `ip-host 2` / `veip 1` / `flow 2` first so old `TR069_INTERNET` + NAT is removed.
+  // 2. Configure `tr069-mgmt 1` tag BEFORE `ip-host 2` and explicitly push `wan-ip 2 nat disable`.
   return [
     `  no tr069-mgmt 1`,
+    `  no wan-ip 2`,
     `  no veip 1 port udp 1232 host 2`,
     `  no vlan-filter iphost 2`,
     `  no vlan-filter-mode iphost 2`,
@@ -917,6 +968,9 @@ export function buildTr069CliLines(params: {
     `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
     `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`,
     `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
+    `  wan-ip 2 mode dhcp vlan-profile SMARTOLT-vlan${tr069Vlan} host 2`,
+    `  wan-ip 2 nat disable`,
+    `  wan-ip 2 ping-response enable traceroute-response enable`,
   ];
 }
 
@@ -979,15 +1033,22 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
   const mgmtTcontProfile = params.tr069TcontProfile || 'SMARTOLT-VOIPMNG-10M';
   const mgmtTrafficProfile = params.tr069TrafficProfile || 'SMARTOLT-VOIPMNG-10M';
 
-  const lines: string[] = [
-    `configure terminal`,
+  const lines: string[] = [`configure terminal`];
+  if (isMgmtOnly || configMethod === 'TR069' || params.tr069Enabled) {
+    lines.push(
+      `gpon`,
+      `  onu profile vlan SMARTOLT-vlan${mgmtVlanId} tag-mode tag cvlan ${mgmtVlanId} priority ${tr069Pri}`,
+      `exit`
+    );
+  }
+  lines.push(
     `interface ${oltIf}`,
     `  onu ${params.onuIndex} type ${zteOnuType} sn ${params.serialNumber}`,
     `exit`,
     `interface ${onuIf}`,
     `  name ${cleanName}`,
     `  description ${cleanDesc}`,
-  ];
+  );
 
   if (isMgmtOnly) {
     // VLAN Mgmt / MJMT: hanya service TR-069 & VoIP saja, tanpa push internet!
@@ -1196,6 +1257,13 @@ export function generateUpdateOnuModeCliScript(params: {
   const mgmtTrafficProfile = params.tr069TrafficProfile || 'SMARTOLT-VOIPMNG-10M';
 
   const lines: string[] = [`configure terminal`];
+  if (isMgmtOnly || params.configMethod === 'TR069') {
+    lines.push(
+      `gpon`,
+      `  onu profile vlan SMARTOLT-vlan${mgmtVlanId} tag-mode tag cvlan ${mgmtVlanId} priority ${tr069Pri}`,
+      `exit`
+    );
+  }
 
   if (isMgmtOnly) {
     // VLAN Mgmt / MJMT: Service List TR069 ONLY (tanpa internet, tanpa VEIP, tanpa NAT)!
@@ -1558,8 +1626,11 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
     (params.tr069Enabled && params.tr069Interface === 'MGMT_IP');
 
   const lines: string[] = [
-    `! Update Management & TR069 (${onuIf}) — VLAN ${mgmtVlan} Service List: TR069 ONLY (Tanpa Internet & Tanpa Edit WAN PPPoE)`,
+    `! Update Management & TR069 (${onuIf}) — VLAN ${mgmtVlan} Service List: TR069 ONLY & NAT DISABLED (Tanpa Internet & Tanpa Edit WAN PPPoE)`,
     `configure terminal`,
+    `gpon`,
+    `  onu profile vlan SMARTOLT-vlan${mgmtVlan} tag-mode tag cvlan ${mgmtVlan} priority ${pri}`,
+    `exit`,
     `interface ${onuIf}`,
   ];
 
@@ -1578,9 +1649,9 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
   lines.push(
     `exit`,
     `pon-onu-mng ${onuIf}`,
-    // Hapus binding lama pada iphost 2 / flow 2 terlebih dahulu agar `TR069_INTERNET` lama terhapus bersih
-    // dan tidak ditolak oleh ONU karena VLAN sudah ada di ONU
+    // Hapus binding lama pada iphost 2 / wan-ip 2 / flow 2 terlebih dahulu agar `TR069_INTERNET` & NAT lama terhapus bersih
     `  no tr069-mgmt 1`,
+    `  no wan-ip 2`,
     `  no veip 1 port udp 1232 host 2`,
     `  no vlan-filter iphost 2`,
     `  no vlan-filter-mode iphost 2`,
@@ -1607,8 +1678,8 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
     );
   }
 
-  // Konfigurasi `tr069-mgmt 1` SEBELUM `ip-host 2` dan TANPA `veip 1` agar ZTE ONU membuat
-  // WAN Connection (`omci_ipv4_dhcp_2`) dengan Service List = `TR069` ONLY (Tanpa INTERNET & Tanpa NAT)
+  // Konfigurasi `tr069-mgmt 1` SEBELUM `ip-host 2` + `wan-ip 2 nat disable` agar Enable NAT NONAKTIF
+  // dan Service List = `TR069` ONLY pada VLAN Management
   if (params.tr069Enabled) {
     const trTargetVlan =
       params.tr069Interface === 'WAN'
@@ -1625,7 +1696,10 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
   if (needMgmtServicePort) {
     if (params.mgmtIpMode === 'DHCP') {
       lines.push(
-        `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`
+        `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
+        `  wan-ip 2 mode dhcp vlan-profile SMARTOLT-vlan${mgmtVlan} host 2`,
+        `  wan-ip 2 nat disable`,
+        `  wan-ip 2 ping-response enable traceroute-response enable`
       );
     } else if (params.mgmtIpMode === 'STATIC_IP') {
       const ip = (params.mgmtIpAddress || '10.100.3.8').trim();
@@ -1633,6 +1707,7 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
       const gw = (params.mgmtGateway || '10.100.0.1').trim();
       lines.push(
         `  ip-host 2 ip ${ip} mask ${mask} gateway ${gw}`,
+        `  wan-ip 2 nat disable`,
         `  mgmt-ip onu-ip ${ip} ${mask} ${pri} mgmt-vlan ${mgmtVlan}`
       );
     }

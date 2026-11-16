@@ -700,7 +700,9 @@ export function buildLiveZteRunningConfig(
         );
       }
       lines.push(
-        `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`
+        `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
+        `  wan-ip 1 mode dhcp vlan-profile SMARTOLT-vlan${vlanNum} host 1`,
+        `  wan-ip 1 nat disable`
       );
     } else {
       lines.push(
@@ -736,7 +738,9 @@ export function buildLiveZteRunningConfig(
           `  tr069-mgmt 1 state unlock`,
           `  tr069-mgmt 1 acs ${trProfile.acs_url} validate basic username ${trProfile.acs_username} password ${trProfile.acs_password}`,
           `  tr069-mgmt 1 tag pri ${pri} vlan ${mgmtVlanNum}`,
-          `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`
+          `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
+          `  wan-ip 2 mode dhcp vlan-profile SMARTOLT-vlan${mgmtVlanNum} host 2`,
+          `  wan-ip 2 nat disable`
         );
       }
     }
