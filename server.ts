@@ -843,8 +843,35 @@ async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
     if (!Array.isArray(sqliteState.users) || sqliteState.users.length === 0) {
       sqliteState.users = DEFAULT_APP_USERS;
     }
+    if (
+      sqliteState.olts.length === 0 &&
+      sqliteState.onus.length === 0 &&
+      fs.existsSync(path.join(dataDir, 'local_preview_seed.json'))
+    ) {
+      try {
+        const seeded = JSON.parse(
+          fs.readFileSync(path.join(dataDir, 'local_preview_seed.json'), 'utf8')
+        ) as SmartOltDatabaseState;
+        await saveDatabaseState(seeded);
+        return seeded;
+      } catch {
+        // ignore seed parse error
+      }
+    }
     latestMemoryState = JSON.parse(JSON.stringify(sqliteState)) as SmartOltDatabaseState;
     return sqliteState;
+  }
+
+  if (fs.existsSync(path.join(dataDir, 'local_preview_seed.json'))) {
+    try {
+      const seeded = JSON.parse(
+        fs.readFileSync(path.join(dataDir, 'local_preview_seed.json'), 'utf8')
+      ) as SmartOltDatabaseState;
+      await saveDatabaseState(seeded);
+      return seeded;
+    } catch {
+      // ignore seed parse error
+    }
   }
 
   await saveDatabaseState(INITIAL_DB_STATE);
@@ -2718,6 +2745,23 @@ app.post('/api/state/sync', async (req, res) => {
     if (!allowShrink && !isExplicitUserMutation) {
       if (nextState.olts.length === 0 && currentDbState.olts.length > 0) {
         nextState.olts = currentDbState.olts;
+        nextState.olt_cards = mergeCollectionById(
+          nextState.olt_cards,
+          currentDbState.olt_cards
+        );
+        nextState.pon_ports = mergeCollectionById(
+          nextState.pon_ports,
+          currentDbState.pon_ports
+        );
+        nextState.uplink_ports = mergeCollectionById(
+          nextState.uplink_ports,
+          currentDbState.uplink_ports
+        );
+        nextState.vlans = mergeCollectionById(nextState.vlans, currentDbState.vlans);
+        nextState.tr069_profiles = mergeCollectionById(
+          nextState.tr069_profiles,
+          currentDbState.tr069_profiles
+        );
       }
       nextState.zones = mergeCollectionById(nextState.zones, currentDbState.zones);
       nextState.sectors = mergeCollectionById(

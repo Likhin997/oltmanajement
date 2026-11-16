@@ -849,7 +849,16 @@ export function buildTr069CliLines(params: {
   voipSipEnabled?: boolean;
 }): string[] {
   if (params.enabled === false) {
-    return [`  no tr069-mgmt 1`];
+    return [
+      `  no tr069-mgmt 1`,
+      `  no veip 1 port udp 1232 host 2`,
+      `  no vlan-filter iphost 2`,
+      `  no vlan-filter-mode iphost 2`,
+      `  no ip-host 2`,
+      `  no switchport-bind switch_0/1 iphost 2`,
+      `  no gemport 2 flow 2`,
+      `  no flow 2`,
+    ];
   }
   const acsUrl = (params.acsUrl || 'http://10.69.69.1:14501').trim();
   const acsUser = (params.acsUsername || 'acsNet').trim();
@@ -858,50 +867,57 @@ export function buildTr069CliLines(params: {
   const pri =
     typeof params.priority === 'number' && params.priority >= 0 && params.priority <= 7
       ? params.priority
-      : 2;
+      : 0;
 
   if (params.usePrimaryFlow) {
-    const lines = [
-      `  voip protocol sip`,
+    // Pure TR069 Only on Mgmt VLAN: NO `switchport-bind switch_0/1 veip 1` and NO `veip 1 port udp 1232`
+    // so the ZTE ONU sets Service List to `TR069` only (without INTERNET and without NAT).
+    return [
+      `  no pppoe 1`,
+      `  no veip 1 port udp 1232 host 1`,
+      `  no veip 1 port udp 1232 host 2`,
+      `  no switchport-bind switch_0/1 veip 1`,
+      `  no tr069-mgmt 1`,
+      `  no vlan-filter iphost 1`,
+      `  no vlan-filter-mode iphost 1`,
+      `  no ip-host 1`,
       `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
       `  flow 1 pri ${pri} vlan ${tr069Vlan}`,
       `  gemport 1 flow 1`,
       `  switchport-bind switch_0/1 iphost 1`,
-      `  switchport-bind switch_0/1 veip 1`,
-      `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
       `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
       `  vlan-filter iphost 1 pri ${pri} vlan ${tr069Vlan}`,
-      `  veip 1 port udp 1232 host 1`,
       `  tr069-mgmt 1 state unlock`,
       `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
       `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`,
+      `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
     ];
-    return lines;
   }
 
-  const lines: string[] = [];
-  if (params.voipSipEnabled) {
-    lines.push(`  voip protocol sip`);
-  }
-  lines.push(
+  // Secondary Flow 2 (`iphost 2` / `omci_ipv4_dhcp_2`) strictly for TR069 Only (NO Internet / NO VEIP / NO NAT):
+  // 1. Tear down any existing `ip-host 2` / `veip 1` / `flow 2` first so old `TR069_INTERNET` is removed.
+  // 2. Configure `tr069-mgmt 1` tag BEFORE `ip-host 2 dhcp-enable enable` and never bind `veip 1` to `host 2`.
+  return [
+    `  no tr069-mgmt 1`,
+    `  no veip 1 port udp 1232 host 2`,
+    `  no vlan-filter iphost 2`,
+    `  no vlan-filter-mode iphost 2`,
+    `  no ip-host 2`,
+    `  no switchport-bind switch_0/1 iphost 2`,
+    `  no gemport 2 flow 2`,
+    `  no flow 2`,
     `  flow 2 switch switch_0/1`,
     `  flow mode 2 tag-filter vlan-filter untag-filter discard`,
     `  flow 2 pri ${pri} vlan ${tr069Vlan}`,
     `  gemport 2 flow 2`,
     `  switchport-bind switch_0/1 iphost 2`,
-    `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
     `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
-    `  vlan-filter iphost 2 pri ${pri} vlan ${tr069Vlan}`
-  );
-  if (params.voipSipEnabled) {
-    lines.push(`  veip 1 port udp 1232 host 2`);
-  }
-  lines.push(
+    `  vlan-filter iphost 2 pri ${pri} vlan ${tr069Vlan}`,
     `  tr069-mgmt 1 state unlock`,
     `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
-    `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`
-  );
-  return lines;
+    `  tr069-mgmt 1 tag pri ${pri} vlan ${tr069Vlan}`,
+    `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
+  ];
 }
 
 /**
@@ -1085,7 +1101,7 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
     lines.push(`  dhcp-ip ethuni eth_0/${e} from-onu`);
   }
 
-  // TR-069 CWMP + optional VoIP configuration (if enabled)
+  // TR-069 CWMP configuration (Service List: TR069 ONLY, tanpa internet/veip)
   if (configMethod === 'TR069' || params.tr069Enabled) {
     lines.push(
       ...buildTr069CliLines({
@@ -1096,11 +1112,9 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
         vlanId: mgmtVlanId,
         priority: tr069Pri,
         usePrimaryFlow: false,
-        voipSipEnabled: params.voipSipEnabled,
+        voipSipEnabled: false,
       })
     );
-  } else if (params.voipSipEnabled) {
-    lines.push(`  voip protocol sip`, `  veip 1 port udp 1232 host 2`);
   }
 
   // Security management rules (WAN Remote Access + LAN management)
@@ -1184,7 +1198,7 @@ export function generateUpdateOnuModeCliScript(params: {
   const lines: string[] = [`configure terminal`];
 
   if (isMgmtOnly) {
-    // VLAN Mgmt / MJMT: service TR-069 & VoIP saja, tanpa push internet!
+    // VLAN Mgmt / MJMT: Service List TR069 ONLY (tanpa internet, tanpa VEIP, tanpa NAT)!
     if (params.rebindTypeAll) {
       lines.push(
         `interface ${oltIf}`,
@@ -1213,7 +1227,7 @@ export function generateUpdateOnuModeCliScript(params: {
         vlanId: mgmtVlanId,
         priority: tr069Pri,
         usePrimaryFlow: true,
-        voipSipEnabled: true,
+        voipSipEnabled: false,
       }),
       ...buildWanRemoteAccessCliLines(
         params.wanRemoteAccess,
@@ -1383,13 +1397,13 @@ export function generateTr069ProfileOltCliScript(params: {
   const tcont = params.tcontProfile || 'SMARTOLT-VOIPMNG-10M';
   const traffic = params.trafficProfile || 'SMARTOLT-VOIPMNG-10M';
   const lines: string[] = [
-    `! TR-069 CWMP + VoIP Management Profile (${cleanProfName}) — VLAN ${vid} (No Internet Push)`,
+    `! TR-069 CWMP Management Profile (${cleanProfName}) — VLAN ${vid} (Service List: TR069 ONLY, No Internet)`,
     `configure terminal`,
     `vlan database`,
     `  vlan ${vid}`,
     `exit`,
     `vlan ${vid}`,
-    `  name MGMT_TR069_VOIP`,
+    `  name MGMT_TR069_ONLY`,
     `exit`,
     `gpon`,
     `  profile tcont ${tcont} type 5 fixed 512 assured 1024 maximum 11264`,
@@ -1408,8 +1422,7 @@ export function generateTr069ProfileOltCliScript(params: {
     }
   }
   lines.push(
-    `! Template pon-onu-mng untuk ONU VLAN Mgmt ${vid} (TR-069 & VoIP Only):`,
-    `!   voip protocol sip`,
+    `! Template pon-onu-mng untuk ONU VLAN Mgmt ${vid} (Service List: TR069 ONLY, Tanpa Internet / Tanpa VEIP):`,
     `!   tr069-mgmt 1 state unlock`,
     `!   tr069-mgmt 1 acs ${params.acsUrl} validate basic username ${params.acsUsername} password ${params.acsPassword}`,
     `!   tr069-mgmt 1 tag pri ${pri} vlan ${vid}`,
@@ -1421,49 +1434,89 @@ export function generateTr069ProfileOltCliScript(params: {
 
 /**
  * 6c. GENERATOR CLI KHUSUS MODAL "Update attached VLANs" (Multi-VLAN Tanpa Mengubah Setting WAN / PPPoE)
+ * Jika VLAN sudah ada di ONU (`existingVlanIds`), maka VLAN tersebut TIDAK akan di-push ulang.
  */
 export function generateUpdateAttachedVlansCliScript(params: {
   ponInterface: string;
   onuIndex: number;
   attachedVlanIds: number[];
+  existingVlanIds?: number[];
+  mgmtVlanId?: number | null;
 }): string {
   const coords = params.ponInterface.replace(/^gpon-olt_/i, '');
   const onuIf = `gpon-onu_${coords}:${params.onuIndex}`;
+  const mgmtVid = params.mgmtVlanId && params.mgmtVlanId > 0 ? params.mgmtVlanId : null;
+
   const uniqueVlans = Array.from(
-    new Set(params.attachedVlanIds.filter((v) => Number.isFinite(v) && v > 0))
+    new Set(
+      params.attachedVlanIds.filter(
+        (v) => Number.isFinite(v) && v > 0 && v !== mgmtVid
+      )
+    )
   );
-  const vlans = uniqueVlans.length > 0 ? uniqueVlans : [101];
-  const primaryVlan = vlans[0];
-  const extraVlans = vlans.slice(1);
+  const existingSet = new Set(
+    (params.existingVlanIds || []).filter(
+      (v) => Number.isFinite(v) && v > 0 && v !== mgmtVid
+    )
+  );
+
+  // Filter hanya VLAN yang BELUM ada di ONU agar VLAN yang sudah ada di ONU tidak di-push ulang
+  const addedVlans = uniqueVlans.filter((v) => !existingSet.has(v));
+  const removedVlans = Array.from(existingSet).filter(
+    (v) => !uniqueVlans.includes(v)
+  );
+
+  // Jika semua VLAN yang dipilih sudah ada di ONU dan tidak ada penghapusan, jangan push config!
+  if (addedVlans.length === 0 && removedVlans.length === 0) {
+    return '';
+  }
 
   const lines: string[] = [
-    `! Update Attached VLANs (${vlans.join(', ')}) — Tanpa Mengubah Setting WAN PPPoE`,
+    `! Update Attached VLANs — Hanya push VLAN baru (${addedVlans.join(', ') || 'none'}), lewati VLAN yang sudah ada di ONU (${Array.from(existingSet).join(', ') || 'none'})`,
     `configure terminal`,
     `interface ${onuIf}`,
-    `  service-port 1 vport 1 user-vlan ${primaryVlan} vlan ${primaryVlan}`,
   ];
 
-  extraVlans.forEach((vid, idx) => {
-    const spId = idx + 3; // Gunakan service-port 3+ agar service-port 2 (TR069/Mgmt) tidak terganggu
-    lines.push(`  service-port ${spId} vport 1 user-vlan ${vid} vlan ${vid}`);
+  // Hitung nomor service-port untuk VLAN tambahan (mulai dari 3 agar service-port 1 WAN & service-port 2 TR069 tidak tersentuh)
+  const keptExistingCount = Array.from(existingSet).filter((v) =>
+    uniqueVlans.includes(v)
+  ).length;
+
+  addedVlans.forEach((vid, idx) => {
+    if (existingSet.size === 0 && idx === 0) {
+      lines.push(`  service-port 1 vport 1 user-vlan ${vid} vlan ${vid}`);
+    } else {
+      const spId = Math.max(3, keptExistingCount + idx + 2);
+      lines.push(`  service-port ${spId} vport 1 user-vlan ${vid} vlan ${vid}`);
+    }
   });
 
-  lines.push(
-    `exit`,
-    `pon-onu-mng ${onuIf}`,
-    `  flow mode 1 tag-filter vlan-filter untag-filter discard`
-  );
+  lines.push(`exit`, `pon-onu-mng ${onuIf}`);
 
-  for (const vid of vlans) {
+  if (existingSet.size === 0) {
+    lines.push(`  flow mode 1 tag-filter vlan-filter untag-filter discard`);
+  }
+
+  for (const vid of removedVlans) {
+    lines.push(`  no flow 1 pri 0 vlan ${vid}`);
+  }
+
+  for (const vid of addedVlans) {
     lines.push(`  flow 1 pri 0 vlan ${vid}`);
   }
 
-  lines.push(`  gemport 1 flow 1`, `exit`, `end`, `write`);
+  if (existingSet.size === 0) {
+    lines.push(`  gemport 1 flow 1`);
+  }
+
+  lines.push(`exit`, `end`, `write`);
   return lines.join('\n');
 }
 
 /**
- * 6d. GENERATOR CLI KHUSUS MODAL "Update Management and VoIP IP" (TR069 Profile + Mgmt IP Terpisah dari ONU Mode / Tanpa Edit WAN PPPoE)
+ * 6d. GENERATOR CLI KHUSUS MODAL "Update Management and VoIP IP"
+ * Service List untuk VLAN Mgmt diset `TR069` ONLY (Tanpa Internet / Tanpa VEIP / Tanpa NAT)
+ * serta terpisah dari ONU Mode / Tanpa Edit Setting WAN PPPoE.
  */
 export function generateUpdateMgmtAndTr069CliScript(params: {
   ponInterface: string;
@@ -1492,7 +1545,7 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
   const pri =
     typeof params.priority === 'number' && params.priority >= 0 && params.priority <= 7
       ? params.priority
-      : 2;
+      : 0;
   const tcont = params.tcontProfile || 'SMARTOLT-VOIPMNG-10M';
   const traffic = params.trafficProfile || 'SMARTOLT-VOIPMNG-10M';
   const acsUrl = (params.acsUrl || 'http://10.69.69.1:14501').trim();
@@ -1505,7 +1558,7 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
     (params.tr069Enabled && params.tr069Interface === 'MGMT_IP');
 
   const lines: string[] = [
-    `! Update Management and VoIP IP (${onuIf}) — Tanpa Edit Setting WAN PPPoE`,
+    `! Update Management & TR069 (${onuIf}) — VLAN ${mgmtVlan} Service List: TR069 ONLY (Tanpa Internet & Tanpa Edit WAN PPPoE)`,
     `configure terminal`,
     `interface ${onuIf}`,
   ];
@@ -1522,10 +1575,24 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
     lines.push(`  no service-port 2`);
   }
 
-  lines.push(`exit`, `pon-onu-mng ${onuIf}`);
+  lines.push(
+    `exit`,
+    `pon-onu-mng ${onuIf}`,
+    // Hapus binding lama pada iphost 2 / flow 2 terlebih dahulu agar `TR069_INTERNET` lama terhapus bersih
+    // dan tidak ditolak oleh ONU karena VLAN sudah ada di ONU
+    `  no tr069-mgmt 1`,
+    `  no veip 1 port udp 1232 host 2`,
+    `  no vlan-filter iphost 2`,
+    `  no vlan-filter-mode iphost 2`,
+    `  no ip-host 2`,
+    `  no switchport-bind switch_0/1 iphost 2`,
+    `  no gemport 2 flow 2`,
+    `  no flow 2`
+  );
 
-  if (params.voipSipEnabled !== false && needMgmtServicePort) {
-    lines.push(`  voip protocol sip`);
+  // Pastikan VLAN Mgmt tidak menempel di flow 1 (Internet VEIP) jika berbeda dengan WAN VLAN
+  if (params.wanVlanId && params.wanVlanId !== mgmtVlan) {
+    lines.push(`  no flow 1 pri 0 vlan ${mgmtVlan}`);
   }
 
   if (needMgmtServicePort) {
@@ -1534,40 +1601,14 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
       `  flow mode 2 tag-filter vlan-filter untag-filter discard`,
       `  flow 2 pri ${pri} vlan ${mgmtVlan}`,
       `  gemport 2 flow 2`,
-      `  switchport-bind switch_0/1 iphost 2`
+      `  switchport-bind switch_0/1 iphost 2`,
+      `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
+      `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlan}`
     );
-
-    if (params.mgmtIpMode === 'DHCP') {
-      lines.push(
-        `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
-        `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
-        `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlan}`
-      );
-    } else if (params.mgmtIpMode === 'STATIC_IP') {
-      const ip = (params.mgmtIpAddress || '10.100.3.8').trim();
-      const mask = (params.mgmtSubnetMask || '255.255.0.0').trim();
-      const gw = (params.mgmtGateway || '10.100.0.1').trim();
-      lines.push(
-        `  ip-host 2 ip ${ip} mask ${mask} gateway ${gw}`,
-        `  mgmt-ip onu-ip ${ip} ${mask} ${pri} mgmt-vlan ${mgmtVlan}`,
-        `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
-        `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlan}`
-      );
-    } else {
-      lines.push(
-        `  no ip-host 2`,
-        `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
-        `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlan}`
-      );
-    }
-
-    if (params.voipSipEnabled !== false) {
-      lines.push(`  veip 1 port udp 1232 host 2`);
-    }
-  } else {
-    lines.push(`  no ip-host 2`);
   }
 
+  // Konfigurasi `tr069-mgmt 1` SEBELUM `ip-host 2` dan TANPA `veip 1` agar ZTE ONU membuat
+  // WAN Connection (`omci_ipv4_dhcp_2`) dengan Service List = `TR069` ONLY (Tanpa INTERNET & Tanpa NAT)
   if (params.tr069Enabled) {
     const trTargetVlan =
       params.tr069Interface === 'WAN'
@@ -1579,8 +1620,22 @@ export function generateUpdateMgmtAndTr069CliScript(params: {
       `  tr069-mgmt 1 acs ${acsUrl} validate basic username ${acsUser} password ${acsPass}`,
       `  tr069-mgmt 1 tag pri ${trPri} vlan ${trTargetVlan}`
     );
-  } else {
-    lines.push(`  no tr069-mgmt 1`);
+  }
+
+  if (needMgmtServicePort) {
+    if (params.mgmtIpMode === 'DHCP') {
+      lines.push(
+        `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`
+      );
+    } else if (params.mgmtIpMode === 'STATIC_IP') {
+      const ip = (params.mgmtIpAddress || '10.100.3.8').trim();
+      const mask = (params.mgmtSubnetMask || '255.255.0.0').trim();
+      const gw = (params.mgmtGateway || '10.100.0.1').trim();
+      lines.push(
+        `  ip-host 2 ip ${ip} mask ${mask} gateway ${gw}`,
+        `  mgmt-ip onu-ip ${ip} ${mask} ${pri} mgmt-vlan ${mgmtVlan}`
+      );
+    }
   }
 
   if (params.allowRemoteAccessToMgmtIp) {
@@ -1621,6 +1676,8 @@ export function generateTr069CwmpRpcPreview(params: {
     `  "parameterValues": [`,
     `    ["InternetGatewayDevice.ManagementServer.PeriodicInformEnable", true, "xsd:boolean"],`,
     `    ["InternetGatewayDevice.ManagementServer.PeriodicInformInterval", ${params.periodicInterval}, "xsd:unsignedInt"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANIPConnection.1.X_ZTE-COM_ServiceList", "TR069", "xsd:string"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.2.WANIPConnection.1.NATEnabled", false, "xsd:boolean"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.X_ZTE-COM_WANEponLinkConfig.VLANIDMark", ${params.vlanId}, "xsd:unsignedInt"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Enable", ${params.onuMode === 'Routing' ? 'true' : 'false'}, "xsd:boolean"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.ConnectionType", "${params.onuMode === 'Bridging' ? 'PPPoE_Bridged' : 'IP_Routed'}", "xsd:string"],`,

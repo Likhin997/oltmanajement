@@ -685,16 +685,12 @@ export function buildLiveZteRunningConfig(
     lines.push(`pon-onu-mng gpon-onu_1/3/${o.port}:${o.onu_index}`);
     if (isMgmtOnly) {
       lines.push(
-        `  voip protocol sip`,
         `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
         `  flow 1 pri ${pri} vlan ${vlanNum}`,
         `  gemport 1 flow 1`,
         `  switchport-bind switch_0/1 iphost 1`,
-        `  switchport-bind switch_0/1 veip 1`,
-        `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`,
         `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
-        `  vlan-filter iphost 1 pri ${pri} vlan ${vlanNum}`,
-        `  veip 1 port udp 1232 host 1`
+        `  vlan-filter iphost 1 pri ${pri} vlan ${vlanNum}`
       );
       if (trProfile) {
         lines.push(
@@ -703,6 +699,9 @@ export function buildLiveZteRunningConfig(
           `  tr069-mgmt 1 tag pri ${pri} vlan ${vlanNum}`
         );
       }
+      lines.push(
+        `  ip-host 1 dhcp-enable enable ping-response enable traceroute-response enable`
+      );
     } else {
       lines.push(
         `  flow mode 1 tag-filter vlan-filter untag-filter discard`,
@@ -732,12 +731,12 @@ export function buildLiveZteRunningConfig(
           `  flow 2 pri ${pri} vlan ${mgmtVlanNum}`,
           `  gemport 2 flow 2`,
           `  switchport-bind switch_0/1 iphost 2`,
-          `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`,
           `  vlan-filter-mode iphost 2 tag-filter vlan-filter untag-filter discard`,
           `  vlan-filter iphost 2 pri ${pri} vlan ${mgmtVlanNum}`,
           `  tr069-mgmt 1 state unlock`,
           `  tr069-mgmt 1 acs ${trProfile.acs_url} validate basic username ${trProfile.acs_username} password ${trProfile.acs_password}`,
-          `  tr069-mgmt 1 tag pri ${pri} vlan ${mgmtVlanNum}`
+          `  tr069-mgmt 1 tag pri ${pri} vlan ${mgmtVlanNum}`,
+          `  ip-host 2 dhcp-enable enable ping-response enable traceroute-response enable`
         );
       }
     }

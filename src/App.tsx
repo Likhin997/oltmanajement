@@ -387,8 +387,11 @@ export default function App() {
           Date.now() - lastUserMutationAtRef.current > 5000 &&
           data &&
           data.state &&
-          Array.isArray(data.state.onus) &&
-          data.state.onus.length > db.onus.length
+          ((Array.isArray(data.state.olts) && data.state.olts.length > db.olts.length) ||
+            (Array.isArray(data.state.onus) && data.state.onus.length > db.onus.length) ||
+            (Array.isArray(data.state.odbs) && data.state.odbs.length > db.odbs.length) ||
+            (Array.isArray(data.state.sectors) &&
+              data.state.sectors.length > (db.sectors?.length || 0)))
         ) {
           skipNextServerSyncRef.current = true;
           setDb((prev) => mergeLiveOltStatePreservingUserMetadata(prev, data.state));

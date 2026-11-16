@@ -766,7 +766,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
 
     const cli = isOnuMgmtOnly
       ? [
-          `! VLAN Mgmt ${effectiveMgmtVlan}: TR-069 & VoIP Only (Tanpa Push Internet)`,
+          `! VLAN Mgmt ${effectiveMgmtVlan}: Service List TR069 ONLY (Tanpa Internet / Tanpa VEIP / Tanpa NAT)`,
           `configure terminal`,
           `interface ${onuInterface}`,
           `  tcont 1 profile ${mgmtTcont}`,
@@ -786,7 +786,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             vlanId: effectiveMgmtVlan,
             priority: tr069Pri,
             usePrimaryFlow: true,
-            voipSipEnabled: true,
+            voipSipEnabled: false,
           }),
           `exit`,
           `end`,
@@ -810,7 +810,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             vlanId: effectiveMgmtVlan,
             priority: tr069Pri,
             usePrimaryFlow: false,
-            voipSipEnabled: voipEnabled,
+            voipSipEnabled: false,
           }),
           `exit`,
           `end`,
@@ -2993,10 +2993,17 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             )}
 
             {activeEditDialog === 'ATTACHED_VLANS' && (() => {
-              const oltVlanList =
+              const allOltVlans =
                 db.vlans.filter((v) => v.olt_id === olt.id).length > 0
                   ? db.vlans.filter((v) => v.olt_id === olt.id)
                   : db.vlans;
+              // Kecualikan VLAN Mgmt (100 - TR069) dari daftar Attached VLANs user/internet agar VLAN Mgmt tetap murni TR069 ONLY
+              const oltVlanList = allOltVlans.filter(
+                (v) =>
+                  !v.used_for_mgmt_tr069_voip &&
+                  v.service_type !== 'TR069_MGMT' &&
+                  v.vlan_id !== effectiveMgmtVlan
+              );
               const filteredVlans = oltVlanList.filter((v) => {
                 if (!attachedVlanSearch.trim()) return true;
                 const q = attachedVlanSearch.trim().toLowerCase();
@@ -3015,7 +3022,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 selectedAttachedVlans.length > 0
                   ? selectedAttachedVlans
                       .map((vid) => {
-                        const match = oltVlanList.find((v) => v.vlan_id === vid);
+                        const match = allOltVlans.find((v) => v.vlan_id === vid);
                         return match
                           ? `${vid} - ${match.name || match.description}`
                           : `${vid}`;
@@ -3027,19 +3034,37 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
-                    const finalVlans =
+                    const finalVlans = (
                       selectedAttachedVlans.length > 0
                         ? selectedAttachedVlans
-                        : [vlan?.vlan_id || 101];
+                        : [vlan?.vlan_id || 101]
+                    ).filter((vid) => vid !== effectiveMgmtVlan);
+
                     const cli = generateUpdateAttachedVlansCliScript({
                       ponInterface: `gpon-olt_1/${onu.board}/${onu.port}`,
                       onuIndex: onu.onu_index || 1,
                       attachedVlanIds: finalVlans,
+                      existingVlanIds: currentAttachedVlanIds,
+                      mgmtVlanId: effectiveMgmtVlan,
                     });
-                    const primaryVlanObj = oltVlanList.find(
+                    const primaryVlanObj = allOltVlans.find(
                       (v) => v.vlan_id === finalVlans[0]
                     );
                     setActiveEditDialog(null);
+
+                    // Jika VLAN sudah ada di ONU (`cli` kosong), jangan push config ke OLT!
+                    if (!cli.trim()) {
+                      setActiveConsoleOutput({
+                        title: `Skip Push Config (VLAN Sudah Ada di ONU) — ${onuInterface}`,
+                        content: `[SKIP PUSH CONFIG] VLAN (${finalVlans.join(
+                          ', '
+                        )}) sudah terpasang di ONU ${onuInterface} (${
+                          onu.serial_number
+                        }).\nSistem tidak melakukan push config ulang ke OLT/ONU agar sesi WAN & TR-069 ACS tidak terganggu.`,
+                      });
+                      return;
+                    }
+
                     void executeAndDisplayLivePush(
                       'RESYNC_CONFIG',
                       cli,
@@ -3238,7 +3263,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                         selectedProf?.tcont_profile || 'SMARTOLT-VOIPMNG-10M',
                       trafficProfile:
                         selectedProf?.traffic_profile || 'SMARTOLT-VOIPMNG-10M',
-                      voipSipEnabled: selectedProf?.voip_enabled !== false,
+                      voipSipEnabled: false,
                     });
 
                     setActiveEditDialog(null);
