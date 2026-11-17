@@ -12,6 +12,7 @@ import {
 import {
   generateUplinkConfigCliScript,
   generateCreateVlanCliScript,
+  isNatExcludedVlanName,
 } from '../services/oltEngine';
 import { PrtgTrafficGraph, PrtgTrafficSeries } from './PrtgTrafficGraph';
 import {
@@ -36,8 +37,6 @@ import {
   Check,
   Copy,
   RefreshCw,
-  Sliders,
-  Download,
 } from 'lucide-react';
 
 export type OltDetailTab =
@@ -69,6 +68,7 @@ interface OltDetailViewProps {
       | 'used_for_iptv'
       | 'dhcp_snooping'
       | 'lan_to_lan'
+      | 'enable_nat'
   ) => void;
   onDeleteVlans: (vlanRecordIds: number[]) => void;
   onUpdateUplinkPort: (
@@ -272,6 +272,7 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
   const [newVlanDhcpSnooping, setNewVlanDhcpSnooping] =
     useState<boolean>(false);
   const [newVlanLanToLan, setNewVlanLanToLan] = useState<boolean>(false);
+  const [newVlanEnableNat, setNewVlanEnableNat] = useState<boolean>(true);
   const [newVlanSelectedUplinkIds, setNewVlanSelectedUplinkIds] = useState<
     number[]
   >([3]); // Default gei_1/19/3 checked!
@@ -471,6 +472,7 @@ Rack Shelf Slot CfgType RealType Port   HardVer SoftVer         Status
       used_for_iptv: newVlanIptv,
       dhcp_snooping: newVlanDhcpSnooping,
       lan_to_lan: newVlanLanToLan,
+      enable_nat: newVlanEnableNat,
       onus_count: 0,
       service_type: newVlanTr069
         ? 'TR069_MGMT'
@@ -1762,6 +1764,7 @@ ${oltVlans
                   <th className="px-4 py-3">Used for IPTV</th>
                   <th className="px-4 py-3">DHCP Snooping</th>
                   <th className="px-4 py-3">LAN to LAN</th>
+                  <th className="px-4 py-3">Enable NAT</th>
                   <th className="px-4 py-3">Tagged on Uplink</th>
                   <th className="px-4 py-3">ONUs</th>
                   <th className="px-4 py-3">Action</th>
@@ -1774,6 +1777,12 @@ ${oltVlans
                       parseTaggedVlanNumbers(u.tagged_vlans).includes(v.vlan_id)
                     )
                     .map((u) => u.name);
+                  const isVlanNatEnabled =
+                    typeof v.enable_nat === 'boolean'
+                      ? v.enable_nat
+                      : !v.used_for_mgmt_tr069_voip &&
+                        v.service_type !== 'TR069_MGMT' &&
+                        !isNatExcludedVlanName(v.name || v.description);
 
                   return (
                     <tr key={v.id} className="hover:bg-[#132842]/50">
@@ -1825,6 +1834,22 @@ ${oltVlans
                           onChange={() => onToggleVlanFlag(v.id, 'lan_to_lan')}
                           className="h-4 w-4 rounded accent-sky-500"
                         />
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={isVlanNatEnabled}
+                            onChange={() => onToggleVlanFlag(v.id, 'enable_nat')}
+                            title="Centang untuk menyertakan perintah `nat` pada skrip CLI ONU untuk VLAN ini (hapus centang untuk VLAN non-NAT seperti MJMT)"
+                            className="h-4 w-4 rounded accent-emerald-500"
+                          />
+                          {!isVlanNatEnabled && (
+                            <span className="rounded border border-slate-600 bg-slate-800/90 px-1.5 py-0.5 text-[10px] font-semibold text-slate-300">
+                              No NAT
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-4 py-3 font-mono text-[11px]">
                         {taggedUplinkNames.length > 0 ? (
@@ -2360,8 +2385,14 @@ ${oltVlans
                     type="text"
                     required
                     value={newVlanDesc}
-                    onChange={(e) => setNewVlanDesc(e.target.value)}
-                    placeholder="e.g. PPOE / HOTSPOT"
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setNewVlanDesc(val);
+                      if (isNatExcludedVlanName(val)) {
+                        setNewVlanEnableNat(false);
+                      }
+                    }}
+                    placeholder="e.g. PPOE / HOTSPOT / MJMT"
                     className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-2 text-white"
                   />
                 </div>
@@ -2388,7 +2419,11 @@ ${oltVlans
                   <input
                     type="checkbox"
                     checked={newVlanTr069}
-                    onChange={(e) => setNewVlanTr069(e.target.checked)}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setNewVlanTr069(checked);
+                      if (checked) setNewVlanEnableNat(false);
+                    }}
                   />
                   Used for Mgmt/TR069/VoIP
                 </label>
@@ -2415,6 +2450,15 @@ ${oltVlans
                     onChange={(e) => setNewVlanLanToLan(e.target.checked)}
                   />
                   LAN to LAN
+                </label>
+                <label className="col-span-2 flex items-center gap-2 border-t border-slate-800 pt-2 text-emerald-300 font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={newVlanEnableNat}
+                    onChange={(e) => setNewVlanEnableNat(e.target.checked)}
+                    className="accent-emerald-500"
+                  />
+                  Enable NAT (Hapus centang untuk mengecualikan perintah `nat` / `ip nat`, mis. VLAN MJMT)
                 </label>
               </div>
 

@@ -108,6 +108,7 @@ export interface VlanRecord {
   used_for_iptv: boolean;
   dhcp_snooping: boolean;
   lan_to_lan: boolean;
+  enable_nat?: boolean;
   onus_count: number;
   service_type: 'PPPOE' | 'HOTSPOT_BRIDGE' | 'DHCP' | 'TR069_MGMT' | 'IPTV';
   svlan_id: number | null;
@@ -249,6 +250,7 @@ export interface OnuRecord {
   static_subnet_mask?: string | null;
   static_gateway?: string | null;
   static_dns1?: string | null;
+  enable_nat?: boolean;
   hotspot_bridge_vlan: number | null;
   admin_state: 'ENABLED' | 'DISABLED';
   phase_state:
@@ -340,7 +342,8 @@ export const DEFAULT_APP_USERS: AppUserRecord[] = [
     username: 'likhin',
     full_name: 'Mohammad Muslikhin (Admin)',
     email: 'mohammadmuslikhin97@gmail.com',
-    password: '11013009',
+    // Password asli diverifikasi & di-hash (scrypt) hanya di server.ts (tidak dikirim ke bundle browser)
+    password: '••••••••',
     role: 'ADMIN',
     is_active: true,
     access_all_olts: true,
@@ -708,11 +711,22 @@ export function buildLiveZteRunningConfig(
       if (o.hotspot_bridge_vlan) {
         lines.push(`  flow 1 pri 0 vlan ${o.hotspot_bridge_vlan}`);
       }
+      const isNatEnabled =
+        typeof o.enable_nat === 'boolean'
+          ? o.enable_nat
+          : typeof vlObj?.enable_nat === 'boolean'
+          ? vlObj.enable_nat
+          : !/(?:^|[^A-Z0-9])(MJMT|MGMT|TR069|MANAGEMENT)(?:[^A-Z0-9]|$)/i.test(
+              vlObj?.name || vlObj?.description || ''
+            );
+      const pppoeCmd = isNatEnabled
+        ? `  pppoe 1 nat enable user ${o.pppoe_username || o.customer_name || 'USER'} password ${o.pppoe_password || 'jetcyber'}`
+        : `  pppoe 1 user ${o.pppoe_username || o.customer_name || 'USER'} password ${o.pppoe_password || 'jetcyber'}`;
       lines.push(
         `  gemport 1 flow 1`,
         `  switchport-bind switch_0/1 iphost 1`,
         `  switchport-bind switch_0/1 veip 1`,
-        `  pppoe 1 nat enable user ${o.pppoe_username || o.customer_name || 'USER'} password ${o.pppoe_password || 'jetcyber'}`,
+        pppoeCmd,
         `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
         `  vlan-filter iphost 1 pri 0 vlan ${vlanNum}`
       );

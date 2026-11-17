@@ -19,11 +19,11 @@ export const PRODUCTION_CODE_MODULES: CodeModuleFile[] = [
     fileName: 'docker-compose.yml',
     language: 'bash',
     description:
-      'Docker Compose: SmartOLT Web (Port 3004) + Container PostgreSQL Terpisah di localhost:5435 (user: likhin, pass: 11013009)',
+      'Docker Compose: SmartOLT Web (Port 3004) + Container PostgreSQL Terpisah di localhost:5435 (gunakan env PG_PASSWORD)',
     code: `# File: docker-compose.yml
 # Membuat container PostgreSQL TERPISAH (jetcybernet-smartolt-postgres) di port 5435
 # agar tidak bentrok dengan PostgreSQL (5432) yang sudah ada di Docker Anda.
-# Bisa diakses dari localhost:5435 dengan user: likhin & pass: 11013009.
+# Set PG_PASSWORD di file .env sebelum menjalankan docker compose up -d.
 
 services:
   smartolt-postgres:
@@ -32,7 +32,7 @@ services:
     restart: unless-stopped
     environment:
       - POSTGRES_USER=likhin
-      - POSTGRES_PASSWORD=11013009
+      - POSTGRES_PASSWORD=\${PG_PASSWORD:-CHANGE_ME_STRONG_PASSWORD}
       - POSTGRES_DB=smartolt_db
       - PGPORT=5435
     ports:
@@ -65,7 +65,7 @@ services:
       - PG_HOST=localhost
       - PG_PORT=5435
       - PG_USER=likhin
-      - PG_PASSWORD=11013009
+      - PG_PASSWORD=\${PG_PASSWORD:-CHANGE_ME_STRONG_PASSWORD}
       - PG_DATABASE=smartolt_db
       - SQLITE_PATH=/app/data/smartolt_live.sqlite
     volumes:
@@ -105,7 +105,6 @@ ENV PORT=3004
 ENV PG_HOST=localhost
 ENV PG_PORT=5435
 ENV PG_USER=likhin
-ENV PG_PASSWORD=11013009
 ENV PG_DATABASE=smartolt_db
 
 EXPOSE 3004
@@ -250,7 +249,7 @@ export const pgConfig = {
   host: process.env.PG_HOST || 'localhost',
   port: Number(process.env.PG_PORT || 5435), // Default 5432 diubah angka belakang jadi 5 -> 5435
   user: process.env.PG_USER || 'likhin',
-  password: process.env.PG_PASSWORD || '11013009',
+  password: process.env.PG_PASSWORD || '',
   database: process.env.PG_DATABASE || 'smartolt_db',
 };
 

@@ -79,9 +79,48 @@ export interface CliProvisioningParams {
   tr069TcontProfile?: string;
   tr069TrafficProfile?: string;
   mgmtOnlyNoInternet?: boolean;
+  enableNat?: boolean;
+  vlanName?: string;
   wifiSsid?: string;
   wifiPassword?: string;
   voipSipEnabled?: boolean;
+}
+
+/**
+ * Deteksi apakah nama/deskripsi VLAN termasuk VLAN management/non-NAT (misal: MJMT, MGMT, TR069)
+ * sehingga secara default perintah `nat` / `ip nat` dikecualikan dari skrip CLI.
+ */
+export function isNatExcludedVlanName(nameOrDesc?: string | null): boolean {
+  const raw = String(nameOrDesc || '').trim().toUpperCase();
+  if (!raw) return false;
+  return /(?:^|[^A-Z0-9])(MJMT|MGMT|TR069|MANAGEMENT)(?:[^A-Z0-9]|$)/.test(raw);
+}
+
+/**
+ * Resolusi status efektif Enable NAT untuk pembentukan skrip CLI OLT.
+ */
+export function resolveEffectiveEnableNat(params: {
+  enableNat?: boolean;
+  vlanEnableNat?: boolean;
+  vlanName?: string | null;
+  isMgmtOnly?: boolean;
+}): boolean {
+  if (params.isMgmtOnly) return false;
+  if (typeof params.enableNat === 'boolean') return params.enableNat;
+  if (typeof params.vlanEnableNat === 'boolean') return params.vlanEnableNat;
+  if (isNatExcludedVlanName(params.vlanName)) return false;
+  return true;
+}
+
+/**
+ * Hapus seluruh token `nat enable` dan perintah `ip nat` / `nat` saat checkbox Enable NAT tidak dicentang.
+ */
+export function stripNatCommandsFromCliLines(lines: string[]): string[] {
+  return lines
+    .filter((line) => !/^\s*(?:no\s+)?(?:ip\s+)?nat\b/i.test(line))
+    .map((line) =>
+      line.replace(/\b(pppoe(?:\s+\d+)?)\s+nat\s+enable\b/gi, '$1')
+    );
 }
 
 /**
@@ -1005,6 +1044,11 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
       : 'SMARTOLT-1G-DOWN';
 
   const isMgmtOnly = Boolean(params.mgmtOnlyNoInternet);
+  const effectiveEnableNat = resolveEffectiveEnableNat({
+    enableNat: params.enableNat,
+    vlanName: params.vlanName,
+    isMgmtOnly,
+  });
   const mgmtVlanId =
     params.tr069MgmtVlanId && params.tr069MgmtVlanId > 0
       ? params.tr069MgmtVlanId
@@ -1050,7 +1094,7 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
       `end`,
       `write`
     );
-    return lines.join('\n');
+    return (effectiveEnableNat ? lines : stripNatCommandsFromCliLines(lines)).join('\n');
   }
 
   lines.push(`  tcont 1 profile ${tcontUpProfile}`);
@@ -1105,8 +1149,11 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
     const rawUser = params.pppoeUsername ? params.pppoeUsername.trim() : cleanName;
     const user = rawUser.replace(/\s+/g, '-') || cleanName;
     const pass = (params.pppoePassword || 'jetcyber').trim().replace(/\s+/g, '');
+    const pppoeLine = effectiveEnableNat
+      ? `  pppoe 1 nat enable user ${user} password ${pass}`
+      : `  pppoe 1 user ${user} password ${pass}`;
     lines.push(
-      `  pppoe 1 nat enable user ${user} password ${pass}`,
+      pppoeLine,
       `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
       `  vlan-filter iphost 1 pri 0 vlan ${params.vlanId}`
     );
@@ -1162,7 +1209,7 @@ export function generateAuthorizeCliScript(params: CliProvisioningParams): strin
     `write`
   );
 
-  return lines.join('\n');
+  return (effectiveEnableNat ? lines : stripNatCommandsFromCliLines(lines)).join('\n');
 }
 
 /**
@@ -1198,6 +1245,8 @@ export function generateUpdateOnuModeCliScript(params: {
   tr069TrafficProfile?: string;
   voipSipEnabled?: boolean;
   mgmtOnlyNoInternet?: boolean;
+  enableNat?: boolean;
+  vlanName?: string;
   wifiSsid?: string;
   wifiPassword?: string;
 }): string {
@@ -1221,6 +1270,11 @@ export function generateUpdateOnuModeCliScript(params: {
       : 'none';
 
   const isMgmtOnly = Boolean(params.mgmtOnlyNoInternet);
+  const effectiveEnableNat = resolveEffectiveEnableNat({
+    enableNat: params.enableNat,
+    vlanName: params.vlanName,
+    isMgmtOnly,
+  });
   const mgmtVlanId =
     params.tr069MgmtVlanId && params.tr069MgmtVlanId > 0
       ? params.tr069MgmtVlanId
@@ -1274,7 +1328,7 @@ export function generateUpdateOnuModeCliScript(params: {
       `end`,
       `write`
     );
-    return lines.join('\n');
+    return (effectiveEnableNat ? lines : stripNatCommandsFromCliLines(lines)).join('\n');
   }
 
   if (params.rebindTypeAll) {
@@ -1340,8 +1394,11 @@ export function generateUpdateOnuModeCliScript(params: {
       if (!params.rebindTypeAll) {
         lines.push(`  no pppoe 1`);
       }
+      const pppoeLine = effectiveEnableNat
+        ? `  pppoe 1 nat enable user ${user} password ${pass}`
+        : `  pppoe 1 user ${user} password ${pass}`;
       lines.push(
-        `  pppoe 1 nat enable user ${user} password ${pass}`,
+        pppoeLine,
         `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
         `  vlan-filter iphost 1 pri 0 vlan ${params.vlanId}`
       );
@@ -1410,7 +1467,7 @@ export function generateUpdateOnuModeCliScript(params: {
     `write`
   );
 
-  return lines.join('\n');
+  return (effectiveEnableNat ? lines : stripNatCommandsFromCliLines(lines)).join('\n');
 }
 
 /**
@@ -1698,10 +1755,12 @@ export function generateTr069CwmpRpcPreview(params: {
   wanRemoteAccess: WanRemoteAccessOption;
   acsUrl: string;
   periodicInterval: number;
+  enableNat?: boolean;
   wifiSsid?: string;
   wifiPassword?: string;
 }): string {
   const remoteEnableBool = params.wanRemoteAccess === 'Disabled' ? 'false' : 'true';
+  const wanNatBool = params.enableNat === false ? 'false' : 'true';
   const lines = [
     `# [TR-069 CWMP ACS Task — Device ID: OUI-ZTE-${params.serialNumber}]`,
     `POST ${params.acsUrl}/devices/ZTE-${params.serialNumber}/tasks?connection_request`,
@@ -1716,6 +1775,7 @@ export function generateTr069CwmpRpcPreview(params: {
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.X_ZTE-COM_WANEponLinkConfig.VLANIDMark", ${params.vlanId}, "xsd:unsignedInt"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Enable", ${params.onuMode === 'Routing' ? 'true' : 'false'}, "xsd:boolean"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.ConnectionType", "${params.onuMode === 'Bridging' ? 'PPPoE_Bridged' : 'IP_Routed'}", "xsd:string"],`,
+    `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.NATEnabled", ${wanNatBool}, "xsd:boolean"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Username", "${params.pppoeUsername}", "xsd:string"],`,
     `    ["InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANPPPConnection.1.Password", "${params.pppoePassword}", "xsd:string"],`,
     `    ["InternetGatewayDevice.X_ZTE-COM_Security.WanRemoteAccessEnable", ${remoteEnableBool}, "xsd:boolean"],`,
@@ -1768,13 +1828,17 @@ export function generateUpdatePppoeCliScript(
   vlanId: number,
   pppoeUsername: string,
   pppoePassword: string,
-  wanRemoteAccess: WanRemoteAccessOption = 'Enabled from everywhere in the internet'
+  wanRemoteAccess: WanRemoteAccessOption = 'Enabled from everywhere in the internet',
+  enableNat = true
 ): string {
   const coords = ponInterface.replace(/^gpon-olt_/i, '');
   const onuIf = `gpon-onu_${coords}:${onuIndex}`;
   const cleanUser = pppoeUsername.trim().replace(/\s+/g, '-');
   const cleanPass = pppoePassword.trim().replace(/\s+/g, '');
-  return [
+  const pppoeLine = enableNat
+    ? `  pppoe 1 nat enable user ${cleanUser} password ${cleanPass}`
+    : `  pppoe 1 user ${cleanUser} password ${cleanPass}`;
+  const lines = [
     `configure terminal`,
     `interface ${onuIf}`,
     `  tcont 1 profile SMARTOLT-1G-UP`,
@@ -1790,7 +1854,7 @@ export function generateUpdatePppoeCliScript(
     `  switchport-bind switch_0/1 iphost 1`,
     `  switchport-bind switch_0/1 veip 1`,
     `  no pppoe 1`,
-    `  pppoe 1 nat enable user ${cleanUser} password ${cleanPass}`,
+    pppoeLine,
     `  vlan-filter-mode iphost 1 tag-filter vlan-filter untag-filter discard`,
     `  vlan-filter iphost 1 pri 0 vlan ${vlanId}`,
     `  dhcp-ip ethuni eth_0/1 from-onu`,
@@ -1805,7 +1869,8 @@ export function generateUpdatePppoeCliScript(
     `exit`,
     `end`,
     `write`,
-  ].join('\n');
+  ];
+  return (enableNat ? lines : stripNatCommandsFromCliLines(lines)).join('\n');
 }
 
 export function generateDeleteOnuCliScript(ponInterface: string, onuIndex: number): string {
@@ -2056,6 +2121,7 @@ export interface ParsedRunningConfigOnu {
   extraFlowVlans: number[];
   pppoeUsername: string | null;
   pppoePassword: string | null;
+  natEnabled?: boolean;
   tr069Enabled: boolean;
   tr069AcsUrl: string | null;
   tr069VlanId?: number | null;
@@ -2401,12 +2467,17 @@ export function parseZteRunningConfig(rawInputConfig: string): ParsedRunningConf
       onuMap.set(key, existing);
     }
     const body = mb[5];
-    const pppoeMatch = body.match(
+    const pppoeNatMatch = body.match(
       /pppoe(?:\s+\d+)?\s+nat\s+enable\s+user\s+(\S+)\s+password\s+(\S+)/i
-    ) || body.match(/pppoe(?:\s+\d+)?\s+user\s+(\S+)\s+password\s+(\S+)/i);
+    );
+    const pppoeNoNatMatch = body.match(
+      /pppoe(?:\s+\d+)?\s+user\s+(\S+)\s+password\s+(\S+)/i
+    );
+    const pppoeMatch = pppoeNatMatch || pppoeNoNatMatch;
     if (pppoeMatch) {
       existing.pppoeUsername = pppoeMatch[1].trim();
       existing.pppoePassword = pppoeMatch[2].trim();
+      existing.natEnabled = Boolean(pppoeNatMatch);
     }
     const flowRegex = /flow\s+1\s+pri\s+\d+\s+vlan\s+(\d+)/g;
     let fm: RegExpExecArray | null;

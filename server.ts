@@ -40,9 +40,71 @@ import {
 process.env.TZ = 'Asia/Jakarta';
 dotenv.config();
 
+// ============================================================================
+// 0. EXPRESS APP & GLOBAL HTTP SECURITY HARDENING
+// ============================================================================
 const { Pool } = pg;
 const app = express();
+
+// Nonaktifkan header X-Powered-By agar fingerprint framework tidak terekspos
+app.disable('x-powered-by');
 app.use(express.json({ limit: '25mb' }));
+
+// Pasang HTTP Security Headers di semua response tanpa memblokir iframe preview
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  if (req.path.startsWith('/api')) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+  }
+  next();
+});
+
+// Password bootstrap admin disimpan HANYA di server (tidak pernah dibundle ke frontend JS)
+const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_DEFAULT_PASSWORD || '11013009';
+
+/**
+ * Validasi host/IP tujuan agar server tidak rentan terhadap SSRF
+ * ke alamat metadata cloud (169.254.0.0/16), wildcard 0.0.0.0, atau loopback internal.
+ */
+function isBlockedSsrfHost(
+  rawHost: string,
+  options: { allowLoopback?: boolean } = {}
+): boolean {
+  const host = String(rawHost || '').trim().toLowerCase();
+  if (!host || host.length > 253 || !/^[a-z0-9.\-:[\]]+$/.test(host)) {
+    return true;
+  }
+  const cleanHost = host.replace(/^\[|\]$/g, '');
+  if (
+    cleanHost === '0.0.0.0' ||
+    cleanHost === '::' ||
+    cleanHost === 'metadata.google.internal' ||
+    cleanHost === 'metadata' ||
+    cleanHost.startsWith('169.254.') ||
+    cleanHost.startsWith('fe80:')
+  ) {
+    return true;
+  }
+  if (!options.allowLoopback) {
+    if (
+      cleanHost === 'localhost' ||
+      cleanHost === '::1' ||
+      cleanHost.startsWith('127.')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isValidTcpPort(port: unknown): boolean {
+  const num = Number(port);
+  return Number.isInteger(num) && num >= 1 && num <= 65535;
+}
 
 // ============================================================================
 // 1. POSTGRESQL CONNECTION CONFIG (Default: localhost:5435, user: likhin)
@@ -777,106 +839,110 @@ async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
         `SELECT json_payload FROM smartolt_relational_store WHERE store_key = 'MAIN_STATE' LIMIT 1`
       );
       if (res.rows.length > 0 && res.rows[0].json_payload) {
-        const parsed = JSON.parse(res.rows[0].json_payload) as SmartOltDatabaseState;
-        if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
-          parsed.users = DEFAULT_APP_USERS;
-        }
-        // Reconcile zones, sectors, odbs, and ONUs from SQLite cache if SQLite has newer/more records
-        if (sqliteState) {
-          parsed.zones = mergeCollectionById(sqliteState.zones, parsed.zones);
-          parsed.sectors = mergeCollectionById(sqliteState.sectors, parsed.sectors);
-          parsed.odbs = mergeCollectionById(sqliteState.odbs, parsed.odbs);
-          if (Array.isArray(sqliteState.onus)) {
-            const sqliteOnuById = new Map(sqliteState.onus.map((u) => [u.id, u]));
-            parsed.onus = parsed.onus.map((pu) => {
-              const su = sqliteOnuById.get(pu.id);
-              if (!su) return pu;
-              return {
-                ...pu,
-                zone_id: su.zone_id ?? pu.zone_id ?? null,
-                sector_id: su.sector_id ?? pu.sector_id ?? null,
-                odb_id: su.odb_id ?? pu.odb_id ?? null,
-                odb_port: su.odb_port ?? pu.odb_port ?? null,
-                customer_name:
-                  su.customer_name && !su.customer_name.startsWith('ONU-')
-                    ? su.customer_name
-                    : pu.customer_name,
-                address:
-                  su.address && su.address !== 'none'
-                    ? su.address
-                    : pu.address,
-                contact:
-                  su.contact && su.contact !== 'None'
-                    ? su.contact
-                    : pu.contact,
-              };
-            });
-            const existingKeys = new Set(
-              parsed.onus.map((u) => `${u.olt_id}:${u.board}:${u.port}:${u.onu_index ?? u.serial_number}`)
-            );
-            for (const su of sqliteState.onus) {
-              const k = `${su.olt_id}:${su.board}:${su.port}:${su.onu_index ?? su.serial_number}`;
-              if (!existingKeys.has(k)) {
-                existingKeys.add(k);
-                parsed.onus.push(su);
-              }
+      const parsed = JSON.parse(res.rows[0].json_payload) as SmartOltDatabaseState;
+      parsed.users = bootstrapAndHashUsers(parsed.users);
+      // Reconcile zones, sectors, odbs, and ONUs from SQLite cache if SQLite has newer/more records
+      if (sqliteState) {
+        parsed.zones = mergeCollectionById(sqliteState.zones, parsed.zones);
+        parsed.sectors = mergeCollectionById(sqliteState.sectors, parsed.sectors);
+        parsed.odbs = mergeCollectionById(sqliteState.odbs, parsed.odbs);
+        if (Array.isArray(sqliteState.onus)) {
+          const sqliteOnuById = new Map(sqliteState.onus.map((u) => [u.id, u]));
+          parsed.onus = parsed.onus.map((pu) => {
+            const su = sqliteOnuById.get(pu.id);
+            if (!su) return pu;
+            return {
+              ...pu,
+              zone_id: su.zone_id ?? pu.zone_id ?? null,
+              sector_id: su.sector_id ?? pu.sector_id ?? null,
+              odb_id: su.odb_id ?? pu.odb_id ?? null,
+              odb_port: su.odb_port ?? pu.odb_port ?? null,
+              customer_name:
+                su.customer_name && !su.customer_name.startsWith('ONU-')
+                  ? su.customer_name
+                  : pu.customer_name,
+              address:
+                su.address && su.address !== 'none'
+                  ? su.address
+                  : pu.address,
+              contact:
+                su.contact && su.contact !== 'None'
+                  ? su.contact
+                  : pu.contact,
+            };
+          });
+          const existingKeys = new Set(
+            parsed.onus.map((u) => `${u.olt_id}:${u.board}:${u.port}:${u.onu_index ?? u.serial_number}`)
+          );
+          for (const su of sqliteState.onus) {
+            const k = `${su.olt_id}:${su.board}:${su.port}:${su.onu_index ?? su.serial_number}`;
+            if (!existingKeys.has(k)) {
+              existingKeys.add(k);
+              parsed.onus.push(su);
             }
           }
         }
-        latestMemoryState = JSON.parse(JSON.stringify(parsed)) as SmartOltDatabaseState;
-        return parsed;
       }
-      if (sqliteState) {
-        if (!Array.isArray(sqliteState.users) || sqliteState.users.length === 0) {
-          sqliteState.users = DEFAULT_APP_USERS;
-        }
-        await saveDatabaseState(sqliteState);
-        return sqliteState;
-      }
-      await saveDatabaseState(INITIAL_DB_STATE);
-      return INITIAL_DB_STATE;
-    } catch (err) {
-      console.warn('[PostgreSQL Load Fallback]:', (err as Error).message);
+      latestMemoryState = JSON.parse(JSON.stringify(parsed)) as SmartOltDatabaseState;
+      return parsed;
     }
+    if (sqliteState) {
+      sqliteState.users = bootstrapAndHashUsers(sqliteState.users);
+      await saveDatabaseState(sqliteState);
+      return sqliteState;
+    }
+    const bootstrappedInitial: SmartOltDatabaseState = {
+      ...INITIAL_DB_STATE,
+      users: bootstrapAndHashUsers(INITIAL_DB_STATE.users),
+    };
+    await saveDatabaseState(bootstrappedInitial);
+    return bootstrappedInitial;
+  } catch (err) {
+    console.warn('[PostgreSQL Load Fallback]:', (err as Error).message);
   }
+}
 
-  if (sqliteState) {
-    if (!Array.isArray(sqliteState.users) || sqliteState.users.length === 0) {
-      sqliteState.users = DEFAULT_APP_USERS;
-    }
-    if (
-      sqliteState.olts.length === 0 &&
-      sqliteState.onus.length === 0 &&
-      fs.existsSync(path.join(dataDir, 'local_preview_seed.json'))
-    ) {
-      try {
-        const seeded = JSON.parse(
-          fs.readFileSync(path.join(dataDir, 'local_preview_seed.json'), 'utf8')
-        ) as SmartOltDatabaseState;
-        await saveDatabaseState(seeded);
-        return seeded;
-      } catch {
-        // ignore seed parse error
-      }
-    }
-    latestMemoryState = JSON.parse(JSON.stringify(sqliteState)) as SmartOltDatabaseState;
-    return sqliteState;
-  }
-
-  if (fs.existsSync(path.join(dataDir, 'local_preview_seed.json'))) {
+if (sqliteState) {
+  sqliteState.users = bootstrapAndHashUsers(sqliteState.users);
+  if (
+    sqliteState.olts.length === 0 &&
+    sqliteState.onus.length === 0 &&
+    fs.existsSync(path.join(dataDir, 'local_preview_seed.json'))
+  ) {
     try {
       const seeded = JSON.parse(
         fs.readFileSync(path.join(dataDir, 'local_preview_seed.json'), 'utf8')
       ) as SmartOltDatabaseState;
+      seeded.users = bootstrapAndHashUsers(seeded.users);
       await saveDatabaseState(seeded);
       return seeded;
     } catch {
       // ignore seed parse error
     }
   }
+  latestMemoryState = JSON.parse(JSON.stringify(sqliteState)) as SmartOltDatabaseState;
+  return sqliteState;
+}
 
-  await saveDatabaseState(INITIAL_DB_STATE);
-  return INITIAL_DB_STATE;
+if (fs.existsSync(path.join(dataDir, 'local_preview_seed.json'))) {
+  try {
+    const seeded = JSON.parse(
+      fs.readFileSync(path.join(dataDir, 'local_preview_seed.json'), 'utf8')
+    ) as SmartOltDatabaseState;
+    seeded.users = bootstrapAndHashUsers(seeded.users);
+    await saveDatabaseState(seeded);
+    return seeded;
+  } catch {
+    // ignore seed parse error
+  }
+}
+
+const bootstrappedDefault: SmartOltDatabaseState = {
+  ...INITIAL_DB_STATE,
+  users: bootstrapAndHashUsers(INITIAL_DB_STATE.users),
+};
+await saveDatabaseState(bootstrappedDefault);
+return bootstrappedDefault;
 }
 
 async function saveDatabaseState(state: SmartOltDatabaseState): Promise<void> {
@@ -1023,7 +1089,10 @@ export function normalizeCliCommandsForExecution(
     );
 
   for (const raw of inputLines) {
-    const line = raw.trim();
+    // Hapus karakter kontrol berbahaya (\x00, ESC, Telnet IAC 0xFF) sebelum dikirim ke socket Telnet
+    const line = raw
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\xff]/g, '')
+      .trim();
     if (!line || line.startsWith('#')) continue;
 
     if (/^(configure\s+terminal|conf\s+t)$/i.test(line)) {
@@ -1857,6 +1926,7 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
           (v.vlanId === 120 || v.vlanId === 140 ? 'HOTSPOT_BRIDGE' : 'PPPOE'),
       svlan_id: prevVlan?.svlan_id ?? null,
       is_default: isMgmt ? false : prevVlan?.is_default ?? (v.vlanId === 101 || v.vlanId === 111),
+      enable_nat: prevVlan?.enable_nat ?? !isMgmtByPattern,
     };
   });
   // Preserve existing VLANs for this OLT if parsed.vlans was partial
@@ -2021,6 +2091,10 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
         prevOnu?.pppoe_password ||
         'jetcyber',
       hotspot_bridge_vlan: o.extraFlowVlans[0] || prevOnu?.hotspot_bridge_vlan || null,
+      enable_nat:
+        prevOnu?.enable_nat ??
+        o.natEnabled ??
+        (matchedVlan ? matchedVlan.enable_nat : true),
       admin_state: liveState ? liveState.adminState : det?.adminState || 'ENABLED',
       phase_state: phaseState,
       onu_rx_dbm: phaseState === 'working' ? liveRxDbm : null,
@@ -2198,12 +2272,14 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
 }
 
 // ============================================================================
-// 3. CRYPTOGRAPHIC SESSION & AUTHENTICATION ENGINE + API GUARD (/api/*)
+// 3. CRYPTOGRAPHIC SESSION, SCRYPT HASHING, RATE LIMIT & RBAC ENGINE (/api/*)
 // ============================================================================
 const SESSION_COOKIE_NAME = 'smartolt_sid';
-const SESSION_TTL_MS = 8 * 3600 * 1000; // 8 hours active session TTL
+const SESSION_TTL_MS = 8 * 3600 * 1000; // 8 jam sliding idle timeout
+const SESSION_MAX_LIFETIME_MS = 24 * 3600 * 1000; // 24 jam batas absolut umur sesi
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
-const LOGIN_LOCKOUT_MS = 60 * 1000; // 60-second lockout after 5 failed attempts
+const LOGIN_LOCKOUT_MS = 60 * 1000; // 60 detik penguncian setelah 5x gagal login
+const MASKED_SECRET = '••••••••';
 
 interface LoginAttemptRecord {
   count: number;
@@ -2211,16 +2287,90 @@ interface LoginAttemptRecord {
   lockedUntil: number;
 }
 
-const loginAttemptsByIp = new Map<string, LoginAttemptRecord>();
+const loginAttemptsByKey = new Map<string, LoginAttemptRecord>();
+const apiRateLimitsByKey = new Map<string, { count: number; windowStart: number }>();
 
 function hashSessionToken(rawToken: string): string {
   return crypto.createHash('sha256').update(rawToken).digest('hex');
 }
 
+/**
+ * Hash password menggunakan scrypt + random 16-byte salt (`scrypt$<saltHex>$<hashHex>`).
+ */
+function hashPasswordScrypt(plainPassword: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(String(plainPassword), salt, 64).toString('hex');
+  return `scrypt$${salt}$${derived}`;
+}
+
+function isScryptHash(val?: string | null): boolean {
+  return typeof val === 'string' && /^scrypt\$[a-f0-9]{32}\$[a-f0-9]{128}$/i.test(val);
+}
+
+/**
+ * Pastikan seluruh user memiliki hash password scrypt (migrasi otomatis dari placeholder/plaintext).
+ */
+function bootstrapAndHashUsers(rawUsers?: AppUserRecord[]): AppUserRecord[] {
+  const source =
+    Array.isArray(rawUsers) && rawUsers.length > 0 ? rawUsers : DEFAULT_APP_USERS;
+  return source.map((u) => {
+    if (isScryptHash(u.password)) return u;
+    const plain =
+      !u.password || u.password === MASKED_SECRET
+        ? u.id === 1 || u.username.toLowerCase() === 'likhin'
+          ? DEFAULT_ADMIN_PASSWORD
+          : crypto.randomBytes(16).toString('hex')
+        : u.password;
+    return {
+      ...u,
+      password: hashPasswordScrypt(plain),
+    };
+  });
+}
+
+/**
+ * Verifikasi password secara constant-time (mendukung hash scrypt maupun migrasi plaintext lama).
+ */
 function timingSafePasswordEqual(inputPwd: string, storedPwd: string): boolean {
+  if (isScryptHash(storedPwd)) {
+    const [, salt, expectedHex] = storedPwd.split('$');
+    const derived = crypto.scryptSync(String(inputPwd), salt, 64);
+    const expectedBuf = Buffer.from(expectedHex, 'hex');
+    if (derived.length !== expectedBuf.length) return false;
+    return crypto.timingSafeEqual(derived, expectedBuf);
+  }
   const hashA = crypto.createHash('sha256').update(String(inputPwd)).digest();
   const hashB = crypto.createHash('sha256').update(String(storedPwd)).digest();
   return crypto.timingSafeEqual(hashA, hashB);
+}
+
+/**
+ * Rate limiter umum untuk endpoint sensitif (Telnet, Backup, DB Config) per IP socket.
+ */
+function checkApiRateLimit(
+  req: express.Request,
+  bucket: string,
+  maxRequests: number,
+  windowMs: number
+): boolean {
+  const now = Date.now();
+  if (apiRateLimitsByKey.size > 4000) {
+    for (const [k, v] of apiRateLimitsByKey.entries()) {
+      if (now - v.windowStart > windowMs) apiRateLimitsByKey.delete(k);
+    }
+  }
+  const socketIp = req.socket.remoteAddress || 'unknown';
+  const key = `${bucket}:${socketIp}`;
+  const entry = apiRateLimitsByKey.get(key);
+  if (!entry || now - entry.windowStart > windowMs) {
+    apiRateLimitsByKey.set(key, { count: 1, windowStart: now });
+    return true;
+  }
+  if (entry.count >= maxRequests) {
+    return false;
+  }
+  entry.count++;
+  return true;
 }
 
 function parseCookies(cookieHeader?: string): Record<string, string> {
@@ -2231,7 +2381,11 @@ function parseCookies(cookieHeader?: string): Record<string, string> {
     if (idx > 0) {
       const k = part.slice(0, idx).trim();
       const v = part.slice(idx + 1).trim();
-      out[k] = decodeURIComponent(v);
+      try {
+        out[k] = decodeURIComponent(v);
+      } catch {
+        out[k] = v;
+      }
     }
   }
   return out;
@@ -2254,18 +2408,31 @@ function extractSessionToken(req: express.Request): string | null {
   return null;
 }
 
-function setSessionCookie(res: express.Response, rawToken: string): void {
-  const maxAgeSec = Math.floor(SESSION_TTL_MS / 1000);
-  res.setHeader(
-    'Set-Cookie',
-    `${SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAgeSec}`
+function isHttpsRequest(req: express.Request): boolean {
+  return (
+    req.secure ||
+    String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https'
   );
 }
 
-function clearSessionCookie(res: express.Response): void {
+function setSessionCookie(
+  req: express.Request,
+  res: express.Response,
+  rawToken: string
+): void {
+  const maxAgeSec = Math.floor(SESSION_TTL_MS / 1000);
+  const secureAttr = isHttpsRequest(req) ? '; Secure' : '';
   res.setHeader(
     'Set-Cookie',
-    `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAgeSec}${secureAttr}`
+  );
+}
+
+function clearSessionCookie(req: express.Request, res: express.Response): void {
+  const secureAttr = isHttpsRequest(req) ? '; Secure' : '';
+  res.setHeader(
+    'Set-Cookie',
+    `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secureAttr}`
   );
 }
 
@@ -2350,7 +2517,7 @@ async function resolveActiveSessionUser(req: express.Request): Promise<{
     )
     .get(tokenHash, now) as AuthSessionRow | undefined;
 
-  if (!row) {
+  if (!row || now - row.created_at > SESSION_MAX_LIFETIME_MS) {
     sqliteDb
       .prepare(`DELETE FROM auth_sessions WHERE token_hash = ?`)
       .run(tokenHash);
@@ -2358,10 +2525,7 @@ async function resolveActiveSessionUser(req: express.Request): Promise<{
   }
 
   const state = await loadDatabaseState();
-  const users =
-    Array.isArray(state.users) && state.users.length > 0
-      ? state.users
-      : DEFAULT_APP_USERS;
+  const users = bootstrapAndHashUsers(state.users);
   const user = users.find((u) => u.id === row.user_id && u.is_active);
   if (!user) {
     sqliteDb
@@ -2370,7 +2534,10 @@ async function resolveActiveSessionUser(req: express.Request): Promise<{
     return null;
   }
 
-  const nextExpires = now + SESSION_TTL_MS;
+  const nextExpires = Math.min(
+    now + SESSION_TTL_MS,
+    row.created_at + SESSION_MAX_LIFETIME_MS
+  );
   sqliteDb
     .prepare(
       `UPDATE auth_sessions SET last_seen_at = ?, expires_at = ?, role = ?, username = ? WHERE token_hash = ?`
@@ -2385,22 +2552,96 @@ async function resolveActiveSessionUser(req: express.Request): Promise<{
   return { sessionRow: row, user, state };
 }
 
-function sanitizeUserForClient(u: AppUserRecord): Omit<AppUserRecord, 'password'> & { password: string } {
+function sanitizeUserForClient(u: AppUserRecord): AppUserRecord {
   return {
     ...u,
-    password: '••••••••',
+    password: MASKED_SECRET,
+  };
+}
+
+/**
+ * Sanitasi seluruh kredensial sensitif sebelum state dikirim ke browser.
+ * - Password user & hash scrypt SELALU dimasking untuk semua role (termasuk ADMIN).
+ * - Password OLT / SNMP / TR-069 dimasking untuk role non-ADMIN.
+ */
+function sanitizeStateForClient(
+  state: SmartOltDatabaseState,
+  role?: AppUserRecord['role']
+): SmartOltDatabaseState {
+  const isAdmin = role === 'ADMIN';
+  const safeUsers = isAdmin
+    ? (state.users || []).map(sanitizeUserForClient)
+    : [];
+  const safeOlts = isAdmin
+    ? state.olts
+    : (state.olts || []).map((o) => ({
+        ...o,
+        olt_password: MASKED_SECRET,
+        enable_password: MASKED_SECRET,
+        snmp_read_community: MASKED_SECRET,
+        snmp_write_community: MASKED_SECRET,
+      }));
+  const safeTr069 = isAdmin
+    ? state.tr069_profiles
+    : (state.tr069_profiles || []).map((t) => ({
+        ...t,
+        acs_password: MASKED_SECRET,
+        connection_request_password: MASKED_SECRET,
+      }));
+
+  return {
+    ...state,
+    users: safeUsers,
+    olts: safeOlts,
+    tr069_profiles: safeTr069,
+  };
+}
+
+type AuthedRequest = express.Request & {
+  authUser?: AppUserRecord;
+  authSession?: AuthSessionRow;
+};
+
+/**
+ * Middleware helper untuk membatasi akses endpoint berdasarkan role RBAC.
+ */
+function requireRoles(...allowedRoles: AppUserRecord['role'][]) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const authUser = (req as AuthedRequest).authUser;
+    if (!authUser || !allowedRoles.includes(authUser.role)) {
+      res.status(403).json({
+        ok: false,
+        error: `Forbidden: Role ${authUser?.role || 'GUEST'} tidak memiliki izin untuk aksi ini.`,
+      });
+      return;
+    }
+    next();
   };
 }
 
 // POST /api/auth/login — Authenticate user and issue cryptographic session token
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const ip =
-      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
-      req.socket.remoteAddress ||
-      'unknown';
+    // Kunci rate-limit memakai socket IP + username agar spoofing header X-Forwarded-For tidak bisa bypass lockout
+    const socketIp = req.socket.remoteAddress || 'unknown';
+    const { username, password } = (req.body || {}) as {
+      username?: string;
+      password?: string;
+    };
+    const q = String(username || '').trim().toLowerCase();
+    const pwd = String(password || '');
     const now = Date.now();
-    const attempt = loginAttemptsByIp.get(ip);
+
+    if (loginAttemptsByKey.size > 2000) {
+      for (const [k, v] of loginAttemptsByKey.entries()) {
+        if (now - v.firstFailedAt > 5 * 60 * 1000 && v.lockedUntil <= now) {
+          loginAttemptsByKey.delete(k);
+        }
+      }
+    }
+
+    const attemptKey = `${socketIp}:${q || '_'}`;
+    const attempt = loginAttemptsByKey.get(attemptKey);
 
     if (attempt && attempt.lockedUntil > now) {
       const waitSec = Math.ceil((attempt.lockedUntil - now) / 1000);
@@ -2411,13 +2652,6 @@ app.post('/api/auth/login', async (req, res) => {
       return;
     }
 
-    const { username, password } = (req.body || {}) as {
-      username?: string;
-      password?: string;
-    };
-    const q = String(username || '').trim().toLowerCase();
-    const pwd = String(password || '');
-
     if (!q || !pwd) {
       res.status(400).json({
         ok: false,
@@ -2427,10 +2661,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const state = await loadDatabaseState();
-    const users =
-      Array.isArray(state.users) && state.users.length > 0
-        ? state.users
-        : DEFAULT_APP_USERS;
+    const users = bootstrapAndHashUsers(state.users);
 
     const candidate = users.find(
       (u) => u.username.toLowerCase() === q || u.email.toLowerCase() === q
@@ -2448,7 +2679,7 @@ app.post('/api/auth/login', async (req, res) => {
       const nextCount = prev.count + 1;
       const lockedUntil =
         nextCount >= MAX_FAILED_LOGIN_ATTEMPTS ? now + LOGIN_LOCKOUT_MS : 0;
-      loginAttemptsByIp.set(ip, {
+      loginAttemptsByKey.set(attemptKey, {
         count: nextCount >= MAX_FAILED_LOGIN_ATTEMPTS ? 0 : nextCount,
         firstFailedAt: prev.firstFailedAt,
         lockedUntil,
@@ -2473,7 +2704,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     // Clear failed attempts on success
-    loginAttemptsByIp.delete(ip);
+    loginAttemptsByKey.delete(attemptKey);
 
     const jkt = new Date(now + 7 * 3600 * 1000);
     const nowWib = `${jkt.getUTCFullYear()}-${String(
@@ -2484,8 +2715,14 @@ app.post('/api/auth/login', async (req, res) => {
       jkt.getUTCSeconds()
     ).padStart(2, '0')} WIB`;
 
+    // Upgrade otomatis password plaintext lama ke hash scrypt saat login sukses
+    const upgradedPassword = isScryptHash(candidate.password)
+      ? candidate.password
+      : hashPasswordScrypt(pwd);
+
     const updatedUser: AppUserRecord = {
       ...candidate,
+      password: upgradedPassword,
       last_login_at: nowWib,
     };
 
@@ -2499,7 +2736,7 @@ app.post('/api/auth/login', async (req, res) => {
       updatedUser,
       req
     );
-    setSessionCookie(res, rawToken);
+    setSessionCookie(req, res, rawToken);
 
     res.json({
       ok: true,
@@ -2519,7 +2756,7 @@ app.get('/api/auth/session', async (req, res) => {
   try {
     const resolved = await resolveActiveSessionUser(req);
     if (!resolved) {
-      clearSessionCookie(res);
+      clearSessionCookie(req, res);
       res.status(401).json({
         ok: false,
         authenticated: false,
@@ -2550,7 +2787,7 @@ app.post('/api/auth/logout', (req, res) => {
         .prepare(`DELETE FROM auth_sessions WHERE token_hash = ?`)
         .run(tokenHash);
     }
-    clearSessionCookie(res);
+    clearSessionCookie(req, res);
     res.json({ ok: true, authenticated: false });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
@@ -2560,6 +2797,10 @@ app.post('/api/auth/logout', (req, res) => {
 // POST /api/auth/switch-user — Admin-only session switch to preview/impersonate an active user securely
 app.post('/api/auth/switch-user', async (req, res) => {
   try {
+    if (!checkApiRateLimit(req, 'switch-user', 20, 60_000)) {
+      res.status(429).json({ ok: false, error: 'Rate limit switch user tercapai.' });
+      return;
+    }
     const resolved = await resolveActiveSessionUser(req);
     if (!resolved || resolved.user.role !== 'ADMIN') {
       res.status(403).json({
@@ -2570,10 +2811,7 @@ app.post('/api/auth/switch-user', async (req, res) => {
     }
 
     const { targetUserId } = (req.body || {}) as { targetUserId?: number };
-    const users =
-      Array.isArray(resolved.state.users) && resolved.state.users.length > 0
-        ? resolved.state.users
-        : DEFAULT_APP_USERS;
+    const users = bootstrapAndHashUsers(resolved.state.users);
     const targetUser = users.find(
       (u) => u.id === Number(targetUserId) && u.is_active
     );
@@ -2594,7 +2832,7 @@ app.post('/api/auth/switch-user', async (req, res) => {
       targetUser,
       req
     );
-    setSessionCookie(res, rawToken);
+    setSessionCookie(req, res, rawToken);
 
     res.json({
       ok: true,
@@ -2625,7 +2863,7 @@ app.use('/api', async (req, res, next) => {
   try {
     const resolved = await resolveActiveSessionUser(req);
     if (!resolved) {
-      clearSessionCookie(res);
+      clearSessionCookie(req, res);
       res.status(401).json({
         ok: false,
         authenticated: false,
@@ -2633,10 +2871,8 @@ app.use('/api', async (req, res, next) => {
       });
       return;
     }
-    (req as express.Request & { authUser?: AppUserRecord; authSession?: AuthSessionRow }).authUser =
-      resolved.user;
-    (req as express.Request & { authUser?: AppUserRecord; authSession?: AuthSessionRow }).authSession =
-      resolved.sessionRow;
+    (req as AuthedRequest).authUser = resolved.user;
+    (req as AuthedRequest).authSession = resolved.sessionRow;
     next();
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
@@ -2646,7 +2882,7 @@ app.use('/api', async (req, res, next) => {
 // GET /api/state — Load live database state + PostgreSQL connection status
 app.get('/api/state', async (req, res) => {
   try {
-    const authUser = (req as express.Request & { authUser?: AppUserRecord }).authUser;
+    const authUser = (req as AuthedRequest).authUser;
     const state = await loadDatabaseState();
     // Auto-repair any ONU whose pppoe_username or pppoe_password was polluted by OLT Telnet login banner
     let repaired = false;
@@ -2673,18 +2909,18 @@ app.get('/api/state', async (req, res) => {
       await saveDatabaseState(state);
     }
 
-    // Never expose raw user passwords to non-admin accounts
-    const safeUsers =
+    const sanitized = sanitizeStateForClient(state, authUser?.role);
+    const finalUsers =
       authUser?.role === 'ADMIN'
-        ? state.users
-        : (state.users || DEFAULT_APP_USERS)
+        ? sanitized.users
+        : (state.users || [])
             .filter((u) => u.id === authUser?.id)
-            .map((u) => sanitizeUserForClient(u));
+            .map(sanitizeUserForClient);
 
     res.json({
       state: {
-        ...state,
-        users: safeUsers,
+        ...sanitized,
+        users: finalUsers,
       },
       meta: {
         dbEngine: activeDbEngine,
@@ -2704,16 +2940,30 @@ app.get('/api/state', async (req, res) => {
   }
 });
 
-// POST /api/db/config — Test & update PostgreSQL connection (e.g. localhost:5435, user likhin)
-app.post('/api/db/config', async (req, res) => {
+// POST /api/db/config — Admin-only test & update PostgreSQL connection
+app.post('/api/db/config', requireRoles('ADMIN'), async (req, res) => {
   try {
-    const { host, port, user, password, database } = req.body;
+    if (!checkApiRateLimit(req, 'db-config', 10, 60_000)) {
+      res.status(429).json({ ok: false, error: 'Terlalu banyak permintaan konfigurasi DB. Tunggu 1 menit.' });
+      return;
+    }
+    const { host, port, user, password, database } = req.body || {};
+    const targetHost = String(host || currentPgConfig.host || 'localhost').trim();
+    const targetPort = Number(port || currentPgConfig.port || 5435);
+    if (isBlockedSsrfHost(targetHost, { allowLoopback: true }) || !isValidTcpPort(targetPort)) {
+      res.status(400).json({ ok: false, error: 'Host atau port PostgreSQL tidak valid.' });
+      return;
+    }
+
     const nextCfg: PgConnectionConfig = {
-      host: host || currentPgConfig.host || 'localhost',
-      port: Number(port || currentPgConfig.port || 5435),
-      user: user || currentPgConfig.user || 'likhin',
-      password: password ?? currentPgConfig.password ?? '11013009',
-      database: database || currentPgConfig.database || 'smartolt_db',
+      host: targetHost,
+      port: targetPort,
+      user: String(user || currentPgConfig.user || 'likhin').trim(),
+      password:
+        password && password !== MASKED_SECRET
+          ? String(password)
+          : currentPgConfig.password,
+      database: String(database || currentPgConfig.database || 'smartolt_db').trim(),
     };
 
     const result = await initPostgresConnection(nextCfg);
@@ -2744,174 +2994,220 @@ app.post('/api/db/config', async (req, res) => {
 });
 
 // POST /api/state/sync — Persist updated state to PostgreSQL (and SQLite cache)
-// Includes non-destructive ONU merge protection so stale client state never wipes out ONUs synced from OLT
-app.post('/api/state/sync', async (req, res) => {
-  try {
-    const authUser = (req as express.Request & { authUser?: AppUserRecord }).authUser;
-    const nextState = req.body.state as SmartOltDatabaseState;
-    const allowShrink = Boolean(req.body.allowShrink);
-    if (!nextState || !Array.isArray(nextState.olts)) {
-      res.status(400).json({ error: 'Invalid database state payload' });
-      return;
-    }
-
-    const currentDbState = await loadDatabaseState();
-    const existingUsers =
-      Array.isArray(currentDbState.users) && currentDbState.users.length > 0
-        ? currentDbState.users
-        : DEFAULT_APP_USERS;
-
-    // Security enforcement: Only ADMIN can modify user accounts or permissions
-    if (authUser?.role !== 'ADMIN') {
-      nextState.users = existingUsers;
-    } else if (Array.isArray(nextState.users) && nextState.users.length > 0) {
-      // Preserve real passwords if masked placeholder ('••••••••') was sent back
-      nextState.users = nextState.users.map((u) => {
-        const prev = existingUsers.find((eu) => eu.id === u.id);
-        if (prev && (!u.password || u.password === '••••••••')) {
-          return { ...u, password: prev.password };
-        }
-        return u;
-      });
-
-      // Immediately revoke active sessions for any user that was deleted or deactivated!
-      const activeUserIds = new Set(
-        nextState.users.filter((u) => u.is_active).map((u) => u.id)
-      );
-      for (const prevUser of existingUsers) {
-        if (!activeUserIds.has(prevUser.id)) {
-          sqliteDb
-            .prepare(`DELETE FROM auth_sessions WHERE user_id = ?`)
-            .run(prevUser.id);
-        }
+// Includes RBAC, secret preservation, scrypt hashing, and non-destructive ONU merge protection
+app.post(
+  '/api/state/sync',
+  requireRoles('ADMIN', 'OPERATOR', 'TECHNICIAN'),
+  async (req, res) => {
+    try {
+      const authUser = (req as AuthedRequest).authUser;
+      const nextState = req.body.state as SmartOltDatabaseState;
+      const allowShrink = Boolean(req.body.allowShrink);
+      if (!nextState || !Array.isArray(nextState.olts)) {
+        res.status(400).json({ error: 'Invalid database state payload' });
+        return;
       }
-    } else {
-      nextState.users = existingUsers;
-    }
 
-    // Protect OLTs, Zones, Sectors, ODPs, and ONUs from accidental overwrite by a stale frontend state
-    const isExplicitUserMutation = Boolean(req.body.userMutation);
-    if (!allowShrink && !isExplicitUserMutation) {
-      if (nextState.olts.length === 0 && currentDbState.olts.length > 0) {
-        nextState.olts = currentDbState.olts;
-        nextState.olt_cards = mergeCollectionById(
-          nextState.olt_cards,
-          currentDbState.olt_cards
+      const currentDbState = await loadDatabaseState();
+      const existingUsers = bootstrapAndHashUsers(currentDbState.users);
+
+      // Security enforcement: Only ADMIN can modify user accounts, OLT credentials, or TR-069 ACS secrets
+      if (authUser?.role !== 'ADMIN') {
+        nextState.users = existingUsers;
+        nextState.olts = (nextState.olts || []).map((o) => {
+          const prevOlt = currentDbState.olts.find((eo) => eo.id === o.id);
+          if (!prevOlt) return o;
+          return {
+            ...o,
+            olt_password:
+              !o.olt_password || o.olt_password === MASKED_SECRET
+                ? prevOlt.olt_password
+                : o.olt_password,
+            enable_password:
+              !o.enable_password || o.enable_password === MASKED_SECRET
+                ? prevOlt.enable_password
+                : o.enable_password,
+            snmp_read_community:
+              !o.snmp_read_community || o.snmp_read_community === MASKED_SECRET
+                ? prevOlt.snmp_read_community
+                : o.snmp_read_community,
+            snmp_write_community:
+              !o.snmp_write_community || o.snmp_write_community === MASKED_SECRET
+                ? prevOlt.snmp_write_community
+                : o.snmp_write_community,
+          };
+        });
+        nextState.tr069_profiles = currentDbState.tr069_profiles;
+      } else if (Array.isArray(nextState.users) && nextState.users.length > 0) {
+        nextState.users = nextState.users.map((u) => {
+          const prev = existingUsers.find((eu) => eu.id === u.id);
+          if (prev && (!u.password || u.password === MASKED_SECRET)) {
+            return { ...u, password: prev.password };
+          }
+          const finalPwd = isScryptHash(u.password)
+            ? u.password
+            : hashPasswordScrypt(u.password || crypto.randomBytes(12).toString('hex'));
+          // Cabut sesi aktif user jika password diubah oleh Admin
+          if (prev && prev.password !== finalPwd) {
+            sqliteDb
+              .prepare(`DELETE FROM auth_sessions WHERE user_id = ?`)
+              .run(prev.id);
+          }
+          return { ...u, password: finalPwd };
+        });
+
+        // Immediately revoke active sessions for any user that was deleted or deactivated
+        const activeUserIds = new Set(
+          nextState.users.filter((u) => u.is_active).map((u) => u.id)
         );
-        nextState.pon_ports = mergeCollectionById(
-          nextState.pon_ports,
-          currentDbState.pon_ports
-        );
-        nextState.uplink_ports = mergeCollectionById(
-          nextState.uplink_ports,
-          currentDbState.uplink_ports
-        );
-        nextState.vlans = mergeCollectionById(nextState.vlans, currentDbState.vlans);
-        nextState.tr069_profiles = mergeCollectionById(
-          nextState.tr069_profiles,
-          currentDbState.tr069_profiles
-        );
+        for (const prevUser of existingUsers) {
+          if (!activeUserIds.has(prevUser.id)) {
+            sqliteDb
+              .prepare(`DELETE FROM auth_sessions WHERE user_id = ?`)
+              .run(prevUser.id);
+          }
+        }
+      } else {
+        nextState.users = existingUsers;
       }
-      nextState.zones = mergeCollectionById(nextState.zones, currentDbState.zones);
-      nextState.sectors = mergeCollectionById(
-        nextState.sectors,
-        currentDbState.sectors
-      );
-      nextState.odbs = mergeCollectionById(nextState.odbs, currentDbState.odbs);
-    }
 
-    if (!allowShrink) {
-      const activeOltIds = new Set(nextState.olts.map((o) => o.id));
-      const clientOnus = Array.isArray(nextState.onus) ? nextState.onus : [];
-
-      // Upgrade any placeholder `ONU-` SN/Name in clientOnus if currentDbState already has the real SN/Name
-      const dbOnuByCoord = new Map<string, OnuRecord>();
-      for (const dbOnu of currentDbState.onus) {
-        if (dbOnu.onu_index !== null) {
-          dbOnuByCoord.set(
-            `${dbOnu.olt_id}:${dbOnu.board}:${dbOnu.port}:${dbOnu.onu_index}`,
-            dbOnu
+      // Protect OLTs, Zones, Sectors, ODPs, and ONUs from accidental overwrite by a stale frontend state
+      const isExplicitUserMutation = Boolean(req.body.userMutation);
+      if (!allowShrink && !isExplicitUserMutation) {
+        if (nextState.olts.length === 0 && currentDbState.olts.length > 0) {
+          nextState.olts = currentDbState.olts;
+          nextState.olt_cards = mergeCollectionById(
+            nextState.olt_cards,
+            currentDbState.olt_cards
+          );
+          nextState.pon_ports = mergeCollectionById(
+            nextState.pon_ports,
+            currentDbState.pon_ports
+          );
+          nextState.uplink_ports = mergeCollectionById(
+            nextState.uplink_ports,
+            currentDbState.uplink_ports
+          );
+          nextState.vlans = mergeCollectionById(nextState.vlans, currentDbState.vlans);
+          nextState.tr069_profiles = mergeCollectionById(
+            nextState.tr069_profiles,
+            currentDbState.tr069_profiles
           );
         }
-      }
-
-      const upgradedClientOnus = clientOnus.map((co) => {
-        if (co.onu_index === null) return co;
-        const dbMatch = dbOnuByCoord.get(
-          `${co.olt_id}:${co.board}:${co.port}:${co.onu_index}`
+        nextState.zones = mergeCollectionById(nextState.zones, currentDbState.zones);
+        nextState.sectors = mergeCollectionById(
+          nextState.sectors,
+          currentDbState.sectors
         );
-        if (!dbMatch) return co;
-        return {
-          ...co,
-          serial_number:
-            co.serial_number.startsWith('ONU-') &&
-            !dbMatch.serial_number.startsWith('ONU-')
-              ? dbMatch.serial_number
-              : co.serial_number,
-          customer_name:
-            (!co.customer_name || co.customer_name.startsWith('ONU-')) &&
-            dbMatch.customer_name &&
-            !dbMatch.customer_name.startsWith('ONU-')
-              ? dbMatch.customer_name
-              : co.customer_name,
-          zone_id: isExplicitUserMutation
-            ? co.zone_id
-            : co.zone_id ?? dbMatch.zone_id ?? null,
-          sector_id: isExplicitUserMutation
-            ? co.sector_id
-            : co.sector_id ?? dbMatch.sector_id ?? null,
-          odb_id: isExplicitUserMutation
-            ? co.odb_id
-            : co.odb_id ?? dbMatch.odb_id ?? null,
-          odb_port: isExplicitUserMutation
-            ? co.odb_port
-            : co.odb_port ?? dbMatch.odb_port ?? null,
-        };
-      });
-
-      const clientIds = new Set(upgradedClientOnus.map((u) => u.id));
-      const clientCoords = new Set(
-        upgradedClientOnus
-          .filter((u) => u.onu_index !== null)
-          .map((u) => `${u.olt_id}:${u.board}:${u.port}:${u.onu_index}`)
-      );
-      const clientSns = new Set(
-        upgradedClientOnus.map((u) => u.serial_number.toUpperCase())
-      );
-
-      for (const dbOnu of currentDbState.onus) {
-        if (!activeOltIds.has(dbOnu.olt_id)) continue;
-        const coordKey =
-          dbOnu.onu_index !== null
-            ? `${dbOnu.olt_id}:${dbOnu.board}:${dbOnu.port}:${dbOnu.onu_index}`
-            : null;
-        const snKey = dbOnu.serial_number.toUpperCase();
-        if (
-          !clientIds.has(dbOnu.id) &&
-          (!coordKey || !clientCoords.has(coordKey)) &&
-          !clientSns.has(snKey)
-        ) {
-          upgradedClientOnus.push(dbOnu);
-          clientIds.add(dbOnu.id);
-          if (coordKey) clientCoords.add(coordKey);
-          clientSns.add(snKey);
-        }
+        nextState.odbs = mergeCollectionById(nextState.odbs, currentDbState.odbs);
       }
-      nextState.onus = upgradedClientOnus;
+
+      if (!allowShrink) {
+        const activeOltIds = new Set(nextState.olts.map((o) => o.id));
+        const clientOnus = Array.isArray(nextState.onus) ? nextState.onus : [];
+
+        // Upgrade any placeholder `ONU-` SN/Name in clientOnus if currentDbState already has the real SN/Name
+        const dbOnuByCoord = new Map<string, OnuRecord>();
+        for (const dbOnu of currentDbState.onus) {
+          if (dbOnu.onu_index !== null) {
+            dbOnuByCoord.set(
+              `${dbOnu.olt_id}:${dbOnu.board}:${dbOnu.port}:${dbOnu.onu_index}`,
+              dbOnu
+            );
+          }
+        }
+
+        const upgradedClientOnus = clientOnus.map((co) => {
+          if (co.onu_index === null) return co;
+          const dbMatch = dbOnuByCoord.get(
+            `${co.olt_id}:${co.board}:${co.port}:${co.onu_index}`
+          );
+          if (!dbMatch) return co;
+          return {
+            ...co,
+            serial_number:
+              co.serial_number.startsWith('ONU-') &&
+              !dbMatch.serial_number.startsWith('ONU-')
+                ? dbMatch.serial_number
+                : co.serial_number,
+            customer_name:
+              (!co.customer_name || co.customer_name.startsWith('ONU-')) &&
+              dbMatch.customer_name &&
+              !dbMatch.customer_name.startsWith('ONU-')
+                ? dbMatch.customer_name
+                : co.customer_name,
+            zone_id: isExplicitUserMutation
+              ? co.zone_id
+              : co.zone_id ?? dbMatch.zone_id ?? null,
+            sector_id: isExplicitUserMutation
+              ? co.sector_id
+              : co.sector_id ?? dbMatch.sector_id ?? null,
+            odb_id: isExplicitUserMutation
+              ? co.odb_id
+              : co.odb_id ?? dbMatch.odb_id ?? null,
+            odb_port: isExplicitUserMutation
+              ? co.odb_port
+              : co.odb_port ?? dbMatch.odb_port ?? null,
+          };
+        });
+
+        const clientIds = new Set(upgradedClientOnus.map((u) => u.id));
+        const clientCoords = new Set(
+          upgradedClientOnus
+            .filter((u) => u.onu_index !== null)
+            .map((u) => `${u.olt_id}:${u.board}:${u.port}:${u.onu_index}`)
+        );
+        const clientSns = new Set(
+          upgradedClientOnus.map((u) => u.serial_number.toUpperCase())
+        );
+
+        for (const dbOnu of currentDbState.onus) {
+          if (!activeOltIds.has(dbOnu.olt_id)) continue;
+          const coordKey =
+            dbOnu.onu_index !== null
+              ? `${dbOnu.olt_id}:${dbOnu.board}:${dbOnu.port}:${dbOnu.onu_index}`
+              : null;
+          const snKey = dbOnu.serial_number.toUpperCase();
+          if (
+            !clientIds.has(dbOnu.id) &&
+            (!coordKey || !clientCoords.has(coordKey)) &&
+            !clientSns.has(snKey)
+          ) {
+            upgradedClientOnus.push(dbOnu);
+            clientIds.add(dbOnu.id);
+            if (coordKey) clientCoords.add(coordKey);
+            clientSns.add(snKey);
+          }
+        }
+        nextState.onus = upgradedClientOnus;
+      }
+
+      await saveDatabaseState(nextState);
+      res.json({
+        ok: true,
+        dbEngine: activeDbEngine,
+        pgConnected,
+        state: sanitizeStateForClient(nextState, authUser?.role),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
     }
-
-    await saveDatabaseState(nextState);
-    res.json({ ok: true, dbEngine: activeDbEngine, pgConnected, state: nextState });
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
   }
-});
+);
 
-// POST /api/database/reset — Wipe all tables to 100% clean state
-app.post('/api/database/reset', async (_req, res) => {
+// POST /api/database/reset — Admin-only wipe all tables to 100% clean state
+app.post('/api/database/reset', requireRoles('ADMIN'), async (req, res) => {
   try {
-    await saveDatabaseState(INITIAL_DB_STATE);
-    res.json({ ok: true, state: INITIAL_DB_STATE });
+    if (!checkApiRateLimit(req, 'db-reset', 5, 60_000)) {
+      res.status(429).json({ ok: false, error: 'Rate limit exceeded for database reset.' });
+      return;
+    }
+    const cleanBoot: SmartOltDatabaseState = {
+      ...INITIAL_DB_STATE,
+      users: bootstrapAndHashUsers(INITIAL_DB_STATE.users),
+    };
+    await saveDatabaseState(cleanBoot);
+    res.json({ ok: true, state: sanitizeStateForClient(cleanBoot, 'ADMIN') });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -3010,8 +3306,8 @@ function insertBackupSnapshot(
   };
 }
 
-// GET /api/backup/snapshots — List server backup snapshots
-app.get('/api/backup/snapshots', async (_req, res) => {
+// GET /api/backup/snapshots — Admin-only list server backup snapshots
+app.get('/api/backup/snapshots', requireRoles('ADMIN'), async (_req, res) => {
   try {
     let snapshots = getBackupSnapshotsMetaList();
     if (snapshots.length === 0) {
@@ -3029,14 +3325,18 @@ app.get('/api/backup/snapshots', async (_req, res) => {
   }
 });
 
-// POST /api/backup/snapshots — Create a new server backup snapshot
-app.post('/api/backup/snapshots', async (req, res) => {
+// POST /api/backup/snapshots — Admin-only create a new server backup snapshot
+app.post('/api/backup/snapshots', requireRoles('ADMIN'), async (req, res) => {
   try {
-    const authUser = (req as express.Request & { authUser?: AppUserRecord }).authUser;
+    if (!checkApiRateLimit(req, 'backup-create', 15, 60_000)) {
+      res.status(429).json({ ok: false, error: 'Rate limit snapshot backup tercapai.' });
+      return;
+    }
+    const authUser = (req as AuthedRequest).authUser;
     const { label } = (req.body || {}) as { label?: string };
     const state = await loadDatabaseState();
     const cleanLabel =
-      (label || '').trim() || 'Manual Backup Snapshot';
+      String(label || '').trim().slice(0, 120) || 'Manual Backup Snapshot';
     const created = insertBackupSnapshot(
       state,
       cleanLabel,
@@ -3049,10 +3349,14 @@ app.post('/api/backup/snapshots', async (req, res) => {
   }
 });
 
-// GET /api/backup/snapshots/:id/download — Download full JSON of a specific snapshot
-app.get('/api/backup/snapshots/:id/download', (req, res) => {
+// GET /api/backup/snapshots/:id/download — Admin-only download full JSON (with user password hashes masked)
+app.get('/api/backup/snapshots/:id/download', requireRoles('ADMIN'), (req, res) => {
   try {
     const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: 'Snapshot ID tidak valid.' });
+      return;
+    }
     const row = sqliteDb
       .prepare(`SELECT * FROM backup_snapshots WHERE id = ?`)
       .get(id) as BackupSnapshotRow | undefined;
@@ -3060,7 +3364,8 @@ app.get('/api/backup/snapshots/:id/download', (req, res) => {
       res.status(404).json({ ok: false, error: 'Snapshot tidak ditemukan.' });
       return;
     }
-    const state = JSON.parse(row.json_payload) as SmartOltDatabaseState;
+    const rawState = JSON.parse(row.json_payload) as SmartOltDatabaseState;
+    const safeBackupState = sanitizeStateForClient(rawState, 'ADMIN');
     res.json({
       ok: true,
       backup: {
@@ -3070,7 +3375,7 @@ app.get('/api/backup/snapshots/:id/download', (req, res) => {
         label: row.label,
         createdBy: row.created_by,
         exportedAtWib: row.created_at_wib,
-        state,
+        state: safeBackupState,
       },
     });
   } catch (err) {
@@ -3078,18 +3383,14 @@ app.get('/api/backup/snapshots/:id/download', (req, res) => {
   }
 });
 
-// DELETE /api/backup/snapshots/:id — Delete a server backup snapshot
-app.delete('/api/backup/snapshots/:id', (req, res) => {
+// DELETE /api/backup/snapshots/:id — Admin-only delete a server backup snapshot
+app.delete('/api/backup/snapshots/:id', requireRoles('ADMIN'), (req, res) => {
   try {
-    const authUser = (req as express.Request & { authUser?: AppUserRecord }).authUser;
-    if (authUser?.role !== 'ADMIN') {
-      res.status(403).json({
-        ok: false,
-        error: 'Hanya Administrator yang dapat menghapus snapshot backup.',
-      });
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: 'Snapshot ID tidak valid.' });
       return;
     }
-    const id = Number(req.params.id);
     sqliteDb.prepare(`DELETE FROM backup_snapshots WHERE id = ?`).run(id);
     const snapshots = getBackupSnapshotsMetaList();
     res.json({ ok: true, snapshots });
@@ -3098,15 +3399,12 @@ app.delete('/api/backup/snapshots/:id', (req, res) => {
   }
 });
 
-// POST /api/backup/restore — Restore database from uploaded backup JSON or server snapshot
-app.post('/api/backup/restore', async (req, res) => {
+// POST /api/backup/restore — Admin-only restore database from uploaded backup JSON or server snapshot
+app.post('/api/backup/restore', requireRoles('ADMIN'), async (req, res) => {
   try {
-    const authUser = (req as express.Request & { authUser?: AppUserRecord }).authUser;
-    if (authUser?.role !== 'ADMIN') {
-      res.status(403).json({
-        ok: false,
-        error: 'Hanya Administrator yang memiliki izin untuk melakukan Restore Database.',
-      });
+    const authUser = (req as AuthedRequest).authUser!;
+    if (!checkApiRateLimit(req, 'backup-restore', 10, 60_000)) {
+      res.status(429).json({ ok: false, error: 'Rate limit restore tercapai. Tunggu 1 menit.' });
       return;
     }
 
@@ -3120,10 +3418,15 @@ app.post('/api/backup/restore', async (req, res) => {
     const currentState = await loadDatabaseState();
     let incomingState: SmartOltDatabaseState | null = null;
 
-    if (snapshotId) {
+    if (snapshotId !== undefined && snapshotId !== null) {
+      const parsedSnapId = Number(snapshotId);
+      if (!Number.isInteger(parsedSnapId) || parsedSnapId <= 0) {
+        res.status(400).json({ ok: false, error: 'Snapshot ID tidak valid.' });
+        return;
+      }
       const row = sqliteDb
         .prepare(`SELECT * FROM backup_snapshots WHERE id = ?`)
-        .get(Number(snapshotId)) as BackupSnapshotRow | undefined;
+        .get(parsedSnapId) as BackupSnapshotRow | undefined;
       if (!row || !row.json_payload) {
         res.status(404).json({ ok: false, error: 'Snapshot tidak ditemukan.' });
         return;
@@ -3158,16 +3461,13 @@ app.post('/api/backup/restore', async (req, res) => {
       return Array.from(map.values());
     };
 
-    const existingUsers =
-      Array.isArray(currentState.users) && currentState.users.length > 0
-        ? currentState.users
-        : DEFAULT_APP_USERS;
+    const existingUsers = bootstrapAndHashUsers(currentState.users);
 
     let restoredUsers: AppUserRecord[] = existingUsers;
     if (Array.isArray(incomingState.users) && incomingState.users.length > 0) {
       const sanitizedIncomingUsers = incomingState.users.map((u) => {
         const prev = existingUsers.find((eu) => eu.id === u.id);
-        if (prev && (!u.password || u.password === '••••••••')) {
+        if (prev && (!u.password || u.password === MASKED_SECRET)) {
           return { ...u, password: prev.password };
         }
         return u;
@@ -3178,7 +3478,8 @@ app.post('/api/backup/restore', async (req, res) => {
           : sanitizedIncomingUsers;
     }
 
-    // Ensure the currently logged-in Admin account remains active so they don't lock themselves out
+    // Pastikan seluruh password hasil restore ter-hash scrypt & akun admin aktif tetap terjaga
+    restoredUsers = bootstrapAndHashUsers(restoredUsers);
     if (!restoredUsers.some((u) => u.id === authUser.id && u.is_active)) {
       restoredUsers = [
         ...restoredUsers.filter((u) => u.id !== authUser.id),
@@ -3229,11 +3530,17 @@ app.post('/api/backup/restore', async (req, res) => {
           };
 
     await saveDatabaseState(finalState);
+    // Cabut sesi user lain selain Admin yang sedang melakukan restore penuh
+    if (mode === 'OVERWRITE') {
+      sqliteDb
+        .prepare(`DELETE FROM auth_sessions WHERE user_id != ?`)
+        .run(authUser.id);
+    }
     const snapshots = getBackupSnapshotsMetaList();
 
     res.json({
       ok: true,
-      state: finalState,
+      state: sanitizeStateForClient(finalState, 'ADMIN'),
       snapshots,
       summary: {
         olts: finalState.olts.length,
@@ -3249,23 +3556,38 @@ app.post('/api/backup/restore', async (req, res) => {
   }
 });
 
-// POST /api/telnet/test — Test TCP Telnet reachability to an OLT IP
-app.post('/api/telnet/test', async (req, res) => {
-  const { host, port, username, password } = req.body;
-  if (!host) {
-    res.status(400).json({ error: 'OLT IP or FQDN is required' });
-    return;
+// POST /api/telnet/test — Test TCP Telnet reachability to an OLT IP (dilengkapi proteksi SSRF)
+app.post(
+  '/api/telnet/test',
+  requireRoles('ADMIN', 'OPERATOR', 'TECHNICIAN'),
+  async (req, res) => {
+    if (!checkApiRateLimit(req, 'telnet-test', 20, 60_000)) {
+      res.status(429).json({ ok: false, error: 'Terlalu banyak pengujian Telnet. Coba lagi sebentar.' });
+      return;
+    }
+    const { host, port, username, password } = req.body || {};
+    const cleanHost = String(host || '').trim();
+    const targetPort = Number(port || 23);
+    if (!cleanHost || isBlockedSsrfHost(cleanHost, { allowLoopback: false })) {
+      res.status(400).json({ ok: false, error: 'Host/IP OLT tidak valid atau diblokir oleh proteksi SSRF.' });
+      return;
+    }
+    if (!isValidTcpPort(targetPort)) {
+      res.status(400).json({ ok: false, error: 'Port Telnet harus antara 1 - 65535.' });
+      return;
+    }
+    const cleanPass = password && password !== MASKED_SECRET ? password : '';
+    const result = await executeTelnetSession({
+      host: cleanHost,
+      port: targetPort,
+      username,
+      password: cleanPass,
+      commands: ['show version'],
+      timeoutMs: 8000,
+    });
+    res.json(result);
   }
-  const result = await executeTelnetSession({
-    host,
-    port: Number(port) || 23,
-    username,
-    password,
-    commands: ['show version'],
-    timeoutMs: 8000,
-  });
-  res.json(result);
-});
+);
 
 // Track active real-time poll locks per OLT so background polls never overlap
 const oltPollInFlight = new Set<number>();
@@ -3352,30 +3674,41 @@ async function inspectLivePonPortIndices(params: {
 }
 
 // POST /api/olts/:id/check-pon-indices — Live Telnet check of used ONU indices on a PON port
-app.post('/api/olts/:id/check-pon-indices', async (req, res) => {
-  try {
-    const oltId = Number(req.params.id);
-    const { board = 3, port = 1, serialNumber = '' } = req.body || {};
-    const state = await loadDatabaseState();
-    const olt = state.olts.find((o) => o.id === oltId) || state.olts[0];
-    if (!olt) {
-      res.status(404).json({ ok: false, error: 'OLT not found' });
-      return;
-    }
+app.post(
+  '/api/olts/:id/check-pon-indices',
+  requireRoles('ADMIN', 'OPERATOR', 'TECHNICIAN'),
+  async (req, res) => {
+    try {
+      const oltId = Number(req.params.id);
+      if (!Number.isInteger(oltId) || oltId <= 0) {
+        res.status(400).json({ ok: false, error: 'OLT ID tidak valid.' });
+        return;
+      }
+      const { board = 3, port = 1, serialNumber = '' } = req.body || {};
+      const state = await loadDatabaseState();
+      const olt = state.olts.find((o) => o.id === oltId) || state.olts[0];
+      if (!olt) {
+        res.status(404).json({ ok: false, error: 'OLT not found' });
+        return;
+      }
+      if (isBlockedSsrfHost(olt.ip_address, { allowLoopback: false }) || !isValidTcpPort(olt.telnet_port)) {
+        res.status(400).json({ ok: false, error: 'Alamat OLT diblokir oleh proteksi SSRF.' });
+        return;
+      }
 
-    const dbUsedIndices = state.onus
-      .filter(
-        (u) =>
-          u.olt_id === olt.id &&
-          u.is_authorized &&
-          u.board === Number(board) &&
-          u.port === Number(port) &&
-          u.onu_index !== null &&
-          u.serial_number.toUpperCase() !== String(serialNumber).toUpperCase()
-      )
-      .map((u) => u.onu_index as number);
+      const dbUsedIndices = state.onus
+        .filter(
+          (u) =>
+            u.olt_id === olt.id &&
+            u.is_authorized &&
+            u.board === Number(board) &&
+            u.port === Number(port) &&
+            u.onu_index !== null &&
+            u.serial_number.toUpperCase() !== String(serialNumber).toUpperCase()
+        )
+        .map((u) => u.onu_index as number);
 
-    const check = await inspectLivePonPortIndices({
+      const check = await inspectLivePonPortIndices({
       host: olt.ip_address,
       port: olt.telnet_port,
       username: olt.olt_username,
@@ -3387,21 +3720,28 @@ app.post('/api/olts/:id/check-pon-indices', async (req, res) => {
       dbUsedIndices,
     });
 
-    res.json({
-      ok: true,
-      reachable: check.reachable,
-      usedIndices: check.usedIndices,
-      existingSnIndex: check.existingSnIndex,
-      nextFreeIndex: check.nextFreeIndex,
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: (err as Error).message });
+      res.json({
+        ok: true,
+        reachable: check.reachable,
+        usedIndices: check.usedIndices,
+        existingSnIndex: check.existingSnIndex,
+        nextFreeIndex: check.nextFreeIndex,
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: (err as Error).message });
+    }
   }
-});
+);
 
 // POST /api/telnet/exec — Execute live CLI commands on OLT via TCP Telnet
-// Includes automatic ONU index collision protection when registering a new ONU!
+// Dilengkapi validasi SSRF, RBAC (VIEWER hanya boleh command `show`), dan collision guard!
 app.post('/api/telnet/exec', async (req, res) => {
+  const authUser = (req as AuthedRequest).authUser;
+  if (!checkApiRateLimit(req, 'telnet-exec', 90, 60_000)) {
+    res.status(429).json({ ok: false, error: 'Rate limit Telnet tercapai. Tunggu beberapa detik.' });
+    return;
+  }
+
   const {
     oltId,
     commands,
@@ -3410,7 +3750,7 @@ app.post('/api/telnet/exec', async (req, res) => {
     olt_username,
     olt_password,
     enable_password,
-  } = req.body as {
+  } = (req.body || {}) as {
     oltId: number;
     commands: string[] | string;
     ip_address?: string;
@@ -3423,21 +3763,54 @@ app.post('/api/telnet/exec', async (req, res) => {
   const olt =
     state.olts.find((o) => o.id === Number(oltId)) || state.olts[0];
 
-  const targetHost = ip_address || olt?.ip_address;
+  const targetHost = String(ip_address || olt?.ip_address || '').trim();
   const targetPort = Number(telnet_port || olt?.telnet_port || 23);
   const targetUser = olt_username || olt?.olt_username || 'zte';
-  const targetPass = olt_password || olt?.olt_password || '';
+  const targetPass =
+    (olt_password && olt_password !== MASKED_SECRET ? olt_password : '') ||
+    olt?.olt_password ||
+    '';
   const targetEnablePass =
-    enable_password || olt?.enable_password || targetPass || 'zxr10';
+    (enable_password && enable_password !== MASKED_SECRET
+      ? enable_password
+      : '') ||
+    olt?.enable_password ||
+    targetPass ||
+    'zxr10';
 
   if (!targetHost) {
     res.status(404).json({ ok: false, error: 'OLT IP address not found in database' });
     return;
   }
+  if (isBlockedSsrfHost(targetHost, { allowLoopback: false }) || !isValidTcpPort(targetPort)) {
+    res.status(400).json({ ok: false, error: 'Host atau port OLT tidak valid / diblokir oleh proteksi SSRF.' });
+    return;
+  }
 
   let rawScript = Array.isArray(commands)
     ? commands.join('\n')
-    : String(commands);
+    : String(commands || '');
+  const lineCount = rawScript.split(/\r?\n/).length;
+  if (lineCount > 600) {
+    res.status(400).json({ ok: false, error: 'Terlalu banyak baris perintah CLI dalam satu eksekusi (maks. 600).' });
+    return;
+  }
+
+  // Role VIEWER hanya boleh menjalankan perintah read-only `show ...`
+  if (authUser?.role === 'VIEWER') {
+    const normalizedCheck = normalizeCliCommandsForExecution(rawScript);
+    const hasMutatingCmd = normalizedCheck.some(
+      (c) => !/^show\s+/i.test(c) && !/^terminal\s+/i.test(c)
+    );
+    if (hasMutatingCmd || normalizedCheck.length === 0) {
+      res.status(403).json({
+        ok: false,
+        error: 'Forbidden: Role VIEWER hanya diizinkan menjalankan perintah read-only (`show`).',
+      });
+      return;
+    }
+  }
+
   let reallocatedOnuIndex: number | null = null;
 
   // Automatic ONU Index Collision Guard:
@@ -3551,48 +3924,62 @@ app.post('/api/telnet/exec', async (req, res) => {
 });
 
 // POST /api/tr069/enforce-service-list — Enforce X_ZTE-COM_ServiceList = "TR069" ONLY & NATEnabled = false
-// directly on GenieACS NBI API (if reachable on the ACS server host) alongside OLT OMCI push.
-app.post('/api/tr069/enforce-service-list', async (req, res) => {
-  const { serialNumber, acsUrl, mgmtVlanId } = (req.body || {}) as {
-    serialNumber?: string;
-    acsUrl?: string;
-    mgmtVlanId?: number;
-  };
-  const cleanSn = String(serialNumber || '').trim();
-  const targetVlan = Number(mgmtVlanId) || 100;
-  if (!cleanSn) {
-    res.status(400).json({ ok: false, acsSynced: false, message: 'serialNumber is required' });
-    return;
-  }
+// directly on GenieACS NBI API (dilengkapi validasi SN & proteksi SSRF URL)
+app.post(
+  '/api/tr069/enforce-service-list',
+  requireRoles('ADMIN', 'OPERATOR', 'TECHNICIAN'),
+  async (req, res) => {
+    const { serialNumber, acsUrl, mgmtVlanId } = (req.body || {}) as {
+      serialNumber?: string;
+      acsUrl?: string;
+      mgmtVlanId?: number;
+    };
+    const cleanSn = String(serialNumber || '').trim();
+    const targetVlan = Number(mgmtVlanId) || 100;
+    if (!cleanSn || !/^[A-Za-z0-9_-]{4,32}$/.test(cleanSn)) {
+      res.status(400).json({ ok: false, acsSynced: false, message: 'Format serialNumber tidak valid.' });
+      return;
+    }
 
-  let parsedHost = '10.69.69.1';
-  let parsedPort = '';
-  try {
-    const u = new URL((acsUrl || 'http://10.69.69.1:14501').trim());
-    parsedHost = u.hostname || '10.69.69.1';
-    parsedPort = u.port || '';
-  } catch {
-    // Fallback to default ACS host
-  }
-
-  const candidateBases = Array.from(
-    new Set([
-      `http://${parsedHost}:7557`,
-      ...(parsedPort && parsedPort !== '7557' ? [`http://${parsedHost}:${parsedPort}`] : []),
-    ])
-  );
-
-  for (const baseUrl of candidateBases) {
+    let parsedHost = '10.69.69.1';
+    let parsedPort = '';
     try {
-      const queryJson = encodeURIComponent(
-        JSON.stringify({
-          $or: [
-            { '_deviceId._SerialNumber': cleanSn },
-            { _id: { $regex: `${cleanSn}$`, $options: 'i' } },
-          ],
-        })
-      );
-      const lookupResp = await fetch(`${baseUrl}/devices?query=${queryJson}`, {
+      const u = new URL((acsUrl || 'http://10.69.69.1:14501').trim());
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+        res.status(400).json({ ok: false, acsSynced: false, message: 'Protokol ACS URL wajib http/https.' });
+        return;
+      }
+      parsedHost = u.hostname || '10.69.69.1';
+      parsedPort = u.port || '';
+    } catch {
+      // Fallback to default ACS host
+    }
+
+    if (isBlockedSsrfHost(parsedHost, { allowLoopback: false })) {
+      res.status(400).json({ ok: false, acsSynced: false, message: 'ACS host diblokir oleh proteksi SSRF.' });
+      return;
+    }
+
+    const candidateBases = Array.from(
+      new Set([
+        `http://${parsedHost}:7557`,
+        ...(parsedPort && isValidTcpPort(parsedPort) && parsedPort !== '7557'
+          ? [`http://${parsedHost}:${parsedPort}`]
+          : []),
+      ])
+    );
+
+    for (const baseUrl of candidateBases) {
+      try {
+        const queryJson = encodeURIComponent(
+          JSON.stringify({
+            $or: [
+              { '_deviceId._SerialNumber': cleanSn },
+              { _id: { $regex: `${cleanSn}$`, $options: 'i' } },
+            ],
+          })
+        );
+        const lookupResp = await fetch(`${baseUrl}/devices?query=${queryJson}`, {
         method: 'GET',
         signal: AbortSignal.timeout(1500),
       });
@@ -3696,79 +4083,101 @@ app.post('/api/tr069/enforce-service-list', async (req, res) => {
 
 // POST /api/olts/:id/sync-live — Automatically fetch `show card`, `show gpon onu uncfg`,
 // `show gpon onu state`, `show running-config`, plus optical power & MikroTik WAN PPPoE IPs!
-app.post('/api/olts/:id/sync-live', async (req, res) => {
-  try {
-    const oltId = Number(req.params.id);
-    const {
-      ip_address,
-      telnet_port,
-      olt_username,
-      olt_password,
-      enable_password,
-      oltRecord,
-    } = (req.body || {}) as {
-      ip_address?: string;
-      telnet_port?: number;
-      olt_username?: string;
-      olt_password?: string;
-      enable_password?: string;
-      oltRecord?: SmartOltDatabaseState['olts'][number];
-    };
-
-    let state = await loadDatabaseState();
-    let olt = state.olts.find((o) => o.id === oltId);
-
-    if (!olt && oltRecord) {
-      state = {
-        ...state,
-        olts: [...state.olts, { ...oltRecord, id: oltId }],
+app.post(
+  '/api/olts/:id/sync-live',
+  requireRoles('ADMIN', 'OPERATOR', 'TECHNICIAN'),
+  async (req, res) => {
+    try {
+      const authUser = (req as AuthedRequest).authUser;
+      if (!checkApiRateLimit(req, 'olt-sync-live', 15, 60_000)) {
+        res.status(429).json({ ok: false, error: 'Rate limit Sync Live OLT tercapai. Tunggu 1 menit.' });
+        return;
+      }
+      const oltId = Number(req.params.id);
+      if (!Number.isInteger(oltId) || oltId <= 0) {
+        res.status(400).json({ ok: false, error: 'OLT ID tidak valid.' });
+        return;
+      }
+      const {
+        ip_address,
+        telnet_port,
+        olt_username,
+        olt_password,
+        enable_password,
+        oltRecord,
+      } = (req.body || {}) as {
+        ip_address?: string;
+        telnet_port?: number;
+        olt_username?: string;
+        olt_password?: string;
+        enable_password?: string;
+        oltRecord?: SmartOltDatabaseState['olts'][number];
       };
-      olt = state.olts.find((o) => o.id === oltId);
-    }
 
-    const targetHost = ip_address || olt?.ip_address;
-    const targetPort = Number(telnet_port || olt?.telnet_port || 23);
-    const targetUser = olt_username || olt?.olt_username || 'zte';
-    const targetPass = olt_password || olt?.olt_password || '';
-    const targetEnablePass =
-      enable_password || olt?.enable_password || targetPass || 'zxr10';
+      let state = await loadDatabaseState();
+      let olt = state.olts.find((o) => o.id === oltId);
 
-    if (!targetHost) {
-      res.status(404).json({ ok: false, error: `OLT ID ${oltId} not found` });
-      return;
-    }
+      if (!olt && oltRecord && authUser?.role === 'ADMIN') {
+        state = {
+          ...state,
+          olts: [...state.olts, { ...oltRecord, id: oltId }],
+        };
+        olt = state.olts.find((o) => o.id === oltId);
+      }
 
-    console.log(
-      `[OLT Live Sync] Fetching full configuration & telemetry from ${targetHost}:${targetPort} (user: ${targetUser})...`
-    );
+      const targetHost = String(ip_address || olt?.ip_address || '').trim();
+      const targetPort = Number(telnet_port || olt?.telnet_port || 23);
+      const targetUser = olt_username || olt?.olt_username || 'zte';
+      const targetPass =
+        (olt_password && olt_password !== MASKED_SECRET ? olt_password : '') ||
+        olt?.olt_password ||
+        '';
+      const targetEnablePass =
+        (enable_password && enable_password !== MASKED_SECRET ? enable_password : '') ||
+        olt?.enable_password ||
+        targetPass ||
+        'zxr10';
 
-    const telnetRes = await executeTelnetSession({
-      host: targetHost,
-      port: targetPort,
-      username: targetUser,
-      password: targetPass,
-      enablePassword: targetEnablePass,
-      commands: [
-        'show card',
-        'show gpon onu uncfg',
-        'show gpon onu state',
-        'show gpon onu baseinfo',
-        'show running-config',
-      ],
-      timeoutMs: 60000,
-    });
+      if (!targetHost) {
+        res.status(404).json({ ok: false, error: `OLT ID ${oltId} not found` });
+        return;
+      }
+      if (isBlockedSsrfHost(targetHost, { allowLoopback: false }) || !isValidTcpPort(targetPort)) {
+        res.status(400).json({ ok: false, error: 'Host atau port OLT tidak valid / diblokir oleh proteksi SSRF.' });
+        return;
+      }
 
-    if (!telnetRes.reachable || !telnetRes.output.trim()) {
-      res.json({
-        ok: false,
-        reachable: false,
-        error:
-          telnetRes.error ||
-          `Could not read configuration from OLT ${targetHost}:${targetPort}`,
-        state,
+      console.log(
+        `[OLT Live Sync] Fetching full configuration & telemetry from ${targetHost}:${targetPort} (user: ${targetUser})...`
+      );
+
+      const telnetRes = await executeTelnetSession({
+        host: targetHost,
+        port: targetPort,
+        username: targetUser,
+        password: targetPass,
+        enablePassword: targetEnablePass,
+        commands: [
+          'show card',
+          'show gpon onu uncfg',
+          'show gpon onu state',
+          'show gpon onu baseinfo',
+          'show running-config',
+        ],
+        timeoutMs: 60000,
       });
-      return;
-    }
+
+      if (!telnetRes.reachable || !telnetRes.output.trim()) {
+        res.json({
+          ok: false,
+          reachable: false,
+          error:
+            telnetRes.error ||
+            `Could not read configuration from OLT ${targetHost}:${targetPort}`,
+          state: sanitizeStateForClient(state, authUser?.role),
+        });
+        return;
+      }
 
     const effectiveOltId = olt ? olt.id : oltId;
 
@@ -3866,7 +4275,7 @@ app.post('/api/olts/:id/sync-live', async (req, res) => {
         configuredOnus: summary.onus,
         unconfiguredOnus: summary.uncfgOnus,
       },
-      state: nextState,
+      state: sanitizeStateForClient(nextState, authUser?.role),
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
@@ -3877,12 +4286,21 @@ app.post('/api/olts/:id/sync-live', async (req, res) => {
 // Polls live `show gpon onu state`, `show gpon onu uncfg`, `show pon power`, and `show gpon remote-onu ip-host / pppoe / wan-ip`
 // so Online / Power Fail (DyingGasp) / LOS / Offline status and MikroTik PPPoE WAN IP update in real time!
 app.post('/api/olts/:id/poll-realtime', async (req, res) => {
+  const authUser = (req as AuthedRequest).authUser;
   const oltId = Number(req.params.id);
   const { onuId } = (req.body || {}) as { onuId?: number };
+  if (!Number.isInteger(oltId) || oltId <= 0) {
+    res.status(400).json({ ok: false, error: 'OLT ID tidak valid.' });
+    return;
+  }
+  if (!checkApiRateLimit(req, 'poll-realtime', 90, 60_000)) {
+    res.status(429).json({ ok: false, error: 'Rate limit polling tercapai.' });
+    return;
+  }
 
   if (oltPollInFlight.has(oltId)) {
     const state = await loadDatabaseState();
-    res.json({ ok: true, skipped: true, state });
+    res.json({ ok: true, skipped: true, state: sanitizeStateForClient(state, authUser?.role) });
     return;
   }
 
@@ -3892,6 +4310,10 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
     const olt = state.olts.find((o) => o.id === oltId) || state.olts[0];
     if (!olt) {
       res.status(404).json({ ok: false, error: 'OLT not found' });
+      return;
+    }
+    if (isBlockedSsrfHost(olt.ip_address, { allowLoopback: false }) || !isValidTcpPort(olt.telnet_port)) {
+      res.status(400).json({ ok: false, error: 'Alamat OLT diblokir oleh proteksi SSRF.' });
       return;
     }
 
@@ -3970,7 +4392,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
     });
 
     if (!telnetRes.reachable || !telnetRes.output.trim()) {
-      res.json({ ok: false, reachable: false, state });
+      res.json({ ok: false, reachable: false, state: sanitizeStateForClient(state, authUser?.role) });
       return;
     }
 
@@ -4537,7 +4959,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       ok: true,
       reachable: true,
       timestamp: nowStr,
-      state: nextState,
+      state: sanitizeStateForClient(nextState, authUser?.role),
       rawOutput: focusedOnu ? rawOut : undefined,
     });
   } catch (err) {
@@ -5114,16 +5536,27 @@ app.get('/api/onus/:id/telemetry', async (req, res) => {
 
 // POST /api/onus/:id/record-telemetry — Parse raw OLT CLI output (`show interface`, `show pon power`, `show gpon onu detail-info`)
 // and persist real-time sample into `onu_telemetry_samples`, returning updated Daily/Weekly/Monthly/Yearly history!
-app.post('/api/onus/:id/record-telemetry', async (req, res) => {
-  try {
-    const onuId = Number(req.params.id);
-    const { rawOutput } = (req.body || {}) as { rawOutput?: string };
-    const state = await loadDatabaseState();
-    const onu = state.onus.find((u) => u.id === onuId);
-    if (!onu) {
-      res.status(404).json({ ok: false, error: 'ONU not found' });
-      return;
-    }
+app.post(
+  '/api/onus/:id/record-telemetry',
+  requireRoles('ADMIN', 'OPERATOR', 'TECHNICIAN'),
+  async (req, res) => {
+    try {
+      const onuId = Number(req.params.id);
+      if (!Number.isInteger(onuId) || onuId <= 0) {
+        res.status(400).json({ ok: false, error: 'ONU ID tidak valid.' });
+        return;
+      }
+      const { rawOutput } = (req.body || {}) as { rawOutput?: string };
+      if (rawOutput && rawOutput.length > 256_000) {
+        res.status(413).json({ ok: false, error: 'Payload rawOutput terlalu besar.' });
+        return;
+      }
+      const state = await loadDatabaseState();
+      const onu = state.onus.find((u) => u.id === onuId);
+      if (!onu) {
+        res.status(404).json({ ok: false, error: 'ONU not found' });
+        return;
+      }
 
     const onuInterface = `gpon-onu_1/${onu.board}/${onu.port}:${onu.onu_index || 1}`;
     const nowMs = Date.now();
@@ -5240,7 +5673,15 @@ app.post('/api/onus/:id/record-telemetry', async (req, res) => {
 // POST /api/onus/:id/poll-telemetry — Live Telnet poll of ONU interface traffic + optical power + status
 app.post('/api/onus/:id/poll-telemetry', async (req, res) => {
   try {
+    if (!checkApiRateLimit(req, 'onu-poll-telemetry', 60, 60_000)) {
+      res.status(429).json({ ok: false, error: 'Rate limit poll telemetry ONU tercapai.' });
+      return;
+    }
     const onuId = Number(req.params.id);
+    if (!Number.isInteger(onuId) || onuId <= 0) {
+      res.status(400).json({ ok: false, error: 'ONU ID tidak valid.' });
+      return;
+    }
     const state = await loadDatabaseState();
     const onu = state.onus.find((u) => u.id === onuId);
     if (!onu) {
@@ -5250,6 +5691,10 @@ app.post('/api/onus/:id/poll-telemetry', async (req, res) => {
     const olt = state.olts.find((o) => o.id === onu.olt_id) || state.olts[0];
     if (!olt) {
       res.status(404).json({ ok: false, error: 'OLT not found' });
+      return;
+    }
+    if (isBlockedSsrfHost(olt.ip_address, { allowLoopback: false }) || !isValidTcpPort(olt.telnet_port)) {
+      res.status(400).json({ ok: false, error: 'Alamat OLT diblokir oleh proteksi SSRF.' });
       return;
     }
 
@@ -6003,6 +6448,10 @@ app.get('/api/olts/:id/graphs', async (req, res) => {
 // POST /api/olts/:id/poll-graphs — Live Telnet poll `show interface` for OLT Uplinks & active PON ports
 app.post('/api/olts/:id/poll-graphs', async (req, res) => {
   try {
+    if (!checkApiRateLimit(req, 'olt-poll-graphs', 60, 60_000)) {
+      res.status(429).json({ ok: false, error: 'Rate limit poll grafik OLT tercapai.' });
+      return;
+    }
     const oltId = Number(req.params.id) || 1;
     const state = await loadDatabaseState();
     const oltsList =
@@ -6013,6 +6462,10 @@ app.post('/api/olts/:id/poll-graphs', async (req, res) => {
       oltsList.find((o) => o.id === oltId) ||
       oltsList[0] ||
       INITIAL_DB_STATE.olts[0];
+    if (isBlockedSsrfHost(olt.ip_address, { allowLoopback: false }) || !isValidTcpPort(olt.telnet_port)) {
+      res.status(400).json({ ok: false, error: 'Alamat OLT diblokir oleh proteksi SSRF.' });
+      return;
+    }
 
     const uplinkIfs = (state?.uplink_ports || [])
       .filter((u) => u && u.olt_id === olt.id)
@@ -6127,103 +6580,153 @@ app.post('/api/olts/:id/poll-graphs', async (req, res) => {
 });
 
 // POST /api/olts/:id/import-config — Parse `#show running-config` and populate PostgreSQL
-app.post('/api/olts/:id/import-config', async (req, res) => {
-  try {
-    const oltId = Number(req.params.id);
-    const { rawConfig } = req.body as { rawConfig: string };
-    if (!rawConfig || !rawConfig.trim()) {
-      res.status(400).json({ error: 'rawConfig is empty' });
-      return;
-    }
-
-    const state = await loadDatabaseState();
-    const olt = state.olts.find((o) => o.id === oltId) || state.olts[0];
-    if (!olt) {
-      res.status(404).json({ error: `OLT ID ${oltId} not found in database` });
-      return;
-    }
-
-    const { nextState, summary } = applyRunningConfigAndLiveTelemetryToState({
-      state,
-      oltId: olt.id,
-      rawConfig,
-      rawUncfgOutput: rawConfig,
-      rawStateOutput: rawConfig,
-      rawCardOutput: rawConfig,
-      sourceLabel: 'Manual Running-Config Import',
-    });
-
-    await saveDatabaseState(nextState);
-    res.json({
-      ok: true,
-      imported: summary,
-      state: nextState,
-    });
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
-  }
-});
-
-// POST /api/olts/:id/poll-uncfg — Strictly executes `show gpon onu uncfg` via Telnet (NO full OLT sync!)
-app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
-  try {
-    const oltId = Number(req.params.id);
-    const { manualCliOutput, oltRecord } = (req.body || {}) as {
-      manualCliOutput?: string;
-      oltRecord?: Partial<OltRecord>;
-    };
-    const state = await loadDatabaseState();
-    const dbOlt = state.olts.find((o) => o.id === oltId) || state.olts[0];
-    const olt = dbOlt
-      ? { ...dbOlt, ...(oltRecord || {}), id: dbOlt.id }
-      : oltRecord?.ip_address
-      ? ({
-          id: oltId,
-          name: oltRecord.name || `OLT-${oltId}`,
-          ip_address: oltRecord.ip_address,
-          telnet_port: Number(oltRecord.telnet_port || 23),
-          olt_username: oltRecord.olt_username || 'zte',
-          olt_password: oltRecord.olt_password || '',
-          enable_password: oltRecord.enable_password || oltRecord.olt_password || 'zxr10',
-        } as OltRecord)
-      : undefined;
-
-    if (!olt) {
-      res.status(404).json({ ok: false, error: 'OLT not found in database' });
-      return;
-    }
-
-    let rawOutput = manualCliOutput || '';
-    let telnetReachable = Boolean(manualCliOutput);
-    let telnetError: string | undefined;
-
-    if (!rawOutput) {
-      const telnetRes = await executeTelnetSession({
-        host: olt.ip_address,
-        port: olt.telnet_port,
-        username: olt.olt_username,
-        password: olt.olt_password,
-        enablePassword: olt.enable_password,
-        commands: ['show gpon onu uncfg'],
-        timeoutMs: 12000,
-      });
-      telnetReachable = telnetRes.reachable;
-      rawOutput = telnetRes.output;
-      telnetError = telnetRes.error;
-
-      if (!telnetRes.reachable) {
-        res.json({
-          ok: false,
-          telnetReachable: false,
-          discoveredCount: 0,
-          discovered: [],
-          rawOutput,
-          error: telnetError || `Gagal terhubung ke OLT ${olt.ip_address}:${olt.telnet_port} via Telnet`,
-          state,
-        });
+app.post(
+  '/api/olts/:id/import-config',
+  requireRoles('ADMIN', 'OPERATOR', 'TECHNICIAN'),
+  async (req, res) => {
+    try {
+      const authUser = (req as AuthedRequest).authUser;
+      const oltId = Number(req.params.id);
+      if (!Number.isInteger(oltId) || oltId <= 0) {
+        res.status(400).json({ error: 'OLT ID tidak valid.' });
         return;
       }
+      const { rawConfig } = (req.body || {}) as { rawConfig?: string };
+      if (!rawConfig || !rawConfig.trim()) {
+        res.status(400).json({ error: 'rawConfig is empty' });
+        return;
+      }
+      if (rawConfig.length > 2_000_000) {
+        res.status(413).json({ error: 'Ukuran konfigurasi terlalu besar (maks. 2MB).' });
+        return;
+      }
+
+      const state = await loadDatabaseState();
+      const olt = state.olts.find((o) => o.id === oltId) || state.olts[0];
+      if (!olt) {
+        res.status(404).json({ error: `OLT ID ${oltId} not found in database` });
+        return;
+      }
+
+      const { nextState, summary } = applyRunningConfigAndLiveTelemetryToState({
+        state,
+        oltId: olt.id,
+        rawConfig,
+        rawUncfgOutput: rawConfig,
+        rawStateOutput: rawConfig,
+        rawCardOutput: rawConfig,
+        sourceLabel: 'Manual Running-Config Import',
+      });
+
+      await saveDatabaseState(nextState);
+      res.json({
+        ok: true,
+        imported: summary,
+        state: sanitizeStateForClient(nextState, authUser?.role),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
     }
+  }
+);
+
+// POST /api/olts/:id/poll-uncfg — Strictly executes `show gpon onu uncfg` via Telnet (NO full OLT sync!)
+app.post(
+  '/api/olts/:id/poll-uncfg',
+  requireRoles('ADMIN', 'OPERATOR', 'TECHNICIAN'),
+  async (req, res) => {
+    try {
+      const authUser = (req as AuthedRequest).authUser;
+      if (!checkApiRateLimit(req, 'poll-uncfg', 40, 60_000)) {
+        res.status(429).json({ ok: false, error: 'Rate limit poll unconfigured ONU tercapai.' });
+        return;
+      }
+      const oltId = Number(req.params.id);
+      if (!Number.isInteger(oltId) || oltId <= 0) {
+        res.status(400).json({ ok: false, error: 'OLT ID tidak valid.' });
+        return;
+      }
+      const { manualCliOutput, oltRecord } = (req.body || {}) as {
+        manualCliOutput?: string;
+        oltRecord?: Partial<OltRecord>;
+      };
+      const state = await loadDatabaseState();
+      const dbOlt = state.olts.find((o) => o.id === oltId) || state.olts[0];
+      // Pastikan password yang dimasking ('••••••••') tidak pernah menimpa kredensial asli di DB
+      const safeOverrideOlt = oltRecord
+        ? {
+            ...oltRecord,
+            olt_password:
+              oltRecord.olt_password && oltRecord.olt_password !== MASKED_SECRET
+                ? oltRecord.olt_password
+                : dbOlt?.olt_password || '',
+            enable_password:
+              oltRecord.enable_password && oltRecord.enable_password !== MASKED_SECRET
+                ? oltRecord.enable_password
+                : dbOlt?.enable_password || 'zxr10',
+          }
+        : undefined;
+
+      const olt = dbOlt
+        ? { ...dbOlt, ...(authUser?.role === 'ADMIN' && safeOverrideOlt ? safeOverrideOlt : {}), id: dbOlt.id }
+        : authUser?.role === 'ADMIN' && oltRecord?.ip_address
+        ? ({
+            id: oltId,
+            name: oltRecord.name || `OLT-${oltId}`,
+            ip_address: oltRecord.ip_address,
+            telnet_port: Number(oltRecord.telnet_port || 23),
+            olt_username: oltRecord.olt_username || 'zte',
+            olt_password:
+              oltRecord.olt_password && oltRecord.olt_password !== MASKED_SECRET
+                ? oltRecord.olt_password
+                : '',
+            enable_password:
+              oltRecord.enable_password && oltRecord.enable_password !== MASKED_SECRET
+                ? oltRecord.enable_password
+                : 'zxr10',
+          } as OltRecord)
+        : undefined;
+
+      if (!olt) {
+        res.status(404).json({ ok: false, error: 'OLT not found in database' });
+        return;
+      }
+      if (isBlockedSsrfHost(olt.ip_address, { allowLoopback: false }) || !isValidTcpPort(olt.telnet_port)) {
+        res.status(400).json({ ok: false, error: 'Host atau port OLT tidak valid / diblokir oleh proteksi SSRF.' });
+        return;
+      }
+
+      let rawOutput = manualCliOutput || '';
+      let telnetReachable = Boolean(manualCliOutput);
+      let telnetError: string | undefined;
+
+      if (!rawOutput) {
+        const telnetRes = await executeTelnetSession({
+          host: olt.ip_address,
+          port: olt.telnet_port,
+          username: olt.olt_username,
+          password: olt.olt_password,
+          enablePassword: olt.enable_password,
+          commands: ['show gpon onu uncfg'],
+          timeoutMs: 12000,
+        });
+        telnetReachable = telnetRes.reachable;
+        rawOutput = telnetRes.output;
+        telnetError = telnetRes.error;
+
+        if (!telnetRes.reachable) {
+          res.json({
+            ok: false,
+            telnetReachable: false,
+            discoveredCount: 0,
+            discovered: [],
+            rawOutput,
+            error: telnetError || `Gagal terhubung ke OLT ${olt.ip_address}:${olt.telnet_port} via Telnet`,
+            state: sanitizeStateForClient(state, authUser?.role),
+          });
+          return;
+        }
+      }
 
     const discovered = parseZteUncfgOutput(rawOutput);
     const latestState = await loadDatabaseState();
@@ -6304,18 +6807,19 @@ app.post('/api/olts/:id/poll-uncfg', async (req, res) => {
     };
     await saveDatabaseState(nextState);
 
-    res.json({
-      ok: true,
-      telnetReachable,
-      discoveredCount: newUnconfiguredOnus.length,
-      discovered,
-      rawOutput,
-      state: nextState,
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: (err as Error).message });
+      res.json({
+        ok: true,
+        telnetReachable,
+        discoveredCount: newUnconfiguredOnus.length,
+        discovered,
+        rawOutput,
+        state: sanitizeStateForClient(nextState, authUser?.role),
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: (err as Error).message });
+    }
   }
-});
+);
 
 // ============================================================================
 // 4. VITE MIDDLEWARE (DEV) OR STATIC ASSETS (PROD / DOCKER PORT 3004)

@@ -104,8 +104,6 @@ type NavigationView =
   | 'GRAPHS'
   | 'SOURCE_CODE';
 
-const STORAGE_KEY = 'smartolt_jetcybernet_live_sql_cache';
-
 export default function App() {
   const [db, setDb] = useState<SmartOltDatabaseState>(INITIAL_DB_STATE);
   const [dbLoaded, setDbLoaded] = useState(false);
@@ -141,7 +139,7 @@ export default function App() {
   const [pgHost, setPgHost] = useState('localhost');
   const [pgPort, setPgPort] = useState(5435);
   const [pgUser, setPgUser] = useState('likhin');
-  const [pgPassword, setPgPassword] = useState('11013009');
+  const [pgPassword, setPgPassword] = useState('');
   const [pgDatabase, setPgDatabase] = useState('smartolt_db');
   const [pgTesting, setPgTesting] = useState(false);
   const [showAddUncfgModal, setShowAddUncfgModal] = useState(false);
@@ -5007,11 +5005,28 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 ...prev,
                 vlans: prev.vlans.map((v) => {
                   if (v.id !== vlanRecordId) return v;
-                  const nextVal = !v[field];
+                  const currentVal =
+                    field === 'enable_nat'
+                      ? typeof v.enable_nat === 'boolean'
+                        ? v.enable_nat
+                        : !v.used_for_mgmt_tr069_voip &&
+                          v.service_type !== 'TR069_MGMT' &&
+                          !/(?:^|[^A-Z0-9])(MJMT|MGMT|TR069|MANAGEMENT)(?:[^A-Z0-9]|$)/i.test(
+                            v.name || v.description || ''
+                          )
+                      : Boolean(v[field]);
+                  const nextVal = !currentVal;
+                  if (field === 'enable_nat') {
+                    return {
+                      ...v,
+                      enable_nat: nextVal,
+                    };
+                  }
                   if (field === 'used_for_mgmt_tr069_voip') {
                     return {
                       ...v,
                       used_for_mgmt_tr069_voip: nextVal,
+                      enable_nat: nextVal ? false : v.enable_nat,
                       service_type: nextVal
                         ? 'TR069_MGMT'
                         : v.used_for_iptv
@@ -5060,6 +5075,20 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   nextVal
                     ? `VLAN ${targetVlan.vlan_id} di-set sebagai VLAN Mgmt (TR-069 & VoIP Only, tanpa push Internet).`
                     : `VLAN ${targetVlan.vlan_id} dikembalikan ke mode VLAN Subscriber/Internet.`
+                );
+              } else if (targetVlan && field === 'enable_nat') {
+                const currentNat =
+                  typeof targetVlan.enable_nat === 'boolean'
+                    ? targetVlan.enable_nat
+                    : !targetVlan.used_for_mgmt_tr069_voip &&
+                      targetVlan.service_type !== 'TR069_MGMT' &&
+                      !/(?:^|[^A-Z0-9])(MJMT|MGMT|TR069|MANAGEMENT)(?:[^A-Z0-9]|$)/i.test(
+                        targetVlan.name || targetVlan.description || ''
+                      );
+                showToast(
+                  !currentNat
+                    ? `Enable NAT diaktifkan untuk VLAN ${targetVlan.vlan_id} (${targetVlan.name}).`
+                    : `Enable NAT dinonaktifkan untuk VLAN ${targetVlan.vlan_id} (${targetVlan.name}) — perintah 'nat' / 'ip nat' dikecualikan dari skrip CLI.`
                 );
               } else {
                 showToast(`Pengaturan ${field} pada VLAN berhasil diperbarui.`);
@@ -8474,13 +8503,6 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   ) || null
                 : null;
 
-              const formatRateLabel = (mbps: number): string => {
-                if (mbps >= 1000) {
-                  return `${(mbps / 1000).toFixed(2)} Gbps`;
-                }
-                return `${mbps.toFixed(2)} Mbps`;
-              };
-
               const renderGraphChartBlock = (
                 item: OltInterfaceGraphItem,
                 periodKey: 'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
@@ -9603,8 +9625,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     Password
                   </label>
                   <input
-                    type="text"
+                    type="password"
                     value={pgPassword}
+                    placeholder="•••••••• (kosongkan untuk password server saat ini)"
                     onChange={(e) => setPgPassword(e.target.value)}
                     className="mt-1 w-full rounded border border-slate-600 bg-[#1c2a3b] px-3 py-2 font-mono text-white"
                   />

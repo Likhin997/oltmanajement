@@ -6,6 +6,7 @@ import {
   ConfigMethodOption,
   WanRemoteAccessOption,
   generateUpdateOnuModeCliScript,
+  resolveEffectiveEnableNat,
 } from '../services/oltEngine';
 import { X, Terminal, Copy, Check, Radio } from 'lucide-react';
 
@@ -131,6 +132,14 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
     selectedVlan?.used_for_mgmt_tr069_voip ||
       selectedVlan?.service_type === 'TR069_MGMT'
   );
+  const initialEnableNat = resolveEffectiveEnableNat({
+    enableNat: onu.enable_nat,
+    vlanEnableNat: 'enable_nat' in selectedVlan ? selectedVlan.enable_nat : undefined,
+    vlanName: selectedVlan?.name || ('description' in selectedVlan ? selectedVlan.description : ''),
+    isMgmtOnly: isSelectedVlanMgmtOnly,
+  });
+  const [enableNat, setEnableNat] = useState<boolean>(initialEnableNat);
+  const effectiveEnableNat = isSelectedVlanMgmtOnly ? false : enableNat;
   const effectiveConfigMethod: ConfigMethodOption = isSelectedVlanMgmtOnly
     ? 'TR069'
     : configMethod;
@@ -148,6 +157,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
       address: onu.address || 'none',
       rebindTypeAll,
       vlanId: selectedVlan?.vlan_id || 101,
+      vlanName: selectedVlan?.name || ('description' in selectedVlan ? selectedVlan.description : ''),
       onuMode,
       wanMode: onuMode === 'Bridging' ? 'BRIDGE' : wanMode,
       configMethod: effectiveConfigMethod,
@@ -155,6 +165,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
       wanRemoteAllowedSubnet: allowedSubnet,
       pppoeUsername: username,
       pppoePassword: password,
+      enableNat: effectiveEnableNat,
       staticIpAddress: staticIp,
       staticSubnetMask: staticMask,
       staticGateway: staticGw,
@@ -188,6 +199,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
     allowedSubnet,
     username,
     password,
+    effectiveEnableNat,
     staticIp,
     staticMask,
     staticGw,
@@ -240,6 +252,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
             ? `${new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ')} WIB`
             : onu.tr069_last_inform,
         voip_enabled: isSelectedVlanMgmtOnly ? true : voipSipEnabled,
+        enable_nat: effectiveEnableNat,
         wifi_ssid: wifiSsid,
         wifi_password: wifiPassword,
       },
@@ -318,7 +331,25 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
               <div className="sm:col-span-8">
                 <select
                   value={selectedVlan?.id || vlanRecordId}
-                  onChange={(e) => setVlanRecordId(Number(e.target.value))}
+                  onChange={(e) => {
+                    const nextId = Number(e.target.value);
+                    setVlanRecordId(nextId);
+                    const chosenVlan = db.vlans.find(
+                      (v) => v.id === nextId || v.vlan_id === nextId
+                    );
+                    if (chosenVlan) {
+                      setEnableNat(
+                        resolveEffectiveEnableNat({
+                          vlanEnableNat: chosenVlan.enable_nat,
+                          vlanName: chosenVlan.name || chosenVlan.description,
+                          isMgmtOnly: Boolean(
+                            chosenVlan.used_for_mgmt_tr069_voip ||
+                              chosenVlan.service_type === 'TR069_MGMT'
+                          ),
+                        })
+                      );
+                    }
+                  }}
                   className="w-full rounded-md border border-slate-600 bg-[#1c2536] px-3.5 py-2.5 text-sm font-medium text-white focus:border-blue-500 focus:outline-hidden"
                 >
                   {db.vlans.map((v) => (
@@ -330,6 +361,21 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
                     </option>
                   ))}
                 </select>
+                <label className="mt-2.5 flex cursor-pointer items-center gap-2 text-xs font-semibold text-emerald-300">
+                  <input
+                    type="checkbox"
+                    checked={effectiveEnableNat}
+                    disabled={isSelectedVlanMgmtOnly}
+                    onChange={(e) => setEnableNat(e.target.checked)}
+                    className="h-4 w-4 rounded accent-emerald-500"
+                  />
+                  <span>Enable NAT</span>
+                  {!effectiveEnableNat && (
+                    <span className="font-normal text-amber-300">
+                      (Non-NAT: perintah `nat` / `ip nat` dikecualikan untuk VLAN {selectedVlan?.name || selectedVlan?.vlan_id})
+                    </span>
+                  )}
+                </label>
               </div>
             </div>
 

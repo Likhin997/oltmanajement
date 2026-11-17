@@ -19,6 +19,7 @@ import {
   generateUpdateAttachedVlansCliScript,
   generateUpdateMgmtAndTr069CliScript,
   buildTr069CliLines,
+  resolveEffectiveEnableNat,
   parseZteOpticalAttenuation,
   parseZteOnuDetailInfo,
   parseZteWanIpOutput,
@@ -144,6 +145,16 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
       (('used_for_mgmt_tr069_voip' in vlan && vlan.used_for_mgmt_tr069_voip) ||
         ('service_type' in vlan && vlan.service_type === 'TR069_MGMT'))
   );
+  const vlanLabel =
+    ('name' in vlan && vlan.name) ||
+    ('description' in vlan && vlan.description) ||
+    '';
+  const effectiveEnableNat = resolveEffectiveEnableNat({
+    enableNat: onu.enable_nat,
+    vlanEnableNat: 'enable_nat' in vlan ? vlan.enable_nat : undefined,
+    vlanName: vlanLabel,
+    isMgmtOnly: isOnuMgmtOnly,
+  });
 
   const cleanPppoeUser =
     onu.pppoe_username &&
@@ -688,6 +699,8 @@ Username:              ${onu.pppoe_username || onu.customer_name || onu.serial_n
       tr069TrafficProfile: tr069Profile?.traffic_profile || 'SMARTOLT-VOIPMNG-10M',
       voipSipEnabled: onu.voip_enabled ?? tr069Profile?.voip_enabled ?? isOnuMgmtOnly,
       mgmtOnlyNoInternet: isOnuMgmtOnly,
+      enableNat: effectiveEnableNat,
+      vlanName: vlanLabel,
     });
     setActiveConsoleOutput({
       title: `Show running-config — ${onuInterface} (Fetching from OLT...)`,
@@ -860,6 +873,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
         onu.wan_remote_access || 'Enabled from everywhere in the internet',
       acsUrl,
       periodicInterval: tr069Profile?.periodic_inform_interval || 300,
+      enableNat: effectiveEnableNat,
       wifiSsid: onu.wifi_ssid || undefined,
       wifiPassword: onu.wifi_password || undefined,
     });
@@ -913,6 +927,8 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       tr069TrafficProfile: tr069Profile?.traffic_profile || 'SMARTOLT-VOIPMNG-10M',
       voipSipEnabled: onu.voip_enabled ?? tr069Profile?.voip_enabled ?? isOnuMgmtOnly,
       mgmtOnlyNoInternet: isOnuMgmtOnly,
+      enableNat: effectiveEnableNat,
+      vlanName: vlanLabel,
     });
     void executeAndDisplayLivePush(
       'RESYNC_CONFIG',
@@ -956,7 +972,8 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       vlan?.vlan_id || 101,
       cleanUser,
       cleanPass,
-      onu.wan_remote_access || 'Enabled from everywhere in the internet'
+      onu.wan_remote_access || 'Enabled from everywhere in the internet',
+      effectiveEnableNat
     );
     setEditingInlinePppoe(false);
     void executeAndDisplayLivePush(
@@ -1622,6 +1639,18 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 </div>
                 <div className="text-[11px] text-emerald-400">
                   WAN remote access: {onu.wan_remote_access}
+                </div>
+                <div className="text-[11px] text-slate-300">
+                  NAT:{' '}
+                  <span
+                    className={
+                      effectiveEnableNat
+                        ? 'font-semibold text-emerald-400'
+                        : 'font-semibold text-amber-300'
+                    }
+                  >
+                    {effectiveEnableNat ? 'Enabled (nat enable)' : 'Disabled (CLI nat excluded)'}
+                  </span>
                 </div>
               </div>
             </div>
@@ -2517,6 +2546,8 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     tr069TrafficProfile: tr069Profile?.traffic_profile || 'SMARTOLT-VOIPMNG-10M',
                     voipSipEnabled: onu.voip_enabled ?? tr069Profile?.voip_enabled ?? isOnuMgmtOnly,
                     mgmtOnlyNoInternet: isOnuMgmtOnly,
+                    enableNat: effectiveEnableNat,
+                    vlanName: vlanLabel,
                   });
                   const cli = [
                     'configure terminal',

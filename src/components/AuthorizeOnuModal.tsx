@@ -10,6 +10,7 @@ import {
 import {
   findNextAvailableOnuIndex,
   generateAuthorizeCliScript,
+  resolveEffectiveEnableNat,
   OnuModeOption,
   WanModeOption,
   ConfigMethodOption,
@@ -292,7 +293,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   const [useGps, setUseGps] = useState<boolean>(false);
 
   // Advanced WAN PPPoE, WAN Remote Access & TR069 options
-  const [wanMode, setWanMode] = useState<WanModeOption>('PPPOE');
+  const wanMode: WanModeOption = 'PPPOE';
   const [configMethod, setConfigMethod] = useState<ConfigMethodOption>('OMCI');
   const defaultTrProfile =
     db.tr069_profiles.find((p) => p.is_default) || db.tr069_profiles[0];
@@ -336,6 +337,17 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
     selectedVlan?.used_for_mgmt_tr069_voip ||
       selectedVlan?.service_type === 'TR069_MGMT'
   );
+  const defaultVlanEnableNat = resolveEffectiveEnableNat({
+    vlanEnableNat: 'enable_nat' in selectedVlan ? selectedVlan.enable_nat : undefined,
+    vlanName: selectedVlan?.name || ('description' in selectedVlan ? selectedVlan.description : ''),
+    isMgmtOnly: isSelectedVlanMgmtOnly,
+  });
+  const [enableNat, setEnableNat] = useState<boolean>(defaultVlanEnableNat);
+  useEffect(() => {
+    setEnableNat(defaultVlanEnableNat);
+  }, [selectedVlan?.id, defaultVlanEnableNat]);
+
+  const effectiveEnableNat = isSelectedVlanMgmtOnly ? false : enableNat;
   const effectiveConfigMethod: ConfigMethodOption = isSelectedVlanMgmtOnly
     ? 'TR069'
     : configMethod;
@@ -360,12 +372,14 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
       tcontProfile: selectedTcont?.profile_name || 'SMARTOLT-1G-UP',
       speedProfile: selectedSpeed?.profile_name || 'SMARTOLT-1G-DOWN',
       vlanId: selectedVlan?.vlan_id || 101,
+      vlanName: selectedVlan?.name || ('description' in selectedVlan ? selectedVlan.description : ''),
       onuMode,
       wanMode: onuMode === 'Bridging' ? 'BRIDGE' : wanMode,
       configMethod: effectiveConfigMethod,
       wanRemoteAccess,
       pppoeUsername: effectivePppoeUser,
       pppoePassword,
+      enableNat: effectiveEnableNat,
       tr069Enabled: effectiveConfigMethod === 'TR069',
       tr069AcsUrl: selectedTr069?.acs_url,
       tr069AcsUsername: selectedTr069?.acs_username,
@@ -395,6 +409,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
     wanRemoteAccess,
     effectivePppoeUser,
     pppoePassword,
+    effectiveEnableNat,
     selectedTr069,
     effectiveMgmtVlanId,
     isSelectedVlanMgmtOnly,
@@ -445,6 +460,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         tr069_last_inform:
           effectiveConfigMethod === 'TR069' ? `${jktIso} WIB` : null,
         voip_enabled: isSelectedVlanMgmtOnly ? true : voipSipEnabled,
+        enable_nat: effectiveEnableNat,
         mgmt_ip: null,
         wifi_enabled: true,
         pppoe_username:
@@ -826,6 +842,21 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
                     <strong>Mode VLAN Management (VLAN {selectedVlan.vlan_id}):</strong> Service yang dikirim hanya <strong>TR-069 &amp; VoIP</strong>, tanpa push Internet (PPPoE / DHCP WAN / Bridge).
                   </div>
                 )}
+                <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-emerald-300">
+                  <input
+                    type="checkbox"
+                    checked={effectiveEnableNat}
+                    disabled={isSelectedVlanMgmtOnly}
+                    onChange={(e) => setEnableNat(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded accent-emerald-500"
+                  />
+                  <span>Enable NAT</span>
+                  {!effectiveEnableNat && (
+                    <span className="text-[11px] font-normal text-amber-300">
+                      (Non-NAT: perintah `nat` / `ip nat` dikecualikan dari CLI untuk VLAN {selectedVlan.name || selectedVlan.vlan_id})
+                    </span>
+                  )}
+                </label>
               </div>
             </div>
 

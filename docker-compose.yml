@@ -2,7 +2,7 @@
 # Docker Compose — JETCYBERNET SmartOLT (Port 3004) + PostgreSQL Terpisah (Port 5435)
 # - Container PostgreSQL dibuat TERPISAH (container_name & volume sendiri)
 #   agar tidak bentrok dengan PostgreSQL default (5432) yang sudah ada di Docker Anda.
-# - Bisa diakses langsung dari localhost:5435 (User: likhin | Pass: 11013009)
+# - Bisa diakses langsung dari localhost:5435 (User: likhin | Pass dari env PG_PASSWORD)
 # - Web SmartOLT berjalan di http://localhost:3004
 # =============================================================================
 
@@ -12,9 +12,9 @@ services:
     container_name: jetcybernet-smartolt-postgres
     restart: unless-stopped
     environment:
-      - POSTGRES_USER=likhin
-      - POSTGRES_PASSWORD=11013009
-      - POSTGRES_DB=smartolt_db
+      - POSTGRES_USER=${PG_USER:-likhin}
+      - POSTGRES_PASSWORD=${PG_PASSWORD:-CHANGE_ME_STRONG_PASSWORD}
+      - POSTGRES_DB=${PG_DATABASE:-smartolt_db}
       - PGPORT=5435
     ports:
       - "5435:5435"
@@ -45,9 +45,9 @@ services:
       - PORT=3004
       - PG_HOST=localhost
       - PG_PORT=5435
-      - PG_USER=likhin
-      - PG_PASSWORD=11013009
-      - PG_DATABASE=smartolt_db
+      - PG_USER=${PG_USER:-likhin}
+      - PG_PASSWORD=${PG_PASSWORD:-CHANGE_ME_STRONG_PASSWORD}
+      - PG_DATABASE=${PG_DATABASE:-smartolt_db}
       - SQLITE_PATH=/app/data/smartolt_live.sqlite
     volumes:
       - ./data:/app/data
