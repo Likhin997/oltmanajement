@@ -2275,7 +2275,7 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
 // 3. CRYPTOGRAPHIC SESSION, SCRYPT HASHING, RATE LIMIT & RBAC ENGINE (/api/*)
 // ============================================================================
 const SESSION_COOKIE_NAME = 'smartolt_sid';
-const SESSION_TTL_MS = 8 * 3600 * 1000; // 8 jam sliding idle timeout
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 menit sliding idle timeout (sinkron client & server)
 const SESSION_MAX_LIFETIME_MS = 24 * 3600 * 1000; // 24 jam batas absolut umur sesi
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCKOUT_MS = 60 * 1000; // 60 detik penguncian setelah 5x gagal login
@@ -2500,7 +2500,10 @@ function createServerSessionForUser(
   return { rawToken, sessionRow };
 }
 
-async function resolveActiveSessionUser(req: express.Request): Promise<{
+async function resolveActiveSessionUser(
+  req: express.Request,
+  options: { touchActivity?: boolean } = {}
+): Promise<{
   sessionRow: AuthSessionRow;
   user: AppUserRecord;
   state: SmartOltDatabaseState;
@@ -2534,18 +2537,22 @@ async function resolveActiveSessionUser(req: express.Request): Promise<{
     return null;
   }
 
-  const nextExpires = Math.min(
-    now + SESSION_TTL_MS,
-    row.created_at + SESSION_MAX_LIFETIME_MS
-  );
-  sqliteDb
-    .prepare(
-      `UPDATE auth_sessions SET last_seen_at = ?, expires_at = ?, role = ?, username = ? WHERE token_hash = ?`
-    )
-    .run(now, nextExpires, user.role, user.username, tokenHash);
+  // Only extend sliding idle expiry on real user activity (never on background polls/heartbeats)
+  if (options.touchActivity !== false) {
+    const nextExpires = Math.min(
+      now + SESSION_TTL_MS,
+      row.created_at + SESSION_MAX_LIFETIME_MS
+    );
+    sqliteDb
+      .prepare(
+        `UPDATE auth_sessions SET last_seen_at = ?, expires_at = ?, role = ?, username = ? WHERE token_hash = ?`
+      )
+      .run(now, nextExpires, user.role, user.username, tokenHash);
 
-  row.last_seen_at = now;
-  row.expires_at = nextExpires;
+    row.last_seen_at = now;
+    row.expires_at = nextExpires;
+  }
+
   row.role = user.role;
   row.username = user.username;
 
@@ -2751,18 +2758,57 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// GET /api/auth/session — Verify current session token & return active user
+// GET /api/auth/session — Verify current session token without extending idle timeout
 app.get('/api/auth/session', async (req, res) => {
   try {
-    const resolved = await resolveActiveSessionUser(req);
+    const resolved = await resolveActiveSessionUser(req, {
+      touchActivity: false,
+    });
     if (!resolved) {
       clearSessionCookie(req, res);
       res.status(401).json({
         ok: false,
         authenticated: false,
-        error: 'Sesi tidak ditemukan atau telah berakhir.',
+        error: 'Sesi berakhir otomatis karena tidak ada aktivitas atau token kadaluarsa.',
       });
       return;
+    }
+
+    const now = Date.now();
+    res.json({
+      ok: true,
+      authenticated: true,
+      sessionId: resolved.sessionRow.token_hash.slice(0, 12).toUpperCase(),
+      expiresAt: resolved.sessionRow.expires_at,
+      lastSeenAt: resolved.sessionRow.last_seen_at,
+      idleTimeoutMs: SESSION_TTL_MS,
+      remainingIdleMs: Math.max(0, resolved.sessionRow.expires_at - now),
+      user: sanitizeUserForClient(resolved.user),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// POST /api/auth/keepalive — Slide idle session TTL when user shows real UI activity
+app.post('/api/auth/keepalive', async (req, res) => {
+  try {
+    const resolved = await resolveActiveSessionUser(req, {
+      touchActivity: true,
+    });
+    if (!resolved) {
+      clearSessionCookie(req, res);
+      res.status(401).json({
+        ok: false,
+        authenticated: false,
+        error: 'Sesi berakhir otomatis karena tidak ada aktivitas selama 30 menit.',
+      });
+      return;
+    }
+
+    const rawToken = extractSessionToken(req);
+    if (rawToken) {
+      setSessionCookie(req, res, rawToken);
     }
 
     res.json({
@@ -2770,7 +2816,9 @@ app.get('/api/auth/session', async (req, res) => {
       authenticated: true,
       sessionId: resolved.sessionRow.token_hash.slice(0, 12).toUpperCase(),
       expiresAt: resolved.sessionRow.expires_at,
-      user: sanitizeUserForClient(resolved.user),
+      lastSeenAt: resolved.sessionRow.last_seen_at,
+      idleTimeoutMs: SESSION_TTL_MS,
+      remainingIdleMs: Math.max(0, resolved.sessionRow.expires_at - Date.now()),
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
@@ -2854,6 +2902,7 @@ app.use('/api', async (req, res, next) => {
     req.path === '/auth/login' ||
     req.path === '/auth/session' ||
     req.path === '/auth/logout' ||
+    req.path === '/auth/keepalive' ||
     req.path === '/auth/switch-user'
   ) {
     next();
@@ -2861,7 +2910,11 @@ app.use('/api', async (req, res, next) => {
   }
 
   try {
-    const resolved = await resolveActiveSessionUser(req);
+    const isBackgroundPoll =
+      String(req.headers['x-background-poll'] || '') === '1';
+    const resolved = await resolveActiveSessionUser(req, {
+      touchActivity: !isBackgroundPoll,
+    });
     if (!resolved) {
       clearSessionCookie(req, res);
       res.status(401).json({
@@ -3763,15 +3816,36 @@ app.post('/api/telnet/exec', async (req, res) => {
   const olt =
     state.olts.find((o) => o.id === Number(oltId)) || state.olts[0];
 
-  const targetHost = String(ip_address || olt?.ip_address || '').trim();
-  const targetPort = Number(telnet_port || olt?.telnet_port || 23);
-  const targetUser = olt_username || olt?.olt_username || 'zte';
+  const isViewerRole = authUser?.role === 'VIEWER';
+  if (
+    isViewerRole &&
+    authUser &&
+    !authUser.access_all_olts &&
+    (!olt || !(authUser.allowed_olt_ids || []).includes(olt.id))
+  ) {
+    res.status(403).json({
+      ok: false,
+      error: 'Forbidden: Akun VIEWER Anda tidak memiliki hak akses ke perangkat OLT ini.',
+    });
+    return;
+  }
+
+  const targetHost = String(
+    (!isViewerRole ? ip_address : undefined) || olt?.ip_address || ''
+  ).trim();
+  const targetPort = Number(
+    (!isViewerRole ? telnet_port : undefined) || olt?.telnet_port || 23
+  );
+  const targetUser =
+    (!isViewerRole ? olt_username : undefined) || olt?.olt_username || 'zte';
   const targetPass =
-    (olt_password && olt_password !== MASKED_SECRET ? olt_password : '') ||
+    (!isViewerRole && olt_password && olt_password !== MASKED_SECRET
+      ? olt_password
+      : '') ||
     olt?.olt_password ||
     '';
   const targetEnablePass =
-    (enable_password && enable_password !== MASKED_SECRET
+    (!isViewerRole && enable_password && enable_password !== MASKED_SECRET
       ? enable_password
       : '') ||
     olt?.enable_password ||
@@ -3797,7 +3871,7 @@ app.post('/api/telnet/exec', async (req, res) => {
   }
 
   // Role VIEWER hanya boleh menjalankan perintah read-only `show ...`
-  if (authUser?.role === 'VIEWER') {
+  if (isViewerRole) {
     const normalizedCheck = normalizeCliCommandsForExecution(rawScript);
     const hasMutatingCmd = normalizedCheck.some(
       (c) => !/^show\s+/i.test(c) && !/^terminal\s+/i.test(c)

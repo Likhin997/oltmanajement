@@ -95,6 +95,7 @@ interface OltDetailViewProps {
   onSyncOltLive?: (oltId: number) => Promise<void>;
   onTabChange?: (tab: OltDetailTab) => void;
   onOpenTr069Config?: () => void;
+  isReadOnly?: boolean;
 }
 
 export const OltDetailView: React.FC<OltDetailViewProps> = ({
@@ -117,6 +118,7 @@ export const OltDetailView: React.FC<OltDetailViewProps> = ({
   onSyncOltLive,
   onTabChange,
   onOpenTr069Config,
+  isReadOnly = false,
 }) => {
   const [activeTab, setActiveTab] = useState<OltDetailTab>(initialTab);
 
@@ -646,7 +648,7 @@ ${oltVlans
           >
             Back to OLTs list
           </button>
-          {onSyncOltLive && (
+          {!isReadOnly && onSyncOltLive && (
             <button
               type="button"
               disabled={isSyncingLive}
@@ -665,6 +667,11 @@ ${oltVlans
                 ? 'Menarik Data & Config dari OLT...'
                 : 'Sync Data & Config dari OLT (Telnet)'}
             </button>
+          )}
+          {isReadOnly && (
+            <span className="inline-flex items-center gap-1.5 rounded border border-amber-500/40 bg-amber-950/60 px-2.5 py-1.5 font-mono text-[11px] font-bold text-amber-300">
+              MODE VIEWER (READ-ONLY)
+            </span>
           )}
         </div>
         <div className="font-mono text-xs text-slate-300">
@@ -744,31 +751,35 @@ ${oltVlans
         <div className="space-y-4">
           {/* Action Buttons Row */}
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setShowEditOltModal(true)}
-              className="rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
-            >
-              Edit OLT settings
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                onUpdateOltSettings(olt.id, {
-                  snmp_traps_enabled: !olt.snmp_traps_enabled,
-                })
-              }
-              className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
-            >
-              SNMP Traps
-              <span
-                className={`inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] text-white ${
-                  olt.snmp_traps_enabled ? 'bg-emerald-500' : 'bg-red-500'
-                }`}
-              >
-                {olt.snmp_traps_enabled ? '✓' : '✕'}
-              </span>
-            </button>
+            {!isReadOnly && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowEditOltModal(true)}
+                  className="rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+                >
+                  Edit OLT settings
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdateOltSettings(olt.id, {
+                      snmp_traps_enabled: !olt.snmp_traps_enabled,
+                    })
+                  }
+                  className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+                >
+                  SNMP Traps
+                  <span
+                    className={`inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] text-white ${
+                      olt.snmp_traps_enabled ? 'bg-emerald-500' : 'bg-red-500'
+                    }`}
+                  >
+                    {olt.snmp_traps_enabled ? '✓' : '✕'}
+                  </span>
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => setCliDrawerOpen(true)}
@@ -814,7 +825,7 @@ ${oltVlans
                     'show vlan summary',
                     'show interface gei_1/19/3',
                     'show gpon onu uncfg',
-                    'write',
+                    ...(!isReadOnly ? ['write'] : []),
                   ].map((cmd) => (
                     <button
                       key={cmd}
@@ -1058,13 +1069,15 @@ ${oltVlans
                     </td>
                     <td className="flex flex-wrap items-center gap-3 px-4 py-2.5 font-mono text-white">
                       <span>{olt.ntp_servers}</span>
-                      <button
-                        type="button"
-                        onClick={() => setShowEditOltModal(true)}
-                        className="rounded bg-[#5cb85c] px-2.5 py-1 font-sans text-xs font-bold text-white hover:bg-[#4cae4c]"
-                      >
-                        Edit NTP servers
-                      </button>
+                      {!isReadOnly && (
+                        <button
+                          type="button"
+                          onClick={() => setShowEditOltModal(true)}
+                          className="rounded bg-[#5cb85c] px-2.5 py-1 font-sans text-xs font-bold text-white hover:bg-[#4cae4c]"
+                        >
+                          Edit NTP servers
+                        </button>
+                      )}
                     </td>
                   </tr>
                   {/* TR069 Profile row */}
@@ -1075,8 +1088,9 @@ ${oltVlans
                     <td className="flex flex-wrap items-center gap-3 px-4 py-2.5">
                       <select
                         value={tr069ProfileName}
+                        disabled={isReadOnly}
                         onChange={(e) => setTr069ProfileName(e.target.value)}
-                        className="rounded border border-[#284870] bg-[#10233a] px-3 py-1.5 text-xs text-white"
+                        className="rounded border border-[#284870] bg-[#10233a] px-3 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         {db.tr069_profiles.map((p) => (
                           <option key={p.id} value={p.profile_name}>
@@ -1084,21 +1098,23 @@ ${oltVlans
                           </option>
                         ))}
                       </select>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onUpdateOltTr069(olt.id, tr069ProfileName, tr069DefaultIf)
-                        }
-                        className="rounded border border-slate-600 bg-slate-700/80 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-600"
-                      >
-                        Set profiles
-                      </button>
+                      {!isReadOnly && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateOltTr069(olt.id, tr069ProfileName, tr069DefaultIf)
+                          }
+                          className="rounded border border-slate-600 bg-slate-700/80 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-600"
+                        >
+                          Set profiles
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleSelectTab('PROFILES')}
                         className="text-xs text-sky-400 underline"
                       >
-                        Manage TR069 profiles
+                        {isReadOnly ? 'View TR069 profiles' : 'Manage TR069 profiles'}
                       </button>
                     </td>
                   </tr>
@@ -1110,11 +1126,13 @@ ${oltVlans
                     <td className="px-4 py-2.5">
                       <select
                         value={tr069DefaultIf}
+                        disabled={isReadOnly}
                         onChange={(e) => {
+                          if (isReadOnly) return;
                           setTr069DefaultIf(e.target.value);
                           onUpdateOltTr069(olt.id, tr069ProfileName, e.target.value);
                         }}
-                        className="rounded border border-[#284870] bg-[#10233a] px-3 py-1.5 text-xs text-white"
+                        className="rounded border border-[#284870] bg-[#10233a] px-3 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         <option value="Mgmt IP (recommended)">
                           Mgmt IP (recommended)
@@ -1164,18 +1182,20 @@ ${oltVlans
                 </div>
                 <div className="flex items-center justify-between px-4 py-2.5">
                   <span className="font-semibold text-slate-200">☢ Fans</span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setLastCliBanner({
-                        title: `Fan Speed Tray Status — ${olt.name}`,
-                        cli: `${olt.name}# show fan\nFanTray 1: Normal (Speed: 4200 RPM, Auto-Temp Mode)`,
-                      })
-                    }
-                    className="rounded border border-slate-500 bg-slate-700 px-2.5 py-1 text-[11px] font-bold text-white"
-                  >
-                    Configure
-                  </button>
+                  {!isReadOnly && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setLastCliBanner({
+                          title: `Fan Speed Tray Status — ${olt.name}`,
+                          cli: `${olt.name}# show fan\nFanTray 1: Normal (Speed: 4200 RPM, Auto-Temp Mode)`,
+                        })
+                      }
+                      className="rounded border border-slate-500 bg-slate-700 px-2.5 py-1 text-[11px] font-bold text-white"
+                    >
+                      Configure
+                    </button>
+                  )}
                 </div>
                 <div className="px-4 py-2 text-slate-300">No fan speed data</div>
                 <div className="flex items-center justify-between px-4 py-2.5">
@@ -1203,31 +1223,33 @@ ${oltVlans
          =================================================================== */}
       {activeTab === 'OLT_CARDS' && (
         <div className="space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={isSyncingLive}
-              onClick={async () => {
-                onRefreshOltCards();
-                if (onSyncOltLive) {
-                  setIsSyncingLive(true);
-                  try {
-                    await onSyncOltLive(olt.id);
-                  } finally {
-                    setIsSyncingLive(false);
+          {!isReadOnly && (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={isSyncingLive}
+                onClick={async () => {
+                  onRefreshOltCards();
+                  if (onSyncOltLive) {
+                    setIsSyncingLive(true);
+                    try {
+                      await onSyncOltLive(olt.id);
+                    } finally {
+                      setIsSyncingLive(false);
+                    }
                   }
-                }
-                setLastCliBanner({
-                  title: `Refreshed OLT Cards Status via ZTE CLI`,
-                  cli: `${olt.name}# show card\nSlot 3 (GTGH 16-Port GPON): Online | Slot 10 (SCXM Main): Online | Slot 19 (HUVQ 4-Port Uplink): Online`,
-                });
-              }}
-              className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-60"
-            >
-              <RefreshCw className={`h-3.5 w-3.5 ${isSyncingLive ? 'animate-spin' : ''}`} />
-              Refresh OLT cards info (Live Telnet)
-            </button>
-          </div>
+                  setLastCliBanner({
+                    title: `Refreshed OLT Cards Status via ZTE CLI`,
+                    cli: `${olt.name}# show card\nSlot 3 (GTGH 16-Port GPON): Online | Slot 10 (SCXM Main): Online | Slot 19 (HUVQ 4-Port Uplink): Online`,
+                  });
+                }}
+                className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-60"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${isSyncingLive ? 'animate-spin' : ''}`} />
+                Refresh OLT cards info (Live Telnet)
+              </button>
+            </div>
+          )}
 
           <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
             <table className="w-full text-left text-xs">
@@ -1274,19 +1296,23 @@ ${oltVlans
                       {card.updated_at}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onRebootOltCard(card.id);
-                          setLastCliBanner({
-                            title: `Rebooted OLT Card Slot ${card.slot} (${card.type})`,
-                            cli: `configure terminal\nreset-card rack 1 shelf 1 slot ${card.slot}\nend`,
-                          });
-                        }}
-                        className="rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
-                      >
-                        Reboot-card
-                      </button>
+                      {!isReadOnly ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onRebootOltCard(card.id);
+                            setLastCliBanner({
+                              title: `Rebooted OLT Card Slot ${card.slot} (${card.type})`,
+                              cli: `configure terminal\nreset-card rack 1 shelf 1 slot ${card.slot}\nend`,
+                            });
+                          }}
+                          className="rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
+                        >
+                          Reboot-card
+                        </button>
+                      ) : (
+                        <span className="text-slate-500">Read-Only</span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1314,31 +1340,35 @@ ${oltVlans
             >
               Refresh PON ports info
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                onEnableAllPonPorts();
-                setLastCliBanner({
-                  title: `Enabled All 16 GPON Ports on Slot 3 (GTGH)`,
-                  cli: `configure terminal\ninterface range gpon-olt_1/3/1-16\n  no shutdown\nexit\nend\nwrite`,
-                });
-              }}
-              className="rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
-            >
-              Enable all PON ports
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                setLastCliBanner({
-                  title: `Batch Reboot All ONUs Executed on ${olt.name}`,
-                  cli: `configure terminal\npon-onu-mng gpon-olt_1/3/1-16\n  reboot all-onu\nexit\nend`,
-                })
-              }
-              className="rounded bg-[#f0ad4e] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#ec971f]"
-            >
-              Reboot all ONUs
-            </button>
+            {!isReadOnly && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onEnableAllPonPorts();
+                    setLastCliBanner({
+                      title: `Enabled All 16 GPON Ports on Slot 3 (GTGH)`,
+                      cli: `configure terminal\ninterface range gpon-olt_1/3/1-16\n  no shutdown\nexit\nend\nwrite`,
+                    });
+                  }}
+                  className="rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+                >
+                  Enable all PON ports
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setLastCliBanner({
+                      title: `Batch Reboot All ONUs Executed on ${olt.name}`,
+                      cli: `configure terminal\npon-onu-mng gpon-olt_1/3/1-16\n  reboot all-onu\nexit\nend`,
+                    })
+                  }
+                  className="rounded bg-[#f0ad4e] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#ec971f]"
+                >
+                  Reboot all ONUs
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -1372,34 +1402,36 @@ ${oltVlans
             <h3 className="text-base font-bold text-white">
               OLT slot 3, board type: GTGH
             </h3>
-            <div className="flex items-center gap-4 text-xs text-sky-400">
-              <button
-                type="button"
-                onClick={() => {
-                  const firstPort = full16PonPorts[0];
-                  setConfiguringPonPort(firstPort);
-                  setPonEditDesc(firstPort.description);
-                  setPonEditAdmin(firstPort.admin_state);
-                  setPonEditOper(firstPort.oper_status);
-                  setPonEditMaxOnu(firstPort.max_onu_capacity);
-                }}
-                className="hover:underline"
-              >
-                ✎ Configure Max ONUs per PON
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  setLastCliBanner({
-                    title: `Rebooted All ONUs on Slot 3 (GTGH)`,
-                    cli: `configure terminal\ninterface range gpon-olt_1/3/1-16\n  onu reboot all\nexit\nend`,
-                  })
-                }
-                className="hover:underline"
-              >
-                ↻ Reboot all ONUs on slot 3
-              </button>
-            </div>
+            {!isReadOnly && (
+              <div className="flex items-center gap-4 text-xs text-sky-400">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const firstPort = full16PonPorts[0];
+                    setConfiguringPonPort(firstPort);
+                    setPonEditDesc(firstPort.description);
+                    setPonEditAdmin(firstPort.admin_state);
+                    setPonEditOper(firstPort.oper_status);
+                    setPonEditMaxOnu(firstPort.max_onu_capacity);
+                  }}
+                  className="hover:underline"
+                >
+                  ✎ Configure Max ONUs per PON
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setLastCliBanner({
+                      title: `Rebooted All ONUs on Slot 3 (GTGH)`,
+                      cli: `configure terminal\ninterface range gpon-olt_1/3/1-16\n  onu reboot all\nexit\nend`,
+                    })
+                  }
+                  className="hover:underline"
+                >
+                  ↻ Reboot all ONUs on slot 3
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
@@ -1499,19 +1531,21 @@ ${oltVlans
                         {p.tx_power_dbm}
                       </td>
                       <td className="space-y-1 px-3 py-2.5 text-sky-400">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setConfiguringPonPort(p);
-                            setPonEditDesc(p.description);
-                            setPonEditAdmin(p.admin_state);
-                            setPonEditOper(p.oper_status);
-                            setPonEditMaxOnu(p.max_onu_capacity || 128);
-                          }}
-                          className="block hover:underline"
-                        >
-                          ⚙ Configure
-                        </button>
+                        {!isReadOnly && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfiguringPonPort(p);
+                              setPonEditDesc(p.description);
+                              setPonEditAdmin(p.admin_state);
+                              setPonEditOper(p.oper_status);
+                              setPonEditMaxOnu(p.max_onu_capacity || 128);
+                            }}
+                            className="block hover:underline"
+                          >
+                            ⚙ Configure
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => setTrafficPonPort(p)}
@@ -1519,18 +1553,20 @@ ${oltVlans
                         >
                           📈 Traffic
                         </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setLastCliBanner({
-                              title: `Rebooted All ONUs on PON Port ${p.interface_name}`,
-                              cli: `configure terminal\ninterface ${p.interface_name}\n  onu reboot all\nexit\nend`,
-                            })
-                          }
-                          className="block hover:underline"
-                        >
-                          ↻ Reboot ONUs
-                        </button>
+                        {!isReadOnly && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setLastCliBanner({
+                                title: `Rebooted All ONUs on PON Port ${p.interface_name}`,
+                                cli: `configure terminal\ninterface ${p.interface_name}\n  onu reboot all\nexit\nend`,
+                              })
+                            }
+                            className="block hover:underline"
+                          >
+                            ↻ Reboot ONUs
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
@@ -1546,43 +1582,45 @@ ${oltVlans
          =================================================================== */}
       {activeTab === 'UPLINK' && (
         <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                disabled={isSyncingLive}
-                onClick={async () => {
-                  if (onSyncOltLive) {
-                    setIsSyncingLive(true);
-                    try {
-                      await onSyncOltLive(olt.id);
-                    } finally {
-                      setIsSyncingLive(false);
+          {!isReadOnly && (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isSyncingLive}
+                  onClick={async () => {
+                    if (onSyncOltLive) {
+                      setIsSyncingLive(true);
+                      try {
+                        await onSyncOltLive(olt.id);
+                      } finally {
+                        setIsSyncingLive(false);
+                      }
                     }
-                  }
-                  setLastCliBanner({
-                    title: `Refreshed Uplink Ports Optical & VLAN Tagging Status`,
-                    cli: `${olt.name}# show running-config | include interface xgei|gei\nAll uplink interfaces & VLAN tags synced from OLT.`,
-                  });
-                }}
-                className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-60"
-              >
-                <RefreshCw className={`h-3.5 w-3.5 ${isSyncingLive ? 'animate-spin' : ''}`} />
-                Refresh uplink ports info (Live Telnet)
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowCreateLagModal(true)}
-                className="flex items-center gap-1 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
-              >
-                <Link className="h-3.5 w-3.5" />
-                Create LAG
-              </button>
+                    setLastCliBanner({
+                      title: `Refreshed Uplink Ports Optical & VLAN Tagging Status`,
+                      cli: `${olt.name}# show running-config | include interface xgei|gei\nAll uplink interfaces & VLAN tags synced from OLT.`,
+                    });
+                  }}
+                  className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-60"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${isSyncingLive ? 'animate-spin' : ''}`} />
+                  Refresh uplink ports info (Live Telnet)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateLagModal(true)}
+                  className="flex items-center gap-1 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                >
+                  <Link className="h-3.5 w-3.5" />
+                  Create LAG
+                </button>
+              </div>
+              <div className="text-xs text-sky-300">
+                Klik <strong>⚙ Configure</strong> pada port Uplink di bawah untuk mengatur mode Hybrid/Trunk, PVID, dan <strong>Tag VLAN ke Uplink</strong>.
+              </div>
             </div>
-            <div className="text-xs text-sky-300">
-              Klik <strong>⚙ Configure</strong> pada port Uplink di bawah untuk mengatur mode Hybrid/Trunk, PVID, dan <strong>Tag VLAN ke Uplink</strong>.
-            </div>
-          </div>
+          )}
 
           <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
             <table className="w-full text-left text-xs">
@@ -1607,13 +1645,17 @@ ${oltVlans
                 {uplinkPorts.map((u) => (
                   <tr key={u.id} className="hover:bg-[#132842]/50">
                     <td className="px-3 py-3 font-mono font-bold text-sky-400">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenConfigureUplink(u)}
-                        className="hover:underline"
-                      >
-                        {u.name}
-                      </button>
+                      {!isReadOnly ? (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenConfigureUplink(u)}
+                          className="hover:underline"
+                        >
+                          {u.name}
+                        </button>
+                      ) : (
+                        <span>{u.name}</span>
+                      )}
                     </td>
                     <td className="px-3 py-3 text-slate-200">{u.description}</td>
                     <td className="px-3 py-3 text-white">{u.type}</td>
@@ -1644,23 +1686,31 @@ ${oltVlans
                       {u.pvid_untag}
                     </td>
                     <td className="px-3 py-3">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenConfigureUplink(u)}
-                        className="rounded border border-sky-500/40 bg-sky-950/50 px-2 py-1 font-mono text-xs font-semibold text-sky-300 hover:bg-sky-900/60"
-                        title="Click to Tag / Untag VLANs on this Uplink port"
-                      >
-                        {u.tagged_vlans}
-                      </button>
+                      {!isReadOnly ? (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenConfigureUplink(u)}
+                          className="rounded border border-sky-500/40 bg-sky-950/50 px-2 py-1 font-mono text-xs font-semibold text-sky-300 hover:bg-sky-900/60"
+                          title="Click to Tag / Untag VLANs on this Uplink port"
+                        >
+                          {u.tagged_vlans}
+                        </button>
+                      ) : (
+                        <span className="rounded border border-sky-500/30 bg-sky-950/40 px-2 py-1 font-mono text-xs font-semibold text-sky-300">
+                          {u.tagged_vlans}
+                        </span>
+                      )}
                     </td>
                     <td className="space-y-1 px-3 py-3 text-sky-400">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenConfigureUplink(u)}
-                        className="block font-semibold hover:underline"
-                      >
-                        ⚙ Configure
-                      </button>
+                      {!isReadOnly && (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenConfigureUplink(u)}
+                          className="block font-semibold hover:underline"
+                        >
+                          ⚙ Configure
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => setTrafficUplink(u)}
@@ -1682,61 +1732,63 @@ ${oltVlans
          =================================================================== */}
       {activeTab === 'VLANS' && (
         <div className="space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                setNewVlanId(150);
-                setNewVlanDesc('HOTSPOT-VOUCHER');
-                setVlanModalMode('SINGLE');
-              }}
-              className="flex items-center gap-1 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add VLAN
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setNewVlanRange('201-204');
-                setNewVlanDesc('CORP-VLAN');
-                setVlanModalMode('MULTIPLE');
-              }}
-              className="flex items-center gap-1 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add multiple VLANs
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedVlansForDelete([]);
-                setVlanModalMode('DELETE_MULTIPLE');
-              }}
-              className="flex items-center gap-1 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
-            >
-              <Minus className="h-3.5 w-3.5" />
-              Delete multiple VLANs
-            </button>
-            {onSyncOltLive && (
+          {!isReadOnly && (
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                disabled={isSyncingLive}
-                onClick={async () => {
-                  setIsSyncingLive(true);
-                  try {
-                    await onSyncOltLive(olt.id);
-                  } finally {
-                    setIsSyncingLive(false);
-                  }
+                onClick={() => {
+                  setNewVlanId(150);
+                  setNewVlanDesc('HOTSPOT-VOUCHER');
+                  setVlanModalMode('SINGLE');
                 }}
-                className="flex items-center gap-1.5 rounded bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-60"
+                className="flex items-center gap-1 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
               >
-                <RefreshCw className={`h-3.5 w-3.5 ${isSyncingLive ? 'animate-spin' : ''}`} />
-                {isSyncingLive ? 'Syncing VLANs...' : 'Sync VLANs dari OLT (Telnet)'}
+                <Plus className="h-3.5 w-3.5" />
+                Add VLAN
               </button>
-            )}
-          </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setNewVlanRange('201-204');
+                  setNewVlanDesc('CORP-VLAN');
+                  setVlanModalMode('MULTIPLE');
+                }}
+                className="flex items-center gap-1 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add multiple VLANs
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedVlansForDelete([]);
+                  setVlanModalMode('DELETE_MULTIPLE');
+                }}
+                className="flex items-center gap-1 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5]"
+              >
+                <Minus className="h-3.5 w-3.5" />
+                Delete multiple VLANs
+              </button>
+              {onSyncOltLive && (
+                <button
+                  type="button"
+                  disabled={isSyncingLive}
+                  onClick={async () => {
+                    setIsSyncingLive(true);
+                    try {
+                      await onSyncOltLive(olt.id);
+                    } finally {
+                      setIsSyncingLive(false);
+                    }
+                  }}
+                  className="flex items-center gap-1.5 rounded bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-60"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${isSyncingLive ? 'animate-spin' : ''}`} />
+                  {isSyncingLive ? 'Syncing VLANs...' : 'Sync VLANs dari OLT (Telnet)'}
+                </button>
+              )}
+            </div>
+          )}
 
           <p className="text-xs text-sky-300">
             VLANs added here will not be applied to the Uplink ports automatically unless selected.{' '}
@@ -1797,11 +1849,13 @@ ${oltVlans
                         <div className="flex flex-wrap items-center gap-2">
                           <input
                             type="checkbox"
+                            disabled={isReadOnly}
                             checked={v.used_for_mgmt_tr069_voip}
-                            onChange={() =>
-                              onToggleVlanFlag(v.id, 'used_for_mgmt_tr069_voip')
-                            }
-                            className="h-4 w-4 rounded accent-sky-500"
+                            onChange={() => {
+                              if (isReadOnly) return;
+                              onToggleVlanFlag(v.id, 'used_for_mgmt_tr069_voip');
+                            }}
+                            className="h-4 w-4 rounded accent-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
                           />
                           {(v.used_for_mgmt_tr069_voip ||
                             v.service_type === 'TR069_MGMT') && (
@@ -1814,35 +1868,51 @@ ${oltVlans
                       <td className="px-4 py-3">
                         <input
                           type="checkbox"
+                          disabled={isReadOnly}
                           checked={v.used_for_iptv}
-                          onChange={() => onToggleVlanFlag(v.id, 'used_for_iptv')}
-                          className="h-4 w-4 rounded accent-sky-500"
+                          onChange={() => {
+                            if (isReadOnly) return;
+                            onToggleVlanFlag(v.id, 'used_for_iptv');
+                          }}
+                          className="h-4 w-4 rounded accent-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
                         />
                       </td>
                       <td className="px-4 py-3">
                         <input
                           type="checkbox"
+                          disabled={isReadOnly}
                           checked={v.dhcp_snooping}
-                          onChange={() => onToggleVlanFlag(v.id, 'dhcp_snooping')}
-                          className="h-4 w-4 rounded accent-sky-500"
+                          onChange={() => {
+                            if (isReadOnly) return;
+                            onToggleVlanFlag(v.id, 'dhcp_snooping');
+                          }}
+                          className="h-4 w-4 rounded accent-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
                         />
                       </td>
                       <td className="px-4 py-3">
                         <input
                           type="checkbox"
+                          disabled={isReadOnly}
                           checked={v.lan_to_lan}
-                          onChange={() => onToggleVlanFlag(v.id, 'lan_to_lan')}
-                          className="h-4 w-4 rounded accent-sky-500"
+                          onChange={() => {
+                            if (isReadOnly) return;
+                            onToggleVlanFlag(v.id, 'lan_to_lan');
+                          }}
+                          className="h-4 w-4 rounded accent-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
                         />
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap items-center gap-2">
                           <input
                             type="checkbox"
+                            disabled={isReadOnly}
                             checked={isVlanNatEnabled}
-                            onChange={() => onToggleVlanFlag(v.id, 'enable_nat')}
+                            onChange={() => {
+                              if (isReadOnly) return;
+                              onToggleVlanFlag(v.id, 'enable_nat');
+                            }}
                             title="Centang untuk menyertakan perintah `nat` pada skrip CLI ONU untuk VLAN ini (hapus centang untuk VLAN non-NAT seperti MJMT)"
-                            className="h-4 w-4 rounded accent-emerald-500"
+                            className="h-4 w-4 rounded accent-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
                           />
                           {!isVlanNatEnabled && (
                             <span className="rounded border border-slate-600 bg-slate-800/90 px-1.5 py-0.5 text-[10px] font-semibold text-slate-300">
@@ -1864,32 +1934,38 @@ ${oltVlans
                         {v.onus_count}
                       </td>
                       <td className="flex items-center gap-2 px-4 py-3">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setQuickTaggingVlan(v);
-                            const currentIds = uplinkPorts
-                              .filter((u) =>
-                                parseTaggedVlanNumbers(u.tagged_vlans).includes(
-                                  v.vlan_id
-                                )
-                              )
-                              .map((u) => u.id);
-                            setQuickTagUplinkIds(
-                              currentIds.length > 0 ? currentIds : [3]
-                            );
-                          }}
-                          className="rounded bg-[#0275d8] px-2.5 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
-                        >
-                          Tag to Uplink
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onDeleteVlans([v.id])}
-                          className="rounded bg-[#d9534f] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#c9302c]"
-                        >
-                          Delete
-                        </button>
+                        {!isReadOnly ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setQuickTaggingVlan(v);
+                                const currentIds = uplinkPorts
+                                  .filter((u) =>
+                                    parseTaggedVlanNumbers(u.tagged_vlans).includes(
+                                      v.vlan_id
+                                    )
+                                  )
+                                  .map((u) => u.id);
+                                setQuickTagUplinkIds(
+                                  currentIds.length > 0 ? currentIds : [3]
+                                );
+                              }}
+                              className="rounded bg-[#0275d8] px-2.5 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
+                            >
+                              Tag to Uplink
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onDeleteVlans([v.id])}
+                              className="rounded bg-[#d9534f] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#c9302c]"
+                            >
+                              Delete
+                            </button>
+                          </>
+                        ) : (
+                          <span className="text-slate-500">Read-Only</span>
+                        )}
                       </td>
                     </tr>
                   );
@@ -1920,18 +1996,20 @@ ${oltVlans
                     Digunakan untuk menginjeksi IP Management (`pon-onu-mng` `mgmt-ip`) pada VLAN {activeMgmtVlanId} TR069 &amp; VoIP (tanpa push internet).
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setLastCliBanner({
-                      title: `ONU Management IP Pool (VLAN ${activeMgmtVlanId}) Synced to OLT`,
-                      cli: `configure terminal\nip-pool mgmt-tr069 vlan ${activeMgmtVlanId} subnet 10.100.0.0 255.255.0.0 gateway 10.100.0.1\nend\nwrite`,
-                    })
-                  }
-                  className="rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white"
-                >
-                  + Sync IP Pool to OLT
-                </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setLastCliBanner({
+                        title: `ONU Management IP Pool (VLAN ${activeMgmtVlanId}) Synced to OLT`,
+                        cli: `configure terminal\nip-pool mgmt-tr069 vlan ${activeMgmtVlanId} subnet 10.100.0.0 255.255.0.0 gateway 10.100.0.1\nend\nwrite`,
+                      })
+                    }
+                    className="rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white"
+                  >
+                    + Sync IP Pool to OLT
+                  </button>
+                )}
               </div>
               <table className="w-full text-left text-xs">
                 <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
@@ -2013,7 +2091,7 @@ ${oltVlans
                 <h3 className="text-sm font-bold text-white">
                   TR-069 CWMP ACS Profiles & GPON TCONT / Traffic Profiles
                 </h3>
-                {onOpenTr069Config && (
+                {!isReadOnly && onOpenTr069Config && (
                   <button
                     type="button"
                     onClick={onOpenTr069Config}
@@ -3152,7 +3230,7 @@ ${oltVlans
                   {buildLiveZteRunningConfig(db, olt.id)}
                 </pre>
 
-                {onImportRunningConfig && (
+                {!isReadOnly && onImportRunningConfig && (
                   <div className="space-y-2 border-t border-slate-700 pt-3">
                     <div className="font-bold text-sky-400">
                       Import / Restore ZTE `#show running-config` to SQL Database:

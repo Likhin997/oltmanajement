@@ -87,6 +87,7 @@ interface OnuDetailViewProps {
   onQuickAddZone?: (zoneInput: Omit<ZoneRecord, 'id'>) => ZoneRecord;
   onQuickAddSector?: (sectorInput: Omit<SectorRecord, 'id'>) => SectorRecord;
   onQuickAddSplitter?: (odbInput: Omit<OdbRecord, 'id'>) => OdbRecord;
+  isReadOnly?: boolean;
 }
 
 export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
@@ -99,6 +100,7 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
   onQuickAddZone,
   onQuickAddSector,
   onQuickAddSplitter,
+  isReadOnly = false,
 }) => {
   const olt =
     db.olts.find((o) => o.id === onu.olt_id) ||
@@ -447,6 +449,9 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
     updatedFields?: Partial<OnuRecord>,
     actionTitle?: string
   ) => {
+    if (isReadOnly && actionType !== 'POLL_SIGNAL') {
+      return;
+    }
     const titleLabel = actionTitle || `${actionType} — ${onuInterface}`;
     setIsPushingToOlt(true);
     setActiveConsoleOutput({
@@ -515,10 +520,15 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
       });
     }
 
+    const bgHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(showInConsole ? {} : { 'X-Background-Poll': '1' }),
+    };
+
     try {
       const resp = await fetch('/api/telnet/exec', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: bgHeaders,
         body: JSON.stringify({
           oltId: olt.id,
           commands: cliCommands,
@@ -531,21 +541,23 @@ export const OnuDetailView: React.FC<OnuDetailViewProps> = ({
         const parsedWan = parseZteWanIpOutput(data.output);
 
         // Record real-time traffic & optical signal sample and update Daily/Weekly/Monthly/Yearly charts
-        try {
-          const teleResp = await fetch(`/api/onus/${onu.id}/record-telemetry`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rawOutput: data.output }),
-          });
-          const teleJson = await teleResp.json();
-          if (teleJson && teleJson.ok && teleJson.periods) {
-            setTelemetryData({
-              polledAt: teleJson.polledAt || new Date().toISOString(),
-              periods: teleJson.periods,
+        if (!isReadOnly) {
+          try {
+            const teleResp = await fetch(`/api/onus/${onu.id}/record-telemetry`, {
+              method: 'POST',
+              headers: bgHeaders,
+              body: JSON.stringify({ rawOutput: data.output }),
             });
+            const teleJson = await teleResp.json();
+            if (teleJson && teleJson.ok && teleJson.periods) {
+              setTelemetryData({
+                polledAt: teleJson.polledAt || new Date().toISOString(),
+                periods: teleJson.periods,
+              });
+            }
+          } catch {
+            // Ignore telemetry record error
           }
-        } catch {
-          // Ignore telemetry record error
         }
 
         const updatedFields: Partial<OnuRecord> = {};
@@ -1009,6 +1021,11 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             Back to dashboard
           </button>
         )}
+        {isReadOnly && (
+          <span className="ml-auto inline-flex items-center gap-1.5 rounded border border-amber-500/40 bg-amber-950/50 px-2.5 py-1 text-[11px] font-bold text-amber-300">
+            MODE VIEWER (READ-ONLY)
+          </span>
+        )}
       </div>
 
       {/* Main 2-Column ONU Metadata & Optical/WAN Panel */}
@@ -1043,18 +1060,20 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <span className="font-mono">{onu.port}</span>
               <span className="font-semibold text-slate-300">Allocated ONU</span>
               <span className="font-mono">{onu.onu_index || 8}</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setMoveBoard(onu.board);
-                  setMovePort(onu.port);
-                  setMoveIndex(onu.onu_index || 8);
-                  setActiveEditDialog('MOVE_ONU');
-                }}
-                className="text-sky-400 hover:underline"
-              >
-                Move ONU
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMoveBoard(onu.board);
+                    setMovePort(onu.port);
+                    setMoveIndex(onu.onu_index || 8);
+                    setActiveEditDialog('MOVE_ONU');
+                  }}
+                  className="text-sky-400 hover:underline"
+                >
+                  Move ONU
+                </button>
+              )}
             </div>
           </div>
 
@@ -1073,13 +1092,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             <div className="col-span-4 font-semibold text-slate-300">SN</div>
             <div className="col-span-8 flex items-center gap-3 font-mono text-white">
               <span>{onu.serial_number}</span>
-              <button
-                type="button"
-                onClick={() => openMetadataDialog(true)}
-                className="font-sans text-sky-400 hover:underline"
-              >
-                Edit
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => openMetadataDialog(true)}
+                  className="font-sans text-sky-400 hover:underline"
+                >
+                  Edit
+                </button>
+              )}
             </div>
           </div>
 
@@ -1091,13 +1112,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             <div className="col-span-8 space-y-1 text-white">
               <div className="flex items-center gap-2">
                 <span>ALL (Original: F609V3.0)</span>
-                <button
-                  type="button"
-                  onClick={() => openMetadataDialog(true)}
-                  className="text-sky-400 hover:underline"
-                >
-                  Change
-                </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={() => openMetadataDialog(true)}
+                    className="text-sky-400 hover:underline"
+                  >
+                    Change
+                  </button>
+                )}
               </div>
               <div className="text-slate-300">Capability: Bridging/Routing</div>
               <div>
@@ -1130,13 +1153,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             <div className="col-span-4 font-semibold text-slate-300">Zone</div>
             <div className="col-span-8 flex items-center gap-3 text-white">
               <span>{zone ? zone.name : 'None'}</span>
-              <button
-                type="button"
-                onClick={() => openMetadataDialog(false)}
-                className="text-sky-400 hover:underline"
-              >
-                Change
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => openMetadataDialog(false)}
+                  className="text-sky-400 hover:underline"
+                >
+                  Change
+                </button>
+              )}
             </div>
           </div>
 
@@ -1151,13 +1176,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                   ? `${odb.name}${onu.odb_port ? ` Port ${onu.odb_port}` : ''}`
                   : 'None'}
               </span>
-              <button
-                type="button"
-                onClick={() => openMetadataDialog(false)}
-                className="text-sky-400 hover:underline"
-              >
-                Change
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => openMetadataDialog(false)}
+                  className="text-sky-400 hover:underline"
+                >
+                  Change
+                </button>
+              )}
             </div>
           </div>
 
@@ -1166,13 +1193,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             <div className="col-span-4 font-semibold text-slate-300">Sector</div>
             <div className="col-span-8 flex items-center gap-3 text-white">
               <span>{sector ? sector.name : 'None'}</span>
-              <button
-                type="button"
-                onClick={() => openMetadataDialog(false)}
-                className="text-sky-400 hover:underline"
-              >
-                Change
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => openMetadataDialog(false)}
+                  className="text-sky-400 hover:underline"
+                >
+                  Change
+                </button>
+              )}
             </div>
           </div>
 
@@ -1181,13 +1210,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             <div className="col-span-4 font-semibold text-slate-300">Name</div>
             <div className="col-span-8 flex items-center gap-3 text-white">
               <span className="font-semibold">{onu.customer_name || 'RATMI'}</span>
-              <button
-                type="button"
-                onClick={() => openMetadataDialog(false)}
-                className="text-sky-400 hover:underline"
-              >
-                Change
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => openMetadataDialog(false)}
+                  className="text-sky-400 hover:underline"
+                >
+                  Change
+                </button>
+              )}
             </div>
           </div>
 
@@ -1198,13 +1229,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             </div>
             <div className="col-span-8 flex items-center gap-3 text-white">
               <span>{onu.address || 'None'}</span>
-              <button
-                type="button"
-                onClick={() => openMetadataDialog(false)}
-                className="text-sky-400 hover:underline"
-              >
-                Change
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => openMetadataDialog(false)}
+                  className="text-sky-400 hover:underline"
+                >
+                  Change
+                </button>
+              )}
             </div>
           </div>
 
@@ -1213,13 +1246,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             <div className="col-span-4 font-semibold text-slate-300">Contact</div>
             <div className="col-span-8 flex items-center gap-3 text-white">
               <span>{onu.contact || 'None'}</span>
-              <button
-                type="button"
-                onClick={() => openMetadataDialog(false)}
-                className="text-sky-400 hover:underline"
-              >
-                Change
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => openMetadataDialog(false)}
+                  className="text-sky-400 hover:underline"
+                >
+                  Change
+                </button>
+              )}
             </div>
           </div>
 
@@ -1240,13 +1275,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             </div>
             <div className="col-span-8 flex items-center gap-3 font-mono text-white">
               <span>{onu.external_id || onu.serial_number}</span>
-              <button
-                type="button"
-                onClick={() => openMetadataDialog(false)}
-                className="font-sans text-sky-400 hover:underline"
-              >
-                Change
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => openMetadataDialog(false)}
+                  className="font-sans text-sky-400 hover:underline"
+                >
+                  Change
+                </button>
+              )}
             </div>
           </div>
 
@@ -1268,13 +1305,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               >
                 View on map
               </button>
-              <button
-                type="button"
-                onClick={() => openMetadataDialog(false)}
-                className="text-sky-400 hover:underline"
-              >
-                Change
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => openMetadataDialog(false)}
+                  className="text-sky-400 hover:underline"
+                >
+                  Change
+                </button>
+              )}
             </div>
           </div>
 
@@ -1286,9 +1325,12 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             <div className="col-span-8">
               <input
                 type="checkbox"
+                disabled={isReadOnly}
                 checked={vipCustomer}
-                onChange={(e) => setVipCustomer(e.target.checked)}
-                className="h-3.5 w-3.5 rounded"
+                onChange={(e) => {
+                  if (!isReadOnly) setVipCustomer(e.target.checked);
+                }}
+                className="h-3.5 w-3.5 rounded disabled:cursor-not-allowed disabled:opacity-50"
               />
             </div>
           </div>
@@ -1327,9 +1369,17 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
             {['LAN1', 'LAN2', 'LAN3', 'LAN4'].map((lan, idx) => (
               <div
                 key={lan}
-                onClick={() => setConfiguringEthPort(ethPorts[idx])}
-                className="flex cursor-pointer flex-col items-center rounded bg-slate-800 px-2.5 py-1.5 hover:bg-slate-700"
-                title={`Click to configure eth_0/${idx + 1}`}
+                onClick={() => {
+                  if (!isReadOnly) setConfiguringEthPort(ethPorts[idx]);
+                }}
+                className={`flex flex-col items-center rounded bg-slate-800 px-2.5 py-1.5 ${
+                  isReadOnly ? 'cursor-default' : 'cursor-pointer hover:bg-slate-700'
+                }`}
+                title={
+                  isReadOnly
+                    ? `Port eth_0/${idx + 1} (Read-only)`
+                    : `Click to configure eth_0/${idx + 1}`
+                }
               >
                 <div
                   className={`h-4 w-5 rounded-xs border ${
@@ -1470,9 +1520,12 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               <div className="col-span-8">
                 <input
                   type="checkbox"
+                  disabled={isReadOnly}
                   checked={customProfile}
-                  onChange={(e) => setCustomProfile(e.target.checked)}
-                  className="h-3.5 w-3.5 rounded"
+                  onChange={(e) => {
+                    if (!isReadOnly) setCustomProfile(e.target.checked);
+                  }}
+                  className="h-3.5 w-3.5 rounded disabled:cursor-not-allowed disabled:opacity-50"
                 />
               </div>
             </div>
@@ -1484,13 +1537,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
               </div>
               <div className="col-span-8 flex items-center gap-3 text-white">
                 <span>Default (ALL)</span>
-                <button
-                  type="button"
-                  onClick={() => setShowUpdateModeModal(true)}
-                  className="text-sky-400 hover:underline"
-                >
-                  Change
-                </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={() => setShowUpdateModeModal(true)}
+                    className="text-sky-400 hover:underline"
+                  >
+                    Change
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1518,20 +1573,24 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     MGMT VLAN (TR069 + VoIP Only, No Internet)
                   </span>
                 )}
-                <button
-                  type="button"
-                  onClick={openMgmtAndTr069Dialog}
-                  className="text-sky-400 hover:underline"
-                >
-                  Configure
-                </button>
-                <button
-                  type="button"
-                  onClick={handleTr069Push}
-                  className="text-emerald-400 hover:underline"
-                >
-                  Push CWMP
-                </button>
+                {!isReadOnly && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={openMgmtAndTr069Dialog}
+                      className="text-sky-400 hover:underline"
+                    >
+                      Configure
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleTr069Push}
+                      className="text-emerald-400 hover:underline"
+                    >
+                      Push CWMP
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 
@@ -1550,13 +1609,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     ? `${onu.mgmt_ip} (VLAN ${effectiveMgmtVlan})`
                     : 'Inactive'}
                 </span>
-                <button
-                  type="button"
-                  onClick={openMgmtAndTr069Dialog}
-                  className="text-sky-400 hover:underline"
-                >
-                  Configure
-                </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={openMgmtAndTr069Dialog}
+                    className="text-sky-400 hover:underline"
+                  >
+                    Configure
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1576,13 +1637,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     })
                     .join(', ')}
                 </span>
-                <button
-                  type="button"
-                  onClick={openAttachedVlansDialog}
-                  className="text-sky-400 hover:underline"
-                >
-                  Configure
-                </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={openAttachedVlansDialog}
+                    className="text-sky-400 hover:underline"
+                  >
+                    Configure
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1595,13 +1658,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                 <span>
                   {onu.onu_mode || 'Routing'} - WAN vlan: {vlan?.vlan_id || 101}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => setShowUpdateModeModal(true)}
-                  className="font-semibold text-sky-400 hover:underline"
-                >
-                  Update ONU mode
-                </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={() => setShowUpdateModeModal(true)}
+                    className="font-semibold text-sky-400 hover:underline"
+                  >
+                    Update ONU mode
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1629,13 +1694,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     <RefreshCw className={`h-3 w-3 ${refreshingWanIp ? 'animate-spin' : ''}`} />
                     Refresh IP
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowUpdateModeModal(true)}
-                    className="text-sky-400 hover:underline"
-                  >
-                    Update
-                  </button>
+                  {!isReadOnly && (
+                    <button
+                      type="button"
+                      onClick={() => setShowUpdateModeModal(true)}
+                      className="text-sky-400 hover:underline"
+                    >
+                      Update
+                    </button>
+                  )}
                 </div>
                 <div className="text-[11px] text-emerald-400">
                   WAN remote access: {onu.wan_remote_access}
@@ -1788,13 +1855,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           >
             SW info
           </button>
-          <button
-            type="button"
-            onClick={handleTr069Push}
-            className="rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
-          >
-            TR-069
-          </button>
+          {!isReadOnly && (
+            <button
+              type="button"
+              onClick={handleTr069Push}
+              className="rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
+            >
+              TR-069
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setLivePolling(!livePolling)}
@@ -1808,68 +1877,70 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setShowUpdateModeModal(true)}
-            className="flex items-center gap-1 rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
-          >
-            <Sliders className="h-3.5 w-3.5" />
-            Update ONU mode
-          </button>
-          <button
-            type="button"
-            onClick={handleReboot}
-            className="flex items-center gap-1 rounded bg-[#f0ad4e] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#ec971f]"
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-            Reboot
-          </button>
-          <button
-            type="button"
-            onClick={handleResync}
-            className="flex items-center gap-1 rounded bg-[#f0ad4e] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#ec971f]"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            Resync config
-          </button>
-          <button
-            type="button"
-            onClick={handleRestoreDefaults}
-            className="rounded bg-[#f0ad4e] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#ec971f]"
-          >
-            Restore defaults
-          </button>
-
-          {!confirmDelete ? (
+        {!isReadOnly && (
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => setConfirmDelete(true)}
-              className="flex items-center gap-1 rounded bg-[#d9534f] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#c9302c]"
+              onClick={() => setShowUpdateModeModal(true)}
+              className="flex items-center gap-1 rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
             >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete
+              <Sliders className="h-3.5 w-3.5" />
+              Update ONU mode
             </button>
-          ) : (
-            <div className="flex items-center gap-1.5 rounded border border-red-500 bg-red-950/80 px-2.5 py-1">
-              <span className="text-[11px] font-bold text-red-200">Confirm?</span>
+            <button
+              type="button"
+              onClick={handleReboot}
+              className="flex items-center gap-1 rounded bg-[#f0ad4e] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#ec971f]"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              Reboot
+            </button>
+            <button
+              type="button"
+              onClick={handleResync}
+              className="flex items-center gap-1 rounded bg-[#f0ad4e] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#ec971f]"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Resync config
+            </button>
+            <button
+              type="button"
+              onClick={handleRestoreDefaults}
+              className="rounded bg-[#f0ad4e] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#ec971f]"
+            >
+              Restore defaults
+            </button>
+
+            {!confirmDelete ? (
               <button
                 type="button"
-                onClick={handleDelete}
-                className="rounded bg-red-600 px-2 py-0.5 text-[11px] font-bold text-white"
+                onClick={() => setConfirmDelete(true)}
+                className="flex items-center gap-1 rounded bg-[#d9534f] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#c9302c]"
               >
-                Yes
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete
               </button>
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(false)}
-                className="text-[11px] text-slate-300"
-              >
-                No
-              </button>
-            </div>
-          )}
-        </div>
+            ) : (
+              <div className="flex items-center gap-1.5 rounded border border-red-500 bg-red-950/80 px-2.5 py-1">
+                <span className="text-[11px] font-bold text-red-200">Confirm?</span>
+                <button
+                  type="button"
+                  onClick={handleDelete}
+                  className="rounded bg-red-600 px-2 py-0.5 text-[11px] font-bold text-white"
+                >
+                  Yes
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmDelete(false)}
+                  className="text-[11px] text-slate-300"
+                >
+                  No
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Live CLI / TR-069 Output Drawer */}
@@ -2178,16 +2249,18 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
         <div>
           <div className="mb-2 flex items-center gap-3">
             <h3 className="text-sm font-bold text-white">Speed profiles</h3>
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedSpeedId(onu.speed_profile_id || 1);
-                setActiveEditDialog('SPEED_PROFILE');
-              }}
-              className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#025aa5]"
-            >
-              Add / Change
-            </button>
+            {!isReadOnly && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedSpeedId(onu.speed_profile_id || 1);
+                  setActiveEditDialog('SPEED_PROFILE');
+                }}
+                className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#025aa5]"
+              >
+                Add / Change
+              </button>
+            )}
           </div>
           <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
             <table className="w-full text-left text-xs">
@@ -2211,16 +2284,20 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     {speedProfile?.profile_name || 'SMARTOLT-1G-UP'}
                   </td>
                   <td className="px-3 py-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedSpeedId(onu.speed_profile_id || 1);
-                        setActiveEditDialog('SPEED_PROFILE');
-                      }}
-                      className="text-sky-400 hover:underline"
-                    >
-                      Configure
-                    </button>
+                    {!isReadOnly ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedSpeedId(onu.speed_profile_id || 1);
+                          setActiveEditDialog('SPEED_PROFILE');
+                        }}
+                        className="text-sky-400 hover:underline"
+                      >
+                        Configure
+                      </button>
+                    ) : (
+                      <span className="text-slate-500">Read-Only</span>
+                    )}
                   </td>
                 </tr>
               </tbody>
@@ -2264,13 +2341,17 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                     </td>
                     <td className="px-3 py-1.5 text-slate-300">{ep.dhcpMode}</td>
                     <td className="px-3 py-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setConfiguringEthPort(ep)}
-                        className="font-semibold text-sky-400 hover:underline"
-                      >
-                        Configure
-                      </button>
+                      {!isReadOnly ? (
+                        <button
+                          type="button"
+                          onClick={() => setConfiguringEthPort(ep)}
+                          className="font-semibold text-sky-400 hover:underline"
+                        >
+                          Configure
+                        </button>
+                      ) : (
+                        <span className="text-slate-500">Read-Only</span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -2282,17 +2363,19 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
         {/* WiFi Section */}
         <div className="flex flex-wrap items-center gap-3 pb-4">
           <span className="text-sm font-bold text-white">WiFi</span>
-          <button
-            type="button"
-            onClick={() => {
-              setWifiSsidInput(onu.wifi_ssid || 'RATMI_JETCYBER');
-              setWifiPassInput(onu.wifi_password || 'jetcyber');
-              setActiveEditDialog('WIFI');
-            }}
-            className="rounded bg-[#0275d8] px-3 py-1 text-xs font-bold text-white hover:bg-[#025aa5]"
-          >
-            Enable / Configure WiFi
-          </button>
+          {!isReadOnly && (
+            <button
+              type="button"
+              onClick={() => {
+                setWifiSsidInput(onu.wifi_ssid || 'RATMI_JETCYBER');
+                setWifiPassInput(onu.wifi_password || 'jetcyber');
+                setActiveEditDialog('WIFI');
+              }}
+              className="rounded bg-[#0275d8] px-3 py-1 text-xs font-bold text-white hover:bg-[#025aa5]"
+            >
+              Enable / Configure WiFi
+            </button>
+          )}
           <span className="font-mono text-xs text-slate-400">
             SSID:{' '}
             <strong className="text-slate-200">
@@ -2309,7 +2392,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       {/* ===================================================================
           MODAL: UPDATE ONU MODE (WAN VLAN, Routing/Bridging, PPPoE, WAN Remote Access, TR-069)
          =================================================================== */}
-      {showUpdateModeModal && (
+      {showUpdateModeModal && !isReadOnly && (
         <UpdateOnuModeModal
           onu={onu}
           db={db}
@@ -2329,7 +2412,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       {/* ===================================================================
           MODAL: CONFIGURE ETHERNET PORT (eth_0/1 .. eth_0/8)
          =================================================================== */}
-      {configuringEthPort && (
+      {configuringEthPort && !isReadOnly && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
           <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
             <div className="mb-3 flex items-center justify-between border-b border-slate-700 pb-3">
@@ -2482,7 +2565,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       {/* ===================================================================
           MODAL: MOVE ONU / METADATA / ATTACHED VLANS / MGMT IP / SPEED PROFILE / WIFI
          =================================================================== */}
-      {activeEditDialog && (
+      {activeEditDialog && !isReadOnly && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
           <div
             className={`w-full ${

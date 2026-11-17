@@ -80,6 +80,11 @@ import {
   AUTH_SESSION_TOKEN_KEY,
   LEGACY_AUTH_USER_ID_KEY,
   IDLE_SESSION_TIMEOUT_MS,
+  IDLE_WARNING_THRESHOLD_MS,
+  readLastActivityTimestamp,
+  touchUserActivityTimestamp,
+  clearLastActivityTimestamp,
+  formatRemainingIdleTime,
   setOnUnauthorizedHandler,
   apiFetch as fetch,
 } from './services/authSession';
@@ -112,6 +117,10 @@ export default function App() {
     useState<AppUserRecord | null>(null);
   const [sessionTokenId, setSessionTokenId] = useState<string | null>(null);
   const [loggedInUserId, setLoggedInUserId] = useState<number | null>(null);
+  const [idleRemainingMs, setIdleRemainingMs] = useState<number>(
+    IDLE_SESSION_TIMEOUT_MS
+  );
+  const lastKeepaliveSentAtRef = useRef<number>(0);
 
   const [dbMeta, setDbMeta] = useState<{
     dbEngine: string;
@@ -322,12 +331,48 @@ export default function App() {
       })
       .then(async (data) => {
         if (!mounted) return;
+        const storedLastAct = readLastActivityTimestamp();
+        if (
+          storedLastAct !== null &&
+          Date.now() - storedLastAct > IDLE_SESSION_TIMEOUT_MS
+        ) {
+          try {
+            await fetch('/api/auth/logout', { method: 'POST' });
+          } catch {
+            // ignore
+          }
+          clearLastActivityTimestamp();
+          try {
+            window.sessionStorage.removeItem(AUTH_SESSION_TOKEN_KEY);
+          } catch {
+            // ignore
+          }
+          setAuthenticatedUser(null);
+          setLoggedInUserId(null);
+          setSessionTokenId(null);
+          setDbLoaded(false);
+          setLoginError(
+            'Sesi berakhir otomatis karena tidak ada aktivitas selama 30 menit.'
+          );
+          setAuthChecking(false);
+          return;
+        }
         if (data && data.ok && data.authenticated && data.user) {
+          const activeTs = storedLastAct ?? touchUserActivityTimestamp();
+          const remaining =
+            typeof data.remainingIdleMs === 'number'
+              ? Math.min(
+                  data.remainingIdleMs,
+                  Math.max(0, IDLE_SESSION_TIMEOUT_MS - (Date.now() - activeTs))
+                )
+              : Math.max(0, IDLE_SESSION_TIMEOUT_MS - (Date.now() - activeTs));
+          setIdleRemainingMs(remaining);
           setAuthenticatedUser(data.user);
           setLoggedInUserId(data.user.id);
           setSessionTokenId(data.sessionId || null);
           await loadAuthorizedDatabaseState();
         } else {
+          clearLastActivityTimestamp();
           try {
             window.sessionStorage.removeItem(AUTH_SESSION_TOKEN_KEY);
           } catch {
@@ -360,6 +405,9 @@ export default function App() {
       skipNextServerSyncRef.current = false;
       return;
     }
+    if (authenticatedUser?.role === 'VIEWER') {
+      return;
+    }
     const isUserMut = nextSyncIsUserMutationRef.current;
     nextSyncIsUserMutationRef.current = false;
     if (isUserMut) {
@@ -368,7 +416,10 @@ export default function App() {
 
     fetch('/api/state/sync', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(!isUserMut ? { 'X-Background-Poll': '1' } : {}),
+      },
       body: JSON.stringify({
         state: db,
         userMutation: isUserMut,
@@ -977,7 +1028,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     try {
       const resp = await fetch(`/api/olts/${targetOltId}/poll-graphs`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(silent ? { 'X-Background-Poll': '1' } : {}),
+        },
       });
       const json = await resp.json();
       if (json && json.ok) {
@@ -1132,14 +1186,17 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       : null;
 
   const isAdminUser = currentUser?.role === 'ADMIN';
+  const isViewerUser = currentUser?.role === 'VIEWER';
 
   const forceClientLogout = (reasonMsg?: string) => {
+    clearLastActivityTimestamp();
     try {
       window.sessionStorage.removeItem(AUTH_SESSION_TOKEN_KEY);
       window.localStorage.removeItem(LEGACY_AUTH_USER_ID_KEY);
     } catch {
       // Ignore
     }
+    setIdleRemainingMs(IDLE_SESSION_TIMEOUT_MS);
     setAuthenticatedUser(null);
     setLoggedInUserId(null);
     setSessionTokenId(null);
@@ -1166,61 +1223,150 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     };
   }, []);
 
-  // Periodic server session heartbeat & 30-minute idle timeout enforcement
+  const handleExtendActiveSession = async () => {
+    const now = touchUserActivityTimestamp();
+    lastKeepaliveSentAtRef.current = now;
+    setIdleRemainingMs(IDLE_SESSION_TIMEOUT_MS);
+    try {
+      await fetch('/api/auth/keepalive', { method: 'POST' });
+    } catch {
+      // ignore transient error
+    }
+  };
+
+  // Periodic server session check & 30-minute idle auto-logout enforcement
   useEffect(() => {
     if (!loggedInUserId) return;
 
-    let lastActivityAt = Date.now();
+    let lastActivityAt = readLastActivityTimestamp() || touchUserActivityTimestamp();
+    let lastStorageWriteAt = lastActivityAt;
+    let lastServerCheckAt = 0;
+    let loggingOut = false;
+
+    const triggerIdleLogout = async () => {
+      if (loggingOut) return;
+      loggingOut = true;
+      try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+      } catch {
+        // ignore
+      }
+      forceClientLogout(
+        'Sesi berakhir otomatis karena tidak ada aktivitas selama 30 menit.'
+      );
+    };
+
     const recordActivity = () => {
-      lastActivityAt = Date.now();
+      const now = Date.now();
+      // If user already exceeded idle limit while browser/tab was suspended, enforce logout immediately
+      if (now - lastActivityAt >= IDLE_SESSION_TIMEOUT_MS) {
+        void triggerIdleLogout();
+        return;
+      }
+      lastActivityAt = now;
+      if (now - lastStorageWriteAt >= 2000) {
+        lastStorageWriteAt = now;
+        touchUserActivityTimestamp(now);
+      }
+      setIdleRemainingMs(IDLE_SESSION_TIMEOUT_MS);
+    };
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'hidden') return;
+      const persisted = readLastActivityTimestamp();
+      if (persisted && persisted > lastActivityAt) {
+        lastActivityAt = persisted;
+      }
+      const elapsed = Date.now() - lastActivityAt;
+      if (elapsed >= IDLE_SESSION_TIMEOUT_MS) {
+        void triggerIdleLogout();
+      } else {
+        setIdleRemainingMs(Math.max(0, IDLE_SESSION_TIMEOUT_MS - elapsed));
+      }
     };
 
     window.addEventListener('mousemove', recordActivity, { passive: true });
+    window.addEventListener('mousedown', recordActivity, { passive: true });
+    window.addEventListener('pointerdown', recordActivity, { passive: true });
     window.addEventListener('keydown', recordActivity, { passive: true });
-    window.addEventListener('click', recordActivity, { passive: true });
+    window.addEventListener('scroll', recordActivity, { passive: true });
+    window.addEventListener('wheel', recordActivity, { passive: true });
     window.addEventListener('touchstart', recordActivity, { passive: true });
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    window.addEventListener('focus', handleVisibilityOrFocus);
 
     const interval = setInterval(async () => {
-      if (Date.now() - lastActivityAt > IDLE_SESSION_TIMEOUT_MS) {
-        try {
-          await fetch('/api/auth/logout', { method: 'POST' });
-        } catch {
-          // ignore
-        }
-        forceClientLogout(
-          'Sesi berakhir otomatis karena tidak ada aktivitas selama 30 menit.'
-        );
+      const now = Date.now();
+      const persisted = readLastActivityTimestamp();
+      if (persisted && persisted > lastActivityAt) {
+        lastActivityAt = persisted;
+      }
+
+      const elapsed = now - lastActivityAt;
+      const remaining = Math.max(0, IDLE_SESSION_TIMEOUT_MS - elapsed);
+      setIdleRemainingMs(remaining);
+
+      if (elapsed >= IDLE_SESSION_TIMEOUT_MS) {
+        await triggerIdleLogout();
         return;
       }
 
-      try {
-        const resp = await fetch('/api/auth/session');
-        if (!resp.ok) {
-          forceClientLogout(
-            'Sesi login Anda telah berakhir. Silakan login kembali.'
-          );
-          return;
+      // Sync recent real user activity to server once every 60s so server-side 30m TTL stays aligned
+      if (
+        lastActivityAt > lastKeepaliveSentAtRef.current &&
+        now - lastKeepaliveSentAtRef.current >= 60_000
+      ) {
+        lastKeepaliveSentAtRef.current = now;
+        try {
+          const kaResp = await fetch('/api/auth/keepalive', { method: 'POST' });
+          if (kaResp.status === 401) {
+            forceClientLogout(
+              'Sesi berakhir otomatis karena tidak ada aktivitas selama 30 menit.'
+            );
+            return;
+          }
+        } catch {
+          // ignore transient network error
         }
-        const data = await resp.json();
-        if (!data || !data.authenticated || !data.user) {
-          forceClientLogout(
-            'Sesi login Anda tidak lagi aktif. Silakan login kembali.'
-          );
-        } else {
-          setAuthenticatedUser(data.user);
-          setSessionTokenId(data.sessionId || null);
-        }
-      } catch {
-        // ignore transient network glitch
       }
-    }, 30000);
+
+      // Verify session status every 30s without sliding server idle timer
+      if (now - lastServerCheckAt >= 30_000) {
+        lastServerCheckAt = now;
+        try {
+          const resp = await fetch('/api/auth/session');
+          if (!resp.ok) {
+            forceClientLogout(
+              'Sesi berakhir otomatis karena tidak ada aktivitas atau telah kadaluarsa.'
+            );
+            return;
+          }
+          const data = await resp.json();
+          if (!data || !data.authenticated || !data.user) {
+            forceClientLogout(
+              'Sesi login Anda tidak lagi aktif. Silakan login kembali.'
+            );
+          } else {
+            setAuthenticatedUser(data.user);
+            setSessionTokenId(data.sessionId || null);
+          }
+        } catch {
+          // ignore transient network glitch
+        }
+      }
+    }, 1000);
 
     return () => {
       clearInterval(interval);
       window.removeEventListener('mousemove', recordActivity);
+      window.removeEventListener('mousedown', recordActivity);
+      window.removeEventListener('pointerdown', recordActivity);
       window.removeEventListener('keydown', recordActivity);
-      window.removeEventListener('click', recordActivity);
+      window.removeEventListener('scroll', recordActivity);
+      window.removeEventListener('wheel', recordActivity);
       window.removeEventListener('touchstart', recordActivity);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
     };
   }, [loggedInUserId]);
 
@@ -1251,6 +1397,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       } catch {
         // Ignore
       }
+      const now = touchUserActivityTimestamp();
+      lastKeepaliveSentAtRef.current = now;
+      setIdleRemainingMs(IDLE_SESSION_TIMEOUT_MS);
 
       setAuthenticatedUser(data.user);
       setLoggedInUserId(data.user.id);
@@ -1297,6 +1446,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       } catch {
         // Ignore
       }
+      const now = touchUserActivityTimestamp();
+      lastKeepaliveSentAtRef.current = now;
+      setIdleRemainingMs(IDLE_SESSION_TIMEOUT_MS);
       setAuthenticatedUser(data.user);
       setLoggedInUserId(data.user.id);
       setSessionTokenId(data.sessionId || null);
@@ -1769,6 +1921,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     oltId: number,
     oltRecordOverride?: Partial<OltRecord>
   ) => {
+    if (isViewerUser) {
+      showToast('Akses ditolak: Role VIEWER hanya dapat melihat data (Read-Only).');
+      return;
+    }
     const targetOlt = db.olts.find((o) => o.id === oltId);
     const mergedOlt = { ...(targetOlt || {}), ...(oltRecordOverride || {}), id: oltId };
     setIsSyncingAllOnus(true);
@@ -1811,6 +1967,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   // Dedicated Unconfigured ONUs Scanner — strictly executes `show gpon onu uncfg` on the OLT
   // WITHOUT running full OLT sync (`show running-config`, `show card`, etc.).
   const pollUnconfiguredOnusOnly = async (targetOltFilter: 'ALL' | number = 'ALL') => {
+    if (isViewerUser) {
+      showToast('Akses ditolak: Role VIEWER hanya dapat melihat data (Read-Only).');
+      return;
+    }
     const targetOlts =
       targetOltFilter === 'ALL'
         ? visibleOlts
@@ -1888,7 +2048,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   // and has <= 1 configured ONU or any placeholder ONU- records.
   const [autoSyncedInitial, setAutoSyncedInitial] = useState(false);
   useEffect(() => {
-    if (!dbLoaded || autoSyncedInitial) return;
+    if (!dbLoaded || autoSyncedInitial || isViewerUser) return;
     if (db.olts.length > 0) {
       setAutoSyncedInitial(true);
       for (const olt of db.olts) {
@@ -1919,7 +2079,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     try {
       const resp = await fetch(`/api/olts/${oltToPoll.id}/poll-realtime`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Background-Poll': '1',
+        },
         body: JSON.stringify({
           onuId:
             targetOnuId !== undefined
@@ -2081,6 +2244,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     generatedCli: string,
     allocatedOnuIndex: number
   ) => {
+    if (isViewerUser) {
+      showToast('Akses ditolak: Role VIEWER hanya dapat melihat data (Read-Only).');
+      return;
+    }
     const targetOnu = db.onus.find((o) => o.id === onuId);
     if (!targetOnu) return;
 
@@ -2247,6 +2414,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     error?: string;
     durationMs?: number;
   }> => {
+    if (isViewerUser && actionType !== 'POLL_SIGNAL') {
+      showToast('Akses ditolak: Role VIEWER hanya dapat melihat data (Read-Only).');
+      return { ok: false, output: '', error: 'Forbidden: Role VIEWER is Read-Only' };
+    }
     const targetOnu = db.onus.find((o) => o.id === onuId);
     if (!targetOnu) {
       return { ok: false, output: '', error: 'ONU not found' };
@@ -3069,48 +3240,72 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         {item.label}
                       </button>
                     ))}
-                    <div className="my-1 border-t border-slate-800" />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenDropdown(null);
-                        openBackupRestoreModal();
-                      }}
-                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-semibold text-emerald-400 transition hover:bg-slate-800/80 hover:text-emerald-300"
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                      Backup &amp; Restore
-                    </button>
+                    {!isViewerUser && (
+                      <>
+                        <div className="my-1 border-t border-slate-800" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpenDropdown(null);
+                            openBackupRestoreModal();
+                          }}
+                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-semibold text-emerald-400 transition hover:bg-slate-800/80 hover:text-emerald-300"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          Backup &amp; Restore
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
             </nav>
           </div>
 
-          {/* Right Utility Actions + Backup & Restore + User Session Profile */}
+          {/* Right Utility Actions + Idle Timer + Backup & Restore + User Session Profile */}
           <div className="flex items-center gap-2 text-slate-200">
             <div className="hidden items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/60 px-2.5 py-1 font-mono text-[11px] text-slate-400 md:flex">
               <Clock className="h-3.5 w-3.5 text-sky-400" />
               <span>WIB (UTC+7)</span>
             </div>
 
-            <button
-              type="button"
-              onClick={async () => {
-                await fetch('/api/state/sync', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ state: db }),
-                });
-                showToast(
-                  `State synced to ${dbMeta.dbEngine} Database (${db.olts.length} OLTs, ${configuredOnus.length} ONUs).`
-                );
-              }}
-              title="Save state to SQL Database & OLT NVRAM"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300 transition hover:border-sky-500/40 hover:bg-slate-800 hover:text-white"
+            <div
+              title="Auto-logout otomatis jika tidak ada aktivitas selama 30 menit"
+              className={`hidden items-center gap-1.5 rounded-lg border px-2.5 py-1 font-mono text-[11px] sm:flex ${
+                idleRemainingMs <= IDLE_WARNING_THRESHOLD_MS
+                  ? 'border-amber-500/60 bg-amber-950/60 text-amber-300 animate-pulse'
+                  : 'border-slate-800 bg-slate-900/60 text-slate-300'
+              }`}
             >
-              <Save className="h-4 w-4" />
-            </button>
+              <ShieldCheck
+                className={`h-3.5 w-3.5 ${
+                  idleRemainingMs <= IDLE_WARNING_THRESHOLD_MS
+                    ? 'text-amber-400'
+                    : 'text-emerald-400'
+                }`}
+              />
+              <span>Idle {formatRemainingIdleTime(idleRemainingMs)}</span>
+            </div>
+
+            {!isViewerUser && (
+              <button
+                type="button"
+                onClick={async () => {
+                  await fetch('/api/state/sync', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ state: db }),
+                  });
+                  showToast(
+                    `State synced to ${dbMeta.dbEngine} Database (${db.olts.length} OLTs, ${configuredOnus.length} ONUs).`
+                  );
+                }}
+                title="Save state to SQL Database & OLT NVRAM"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300 transition hover:border-sky-500/40 hover:bg-slate-800 hover:text-white"
+              >
+                <Save className="h-4 w-4" />
+              </button>
+            )}
 
             <button
               type="button"
@@ -3121,15 +3316,17 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               <Contrast className="h-4 w-4" />
             </button>
 
-            <button
-              type="button"
-              onClick={openBackupRestoreModal}
-              title="Backup & Restore Database (OLT, ONU, Zone, RK & Konfigurasi CLI)"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-emerald-950/40 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 shadow-xs transition hover:border-emerald-400/60 hover:bg-emerald-900/50 hover:text-white"
-            >
-              <Database className="h-3.5 w-3.5 text-emerald-400" />
-              <span className="hidden sm:inline">Backup &amp; Restore</span>
-            </button>
+            {!isViewerUser && (
+              <button
+                type="button"
+                onClick={openBackupRestoreModal}
+                title="Backup & Restore Database (OLT, ONU, Zone, RK & Konfigurasi CLI)"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-emerald-950/40 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 shadow-xs transition hover:border-emerald-400/60 hover:bg-emerald-900/50 hover:text-white"
+              >
+                <Database className="h-3.5 w-3.5 text-emerald-400" />
+                <span className="hidden sm:inline">Backup &amp; Restore</span>
+              </button>
+            )}
 
             {/* Logged-in User Profile & User Management Button */}
             <button
@@ -3166,8 +3363,14 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 <User className="h-3.5 w-3.5" />
               </div>
               <span className="max-w-[100px] truncate">{currentUser.username}</span>
-              <span className="rounded-md bg-sky-500/20 px-1.5 py-0.2 font-mono text-[10px] text-sky-300">
-                {currentUser.role}
+              <span
+                className={`rounded-md px-1.5 py-0.2 font-mono text-[10px] ${
+                  isViewerUser
+                    ? 'border border-amber-500/40 bg-amber-500/20 text-amber-300'
+                    : 'bg-sky-500/20 text-sky-300'
+                }`}
+              >
+                {isViewerUser ? 'VIEWER · READ-ONLY' : currentUser.role}
               </span>
             </button>
 
@@ -3183,6 +3386,28 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           </div>
         </div>
       </header>
+
+      {/* Idle Session Warning Banner (<= 2 minutes before auto-logout) */}
+      {idleRemainingMs <= IDLE_WARNING_THRESHOLD_MS && (
+        <div className="animate-modal-in fixed right-5 bottom-16 z-50 flex max-w-sm items-center gap-3 rounded-xl border border-amber-500/50 bg-[#1c1607]/95 px-4 py-3 text-xs text-amber-100 shadow-2xl backdrop-blur-md">
+          <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+          <div className="flex-1">
+            <div className="font-bold text-amber-300">
+              Sesi akan logout otomatis dalam {formatRemainingIdleTime(idleRemainingMs)}
+            </div>
+            <div className="text-[11px] text-amber-200/80">
+              Tidak ada aktivitas terdeteksi (batas idle 30 menit).
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleExtendActiveSession()}
+            className="shrink-0 rounded-lg bg-amber-500 px-2.5 py-1.5 text-[11px] font-bold text-slate-950 transition hover:bg-amber-400"
+          >
+            Tetap Login
+          </button>
+        </div>
+      )}
 
       {/* Toast Notification */}
       {toastMsg && (
@@ -3382,7 +3607,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              {db.olts.length > 0 &&
+              {isViewerUser && (
+                <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-950/50 px-3 py-1.5 text-xs font-bold text-amber-300">
+                  MODE VIEWER (Hanya Lihat / Read-Only)
+                </span>
+              )}
+              {!isViewerUser &&
+                db.olts.length > 0 &&
                 (activeView === 'CONFIGURED' || activeView === 'DASHBOARD') && (
                   <button
                     type="button"
@@ -3702,15 +3933,17 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             </button>
                           </div>
                           <div className="flex flex-wrap items-center gap-3 font-mono text-xs">
-                            <button
-                              type="button"
-                              onClick={() => void syncOltFromTelnetLive(o.id, o)}
-                              className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-600/20 px-2.5 py-1 font-sans text-[11px] font-semibold text-emerald-300 transition hover:bg-emerald-600 hover:text-white"
-                              title="Ambil semua VLAN, ONU, Uplink & Running Config langsung dari OLT via Telnet"
-                            >
-                              <RefreshCw className="h-3 w-3" />
-                              Sync Data &amp; Config OLT
-                            </button>
+                            {!isViewerUser && (
+                              <button
+                                type="button"
+                                onClick={() => void syncOltFromTelnetLive(o.id, o)}
+                                className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-600/20 px-2.5 py-1 font-sans text-[11px] font-semibold text-emerald-300 transition hover:bg-emerald-600 hover:text-white"
+                                title="Ambil semua VLAN, ONU, Uplink & Running Config langsung dari OLT via Telnet"
+                              >
+                                <RefreshCw className="h-3 w-3" />
+                                Sync Data &amp; Config OLT
+                              </button>
+                            )}
                             <span className="text-slate-400">Uptime: {o.uptime_str}</span>
                             <span
                               className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
@@ -3885,39 +4118,43 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     </option>
                   ))}
                 </select>
-                <button
-                  type="button"
-                  disabled={isPollingUncfg}
-                  onClick={() => {
-                    void pollUnconfiguredOnusOnly(uncfgOltFilter);
-                  }}
-                  className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-60"
-                >
-                  <RefreshCw
-                    className={`h-3.5 w-3.5 ${isPollingUncfg ? 'animate-spin' : ''}`}
-                  />
-                  {isPollingUncfg
-                    ? 'Checking show gpon onu uncfg...'
-                    : 'Scan Unconfigured ONU (Telnet)'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (visibleOlts.length === 0) {
-                      showToast('Tambahkan OLT terlebih dahulu sebelum mendeteksi ONU.');
-                      setActiveView('ADD_OLT');
-                      return;
-                    }
-                    setManualUncfgOltId(
-                      uncfgOltFilter === 'ALL' ? visibleOlts[0].id : uncfgOltFilter
-                    );
-                    setShowAddUncfgModal(true);
-                  }}
-                  className="flex items-center gap-1 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Register Unconfigured SN
-                </button>
+                {!isViewerUser && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isPollingUncfg}
+                      onClick={() => {
+                        void pollUnconfiguredOnusOnly(uncfgOltFilter);
+                      }}
+                      className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-60"
+                    >
+                      <RefreshCw
+                        className={`h-3.5 w-3.5 ${isPollingUncfg ? 'animate-spin' : ''}`}
+                      />
+                      {isPollingUncfg
+                        ? 'Checking show gpon onu uncfg...'
+                        : 'Scan Unconfigured ONU (Telnet)'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (visibleOlts.length === 0) {
+                          showToast('Tambahkan OLT terlebih dahulu sebelum mendeteksi ONU.');
+                          setActiveView('ADD_OLT');
+                          return;
+                        }
+                        setManualUncfgOltId(
+                          uncfgOltFilter === 'ALL' ? visibleOlts[0].id : uncfgOltFilter
+                        );
+                        setShowAddUncfgModal(true);
+                      }}
+                      className="flex items-center gap-1 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Register Unconfigured SN
+                    </button>
+                  </>
+                )}
               </div>
 
               {/* Auto actions box matching top-right of Screenshot _C1DBB18F */}
@@ -3929,14 +4166,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </span>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowAutoActionsModal(true)}
-                    className="flex items-center gap-1 rounded bg-[#5cb85c] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#4cae4c]"
-                  >
-                    <Play className="h-3 w-3" />
-                    Configure actions
-                  </button>
+                  {!isViewerUser && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAutoActionsModal(true)}
+                      className="flex items-center gap-1 rounded bg-[#5cb85c] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                    >
+                      <Play className="h-3 w-3" />
+                      Configure actions
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => setActiveView('TASKS')}
@@ -3945,17 +4184,19 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     <History className="h-3 w-3" />
                     Task history
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAutoAuthEnabled(false);
-                      showToast('Auto-actions stopped.');
-                    }}
-                    className="flex items-center gap-1 rounded bg-[#6c757d] px-3 py-1.5 text-xs font-bold text-slate-200 hover:bg-slate-600"
-                  >
-                    <Square className="h-3 w-3" />
-                    Stop auto actions
-                  </button>
+                  {!isViewerUser && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAutoAuthEnabled(false);
+                        showToast('Auto-actions stopped.');
+                      }}
+                      className="flex items-center gap-1 rounded bg-[#6c757d] px-3 py-1.5 text-xs font-bold text-slate-200 hover:bg-slate-600"
+                    >
+                      <Square className="h-3 w-3" />
+                      Stop auto actions
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -4030,16 +4271,22 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                   {u.serial_number}
                                 </td>
                                 <td className="px-3 py-2.5">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setAuthorizingOnu(u);
-                                      setActiveView('AUTHORIZE_FORM');
-                                    }}
-                                    className="font-semibold text-sky-400 hover:underline"
-                                  >
-                                    Authorize
-                                  </button>
+                                  {!isViewerUser ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setAuthorizingOnu(u);
+                                        setActiveView('AUTHORIZE_FORM');
+                                      }}
+                                      className="font-semibold text-sky-400 hover:underline"
+                                    >
+                                      Authorize
+                                    </button>
+                                  ) : (
+                                    <span className="text-[11px] text-slate-500">
+                                      Read-Only
+                                    </span>
+                                  )}
                                 </td>
                               </tr>
                             ))}
@@ -4057,7 +4304,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         {/* ===================================================================
             VIEW 3: AUTHORIZE ONU FORM PAGE (Exact match to Screenshot _1F161B1B)
            =================================================================== */}
-        {activeView === 'AUTHORIZE_FORM' && authorizingOnu && (
+        {activeView === 'AUTHORIZE_FORM' && authorizingOnu && !isViewerUser && (
           <AuthorizeOnuModal
             onu={authorizingOnu}
             db={scopedDb}
@@ -4454,9 +4701,18 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         <td className="px-3 py-2.5">
                           <button
                             type="button"
-                            onClick={() => setUpdatingModeOnu(o)}
-                            title="Click to open Update ONU mode & WAN remote access modal"
-                            className="rounded bg-[#28a745] px-2 py-0.5 text-[11px] font-bold text-white hover:bg-[#218838]"
+                            disabled={isViewerUser}
+                            onClick={() => {
+                              if (!isViewerUser) setUpdatingModeOnu(o);
+                            }}
+                            title={
+                              isViewerUser
+                                ? 'Mode Read-Only (VIEWER)'
+                                : 'Click to open Update ONU mode & WAN remote access modal'
+                            }
+                            className={`rounded bg-[#28a745] px-2 py-0.5 text-[11px] font-bold text-white ${
+                              isViewerUser ? 'cursor-default' : 'hover:bg-[#218838]'
+                            }`}
                           >
                             {o.onu_mode === 'Bridging'
                               ? 'B: Bridge'
@@ -4469,8 +4725,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         <td className="px-2 py-2.5">
                           <button
                             type="button"
-                            onClick={() => setUpdatingModeOnu(o)}
-                            className="inline-flex items-center gap-1 rounded bg-emerald-950/90 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300 border border-emerald-600/40"
+                            disabled={isViewerUser}
+                            onClick={() => {
+                              if (!isViewerUser) setUpdatingModeOnu(o);
+                            }}
+                            className={`inline-flex items-center gap-1 rounded bg-emerald-950/90 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300 border border-emerald-600/40 ${
+                              isViewerUser ? 'cursor-default' : ''
+                            }`}
                           >
                             <Radio className="h-3 w-3" />
                             {o.config_method}
@@ -4496,6 +4757,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           <OnuDetailView
             onu={selectedOnu}
             db={db}
+            isReadOnly={isViewerUser}
             onBack={() => setActiveView('CONFIGURED')}
             onBackToDashboard={() => setActiveView('DASHBOARD')}
             onViewOlt={(oltId) => {
@@ -4523,14 +4785,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setActiveView('ADD_OLT')}
-                  className="flex items-center gap-1 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Add OLT
-                </button>
+                {!isViewerUser && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveView('ADD_OLT')}
+                    className="flex items-center gap-1 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Add OLT
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setShowMismatchModal(true)}
@@ -4683,15 +4947,17 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="inline-flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => void syncOltFromTelnetLive(o.id, o)}
-                            title="Sync VLAN, ONU, Uplink & Running Config dari OLT via Telnet"
-                            className="flex items-center gap-1 rounded bg-emerald-600 px-2.5 py-1.5 text-[11px] font-bold text-white hover:bg-emerald-500"
-                          >
-                            <RefreshCw className="h-3.5 w-3.5" />
-                            Sync OLT
-                          </button>
+                          {!isViewerUser && (
+                            <button
+                              type="button"
+                              onClick={() => void syncOltFromTelnetLive(o.id, o)}
+                              title="Sync VLAN, ONU, Uplink & Running Config dari OLT via Telnet"
+                              className="flex items-center gap-1 rounded bg-emerald-600 px-2.5 py-1.5 text-[11px] font-bold text-white hover:bg-emerald-500"
+                            >
+                              <RefreshCw className="h-3.5 w-3.5" />
+                              Sync OLT
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => {
@@ -4704,24 +4970,26 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           >
                             <Eye className="h-3.5 w-3.5" />
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setDb((prev) => ({
-                                ...prev,
-                                olts: prev.olts.filter((item) => item.id !== o.id),
-                                olt_cards: prev.olt_cards.filter((c) => c.olt_id !== o.id),
-                                pon_ports: prev.pon_ports.filter((p) => p.olt_id !== o.id),
-                                uplink_ports: prev.uplink_ports.filter((u) => u.olt_id !== o.id),
-                                vlans: prev.vlans.filter((v) => v.olt_id !== o.id),
-                                onus: prev.onus.filter((u) => u.olt_id !== o.id),
-                              }));
-                              showToast(`OLT ${o.name} beserta datanya dihapus dari Database.`);
-                            }}
-                            className="rounded bg-[#d9534f] p-1.5 text-white hover:bg-[#c9302c]"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+                          {!isViewerUser && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDb((prev) => ({
+                                  ...prev,
+                                  olts: prev.olts.filter((item) => item.id !== o.id),
+                                  olt_cards: prev.olt_cards.filter((c) => c.olt_id !== o.id),
+                                  pon_ports: prev.pon_ports.filter((p) => p.olt_id !== o.id),
+                                  uplink_ports: prev.uplink_ports.filter((u) => u.olt_id !== o.id),
+                                  vlans: prev.vlans.filter((v) => v.olt_id !== o.id),
+                                  onus: prev.onus.filter((u) => u.olt_id !== o.id),
+                                }));
+                                showToast(`OLT ${o.name} beserta datanya dihapus dari Database.`);
+                              }}
+                              className="rounded bg-[#d9534f] p-1.5 text-white hover:bg-[#c9302c]"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -4735,7 +5003,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         {/* ===================================================================
             VIEW 6B: ADD OLT FULL-PAGE FORM (Exact match to Screenshot _365A2C64)
            =================================================================== */}
-        {activeView === 'ADD_OLT' && (
+        {activeView === 'ADD_OLT' && !isViewerUser && (
           <AddOltView
             onBack={() => setActiveView('OLTS_LIST')}
             onSaveOlt={(newOltData) => {
@@ -4935,6 +5203,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           <OltDetailView
             olt={selectedOlt}
             db={db}
+            isReadOnly={isViewerUser}
             initialTab={initialOltTab}
             onTabChange={(tab) => setInitialOltTab(tab)}
             onBack={() => setActiveView('OLTS_LIST')}
@@ -5528,7 +5797,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             View
                           </button>
                         </div>
-                        {index === 0 && (
+                        {index === 0 && !isViewerUser && (
                           <div>
                             <button
                               type="button"
@@ -5843,15 +6112,17 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       </option>
                     ))}
                   </select>
-                  <button
-                    type="button"
-                    onClick={openAddTr069Modal}
-                    className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-4 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                    Tambah Profil TR-069 ISP
-                  </button>
-                  {configuredOnus.length > 0 && (
+                  {!isViewerUser && (
+                    <button
+                      type="button"
+                      onClick={openAddTr069Modal}
+                      className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-4 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Tambah Profil TR-069 ISP
+                    </button>
+                  )}
+                  {!isViewerUser && configuredOnus.length > 0 && (
                     <button
                       type="button"
                       onClick={() => {
@@ -5954,79 +6225,83 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             </div>
                           </td>
                           <td className="px-4 py-3">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => handlePushTr069ProfileToOlt(p)}
-                                className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#025aa5]"
-                              >
-                                Push OLT
-                              </button>
-                              {!p.is_default && (
+                            {!isViewerUser ? (
+                              <div className="flex flex-wrap items-center gap-1.5">
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    nextSyncIsUserMutationRef.current = true;
-                                    lastUserMutationAtRef.current = Date.now();
-                                    setDb((prev) => ({
-                                      ...prev,
-                                      tr069_profiles: prev.tr069_profiles.map((item) => ({
-                                        ...item,
-                                        is_default: item.id === p.id,
-                                      })),
-                                      olts: targetOlt
-                                        ? prev.olts.map((o) =>
-                                            o.id === targetOlt.id
-                                              ? { ...o, tr069_profile_name: p.profile_name }
-                                              : o
-                                          )
-                                        : prev.olts,
-                                    }));
-                                    showToast(
-                                      `Profil "${p.profile_name}" dijadikan Default TR-069 ISP.`
-                                    );
-                                  }}
-                                  className="rounded border border-emerald-500/50 bg-emerald-950/60 px-2 py-1 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-900/70"
+                                  onClick={() => handlePushTr069ProfileToOlt(p)}
+                                  className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#025aa5]"
                                 >
-                                  Set Default
+                                  Push OLT
                                 </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => openEditTr069Modal(p)}
-                                className="rounded bg-slate-700 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-slate-600"
-                              >
-                                Edit
-                              </button>
-                              {db.tr069_profiles.length > 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    nextSyncIsUserMutationRef.current = true;
-                                    lastUserMutationAtRef.current = Date.now();
-                                    setDb((prev) => {
-                                      const remaining = prev.tr069_profiles.filter(
-                                        (item) => item.id !== p.id
+                                {!p.is_default && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      nextSyncIsUserMutationRef.current = true;
+                                      lastUserMutationAtRef.current = Date.now();
+                                      setDb((prev) => ({
+                                        ...prev,
+                                        tr069_profiles: prev.tr069_profiles.map((item) => ({
+                                          ...item,
+                                          is_default: item.id === p.id,
+                                        })),
+                                        olts: targetOlt
+                                          ? prev.olts.map((o) =>
+                                              o.id === targetOlt.id
+                                                ? { ...o, tr069_profile_name: p.profile_name }
+                                                : o
+                                            )
+                                          : prev.olts,
+                                      }));
+                                      showToast(
+                                        `Profil "${p.profile_name}" dijadikan Default TR-069 ISP.`
                                       );
-                                      if (
-                                        remaining.length > 0 &&
-                                        !remaining.some((r) => r.is_default)
-                                      ) {
-                                        remaining[0] = {
-                                          ...remaining[0],
-                                          is_default: true,
-                                        };
-                                      }
-                                      return { ...prev, tr069_profiles: remaining };
-                                    });
-                                    showToast(`Profil "${p.profile_name}" dihapus.`);
-                                  }}
-                                  className="rounded bg-[#d9534f] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#c9302c]"
+                                    }}
+                                    className="rounded border border-emerald-500/50 bg-emerald-950/60 px-2 py-1 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-900/70"
+                                  >
+                                    Set Default
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => openEditTr069Modal(p)}
+                                  className="rounded bg-slate-700 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-slate-600"
                                 >
-                                  Hapus
+                                  Edit
                                 </button>
-                              )}
-                            </div>
+                                {db.tr069_profiles.length > 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      nextSyncIsUserMutationRef.current = true;
+                                      lastUserMutationAtRef.current = Date.now();
+                                      setDb((prev) => {
+                                        const remaining = prev.tr069_profiles.filter(
+                                          (item) => item.id !== p.id
+                                        );
+                                        if (
+                                          remaining.length > 0 &&
+                                          !remaining.some((r) => r.is_default)
+                                        ) {
+                                          remaining[0] = {
+                                            ...remaining[0],
+                                            is_default: true,
+                                          };
+                                        }
+                                        return { ...prev, tr069_profiles: remaining };
+                                      });
+                                      showToast(`Profil "${p.profile_name}" dihapus.`);
+                                    }}
+                                    className="rounded bg-[#d9534f] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#c9302c]"
+                                  >
+                                    Hapus
+                                  </button>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-[11px] text-slate-500">Read-Only</span>
+                            )}
                           </td>
                         </tr>
                       );
@@ -6035,7 +6310,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </table>
               </div>
 
-              {showTr069Modal && (
+              {showTr069Modal && !isViewerUser && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
                   <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[#1e3a5f] bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
                     <div className="mb-4 flex items-center justify-between border-b border-slate-700 pb-3">
@@ -6390,21 +6665,23 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       placeholder="Cari Zone, Code, Kota..."
                       className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
                     />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingZone(null);
-                        setZoneFormName('');
-                        setZoneFormCode(`ZN-0${db.zones.length + 1}`);
-                        setZoneFormCity('Lebak');
-                        setZoneFormDesc('');
-                        setShowZoneModal(true);
-                      }}
-                      className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      Add Zone
-                    </button>
+                    {!isViewerUser && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingZone(null);
+                          setZoneFormName('');
+                          setZoneFormCode(`ZN-0${db.zones.length + 1}`);
+                          setZoneFormCity('Lebak');
+                          setZoneFormDesc('');
+                          setShowZoneModal(true);
+                        }}
+                        className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        Add Zone
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -6507,97 +6784,101 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                   {z.description || '-'}
                                 </td>
                                 <td className="px-4 py-3 text-right">
-                                  <div className="inline-flex items-center gap-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setEditingSector(null);
-                                        setSectorFormName('');
-                                        setSectorFormCode(
-                                          `SEC-0${(db.sectors || []).length + 1}`
-                                        );
-                                        setSectorFormZoneId(z.id);
-                                        setSectorFormOltId(
-                                          db.olts[0]?.id || 'NONE'
-                                        );
-                                        setSectorFormPortId(
-                                          db.pon_ports[0]?.id || 'NONE'
-                                        );
-                                        setSectorFormDesc('');
-                                        setActiveView('SECTORS');
-                                        setShowSectorModal(true);
-                                      }}
-                                      className="rounded bg-sky-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-sky-600"
-                                    >
-                                      + Sector
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setEditingSplitter(null);
-                                        setSplitterFormName('');
-                                        setSplitterFormZoneId(z.id);
-                                        setSplitterFormSectorId('NONE');
-                                        setSplitterFormOltId(db.olts[0]?.id || 1);
-                                        setSplitterFormPortId(
-                                          db.pon_ports[0]?.id || 1
-                                        );
-                                        setSplitterFormRatio('1:8');
-                                        setSplitterFormPole('TIANG-01');
-                                        setActiveView('SPLITTERS');
-                                        setShowSplitterModal(true);
-                                      }}
-                                      className="rounded bg-amber-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-600"
-                                    >
-                                      + ODP
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setEditingZone(z);
-                                        setZoneFormName(z.name);
-                                        setZoneFormCode(z.code);
-                                        setZoneFormCity(z.city_district);
-                                        setZoneFormDesc(z.description);
-                                        setShowZoneModal(true);
-                                      }}
-                                      className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#025aa5]"
-                                    >
-                                      Edit
-                                    </button>
-                                    <button
-                                      type="button"
-                                      title={
-                                        isZoneDeleteLocked
-                                          ? `Tidak dapat dihapus: masih ada ${onuCount} ONU di Splitter / Zone ini`
-                                          : `Hapus Zone ${z.name}`
-                                      }
-                                      onClick={() => {
-                                        if (isZoneDeleteLocked) {
-                                          showToast(
-                                            `⚠ Zone "${z.name}" tidak dapat dihapus karena masih ada ${onuCount} ONU yang terhubung di Splitter / Zone ini!`
+                                  {!isViewerUser ? (
+                                    <div className="inline-flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingSector(null);
+                                          setSectorFormName('');
+                                          setSectorFormCode(
+                                            `SEC-0${(db.sectors || []).length + 1}`
                                           );
-                                          return;
+                                          setSectorFormZoneId(z.id);
+                                          setSectorFormOltId(
+                                            db.olts[0]?.id || 'NONE'
+                                          );
+                                          setSectorFormPortId(
+                                            db.pon_ports[0]?.id || 'NONE'
+                                          );
+                                          setSectorFormDesc('');
+                                          setActiveView('SECTORS');
+                                          setShowSectorModal(true);
+                                        }}
+                                        className="rounded bg-sky-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-sky-600"
+                                      >
+                                        + Sector
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingSplitter(null);
+                                          setSplitterFormName('');
+                                          setSplitterFormZoneId(z.id);
+                                          setSplitterFormSectorId('NONE');
+                                          setSplitterFormOltId(db.olts[0]?.id || 1);
+                                          setSplitterFormPortId(
+                                            db.pon_ports[0]?.id || 1
+                                          );
+                                          setSplitterFormRatio('1:8');
+                                          setSplitterFormPole('TIANG-01');
+                                          setActiveView('SPLITTERS');
+                                          setShowSplitterModal(true);
+                                        }}
+                                        className="rounded bg-amber-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-600"
+                                      >
+                                        + ODP
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingZone(z);
+                                          setZoneFormName(z.name);
+                                          setZoneFormCode(z.code);
+                                          setZoneFormCity(z.city_district);
+                                          setZoneFormDesc(z.description);
+                                          setShowZoneModal(true);
+                                        }}
+                                        className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#025aa5]"
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        type="button"
+                                        title={
+                                          isZoneDeleteLocked
+                                            ? `Tidak dapat dihapus: masih ada ${onuCount} ONU di Splitter / Zone ini`
+                                            : `Hapus Zone ${z.name}`
                                         }
-                                        nextSyncIsUserMutationRef.current = true;
-                                        lastUserMutationAtRef.current = Date.now();
-                                        setDb((prev) => ({
-                                          ...prev,
-                                          zones: prev.zones.filter(
-                                            (item) => item.id !== z.id
-                                          ),
-                                        }));
-                                        showToast(`Zone "${z.name}" dihapus.`);
-                                      }}
-                                      className={`rounded p-1 transition ${
-                                        isZoneDeleteLocked
-                                          ? 'cursor-not-allowed bg-slate-700/70 text-slate-400 hover:bg-slate-700'
-                                          : 'bg-[#d9534f] text-white hover:bg-[#c9302c]'
-                                      }`}
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                    </button>
-                                  </div>
+                                        onClick={() => {
+                                          if (isZoneDeleteLocked) {
+                                            showToast(
+                                              `⚠ Zone "${z.name}" tidak dapat dihapus karena masih ada ${onuCount} ONU yang terhubung di Splitter / Zone ini!`
+                                            );
+                                            return;
+                                          }
+                                          nextSyncIsUserMutationRef.current = true;
+                                          lastUserMutationAtRef.current = Date.now();
+                                          setDb((prev) => ({
+                                            ...prev,
+                                            zones: prev.zones.filter(
+                                              (item) => item.id !== z.id
+                                            ),
+                                          }));
+                                          showToast(`Zone "${z.name}" dihapus.`);
+                                        }}
+                                        className={`rounded p-1 transition ${
+                                          isZoneDeleteLocked
+                                            ? 'cursor-not-allowed bg-slate-700/70 text-slate-400 hover:bg-slate-700'
+                                            : 'bg-[#d9534f] text-white hover:bg-[#c9302c]'
+                                        }`}
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <span className="text-[11px] text-slate-500">Read-Only</span>
+                                  )}
                                 </td>
                               </tr>
                             );
@@ -6608,7 +6889,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </div>
 
                 {/* Add / Edit Zone Modal */}
-                {showZoneModal && (
+                {showZoneModal && !isViewerUser && (
                   <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
                     <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
                       <div className="mb-4 flex items-center justify-between border-b border-slate-700 pb-3">
@@ -6752,25 +7033,27 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       placeholder="Cari Sector, Code, Zone..."
                       className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
                     />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingSector(null);
-                        setSectorFormName('');
-                        setSectorFormCode(
-                          `SEC-0${(db.sectors || []).length + 1}`
-                        );
-                        setSectorFormZoneId(db.zones[0]?.id || 'NONE');
-                        setSectorFormOltId(db.olts[0]?.id || 'NONE');
-                        setSectorFormPortId(db.pon_ports[0]?.id || 'NONE');
-                        setSectorFormDesc('');
-                        setShowSectorModal(true);
-                      }}
-                      className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      Add Sector
-                    </button>
+                    {!isViewerUser && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingSector(null);
+                          setSectorFormName('');
+                          setSectorFormCode(
+                            `SEC-0${(db.sectors || []).length + 1}`
+                          );
+                          setSectorFormZoneId(db.zones[0]?.id || 'NONE');
+                          setSectorFormOltId(db.olts[0]?.id || 'NONE');
+                          setSectorFormPortId(db.pon_ports[0]?.id || 'NONE');
+                          setSectorFormDesc('');
+                          setShowSectorModal(true);
+                        }}
+                        className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        Add Sector
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -6862,69 +7145,73 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                   {s.description || '-'}
                                 </td>
                                 <td className="px-4 py-3 text-right">
-                                  <div className="inline-flex items-center gap-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setEditingSplitter(null);
-                                        setSplitterFormName('');
-                                        setSplitterFormZoneId(
-                                          s.zone_id || db.zones[0]?.id || 1
-                                        );
-                                        setSplitterFormSectorId(s.id);
-                                        setSplitterFormOltId(
-                                          s.olt_id || db.olts[0]?.id || 1
-                                        );
-                                        setSplitterFormPortId(
-                                          s.pon_port_id ||
-                                            db.pon_ports[0]?.id ||
-                                            1
-                                        );
-                                        setSplitterFormRatio('1:8');
-                                        setSplitterFormPole('TIANG-01');
-                                        setActiveView('SPLITTERS');
-                                        setShowSplitterModal(true);
-                                      }}
-                                      className="rounded bg-amber-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-600"
-                                    >
-                                      + ODP
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setEditingSector(s);
-                                        setSectorFormName(s.name);
-                                        setSectorFormCode(s.code);
-                                        setSectorFormZoneId(s.zone_id ?? 'NONE');
-                                        setSectorFormOltId(s.olt_id ?? 'NONE');
-                                        setSectorFormPortId(
-                                          s.pon_port_id ?? 'NONE'
-                                        );
-                                        setSectorFormDesc(s.description);
-                                        setShowSectorModal(true);
-                                      }}
-                                      className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#025aa5]"
-                                    >
-                                      Edit
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        nextSyncIsUserMutationRef.current = true;
-                                        lastUserMutationAtRef.current = Date.now();
-                                        setDb((prev) => ({
-                                          ...prev,
-                                          sectors: (prev.sectors || []).filter(
-                                            (item) => item.id !== s.id
-                                          ),
-                                        }));
-                                        showToast(`Sector "${s.name}" dihapus.`);
-                                      }}
-                                      className="rounded bg-[#d9534f] p-1 text-white hover:bg-[#c9302c]"
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                    </button>
-                                  </div>
+                                  {!isViewerUser ? (
+                                    <div className="inline-flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingSplitter(null);
+                                          setSplitterFormName('');
+                                          setSplitterFormZoneId(
+                                            s.zone_id || db.zones[0]?.id || 1
+                                          );
+                                          setSplitterFormSectorId(s.id);
+                                          setSplitterFormOltId(
+                                            s.olt_id || db.olts[0]?.id || 1
+                                          );
+                                          setSplitterFormPortId(
+                                            s.pon_port_id ||
+                                              db.pon_ports[0]?.id ||
+                                              1
+                                          );
+                                          setSplitterFormRatio('1:8');
+                                          setSplitterFormPole('TIANG-01');
+                                          setActiveView('SPLITTERS');
+                                          setShowSplitterModal(true);
+                                        }}
+                                        className="rounded bg-amber-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-600"
+                                      >
+                                        + ODP
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingSector(s);
+                                          setSectorFormName(s.name);
+                                          setSectorFormCode(s.code);
+                                          setSectorFormZoneId(s.zone_id ?? 'NONE');
+                                          setSectorFormOltId(s.olt_id ?? 'NONE');
+                                          setSectorFormPortId(
+                                            s.pon_port_id ?? 'NONE'
+                                          );
+                                          setSectorFormDesc(s.description);
+                                          setShowSectorModal(true);
+                                        }}
+                                        className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#025aa5]"
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          nextSyncIsUserMutationRef.current = true;
+                                          lastUserMutationAtRef.current = Date.now();
+                                          setDb((prev) => ({
+                                            ...prev,
+                                            sectors: (prev.sectors || []).filter(
+                                              (item) => item.id !== s.id
+                                            ),
+                                          }));
+                                          showToast(`Sector "${s.name}" dihapus.`);
+                                        }}
+                                        className="rounded bg-[#d9534f] p-1 text-white hover:bg-[#c9302c]"
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <span className="text-[11px] text-slate-500">Read-Only</span>
+                                  )}
                                 </td>
                               </tr>
                             );
@@ -6935,7 +7222,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </div>
 
                 {/* Add / Edit Sector Modal */}
-                {showSectorModal && (
+                {showSectorModal && !isViewerUser && (
                   <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
                     <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
                       <div className="mb-4 flex items-center justify-between border-b border-slate-700 pb-3">
@@ -7166,29 +7453,31 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       placeholder="Cari Nama ODP/Splitter, Tiang..."
                       className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
                     />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingSplitter(null);
-                        setSplitterFormName('');
-                        setSplitterFormZoneId(db.zones[0]?.id || 1);
-                        setSplitterFormSectorId(
-                          (db.sectors && db.sectors[0]?.id) || 'NONE'
-                        );
-                        setSplitterFormOltId(db.olts[0]?.id || 1);
-                        setSplitterFormPortId(db.pon_ports[0]?.id || 1);
-                        setSplitterFormRatio('1:8');
-                        setSplitterFormPole(`TIANG-0${db.odbs.length + 1}`);
-                        setSplitterFormLat('-6.355');
-                        setSplitterFormLng('106.251');
-                        setSplitterFormDesc('');
-                        setShowSplitterModal(true);
-                      }}
-                      className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      Add Splitter (ODP)
-                    </button>
+                    {!isViewerUser && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingSplitter(null);
+                          setSplitterFormName('');
+                          setSplitterFormZoneId(db.zones[0]?.id || 1);
+                          setSplitterFormSectorId(
+                            (db.sectors && db.sectors[0]?.id) || 'NONE'
+                          );
+                          setSplitterFormOltId(db.olts[0]?.id || 1);
+                          setSplitterFormPortId(db.pon_ports[0]?.id || 1);
+                          setSplitterFormRatio('1:8');
+                          setSplitterFormPole(`TIANG-0${db.odbs.length + 1}`);
+                          setSplitterFormLat('-6.355');
+                          setSplitterFormLng('106.251');
+                          setSplitterFormDesc('');
+                          setShowSplitterModal(true);
+                        }}
+                        className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        Add Splitter (ODP)
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -7299,70 +7588,74 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                   {o.latitude}, {o.longitude}
                                 </td>
                                 <td className="px-4 py-3 text-right">
-                                  <div className="inline-flex items-center gap-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setEditingSplitter(o);
-                                        setSplitterFormName(o.name);
-                                        setSplitterFormZoneId(
-                                          o.zone_id || db.zones[0]?.id || 1
-                                        );
-                                        setSplitterFormSectorId(
-                                          o.sector_id ?? 'NONE'
-                                        );
-                                        setSplitterFormOltId(
-                                          o.olt_id || db.olts[0]?.id || 1
-                                        );
-                                        setSplitterFormPortId(
-                                          o.pon_port_id || 1
-                                        );
-                                        setSplitterFormRatio(o.splitter_ratio);
-                                        setSplitterFormPole(o.pole_number);
-                                        setSplitterFormLat(String(o.latitude));
-                                        setSplitterFormLng(String(o.longitude));
-                                        setSplitterFormDesc(o.description || '');
-                                        setShowSplitterModal(true);
-                                      }}
-                                      className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#025aa5]"
-                                    >
-                                      Edit
-                                    </button>
-                                    <button
-                                      type="button"
-                                      title={
-                                        usedPorts > 0
-                                          ? `Tidak dapat dihapus: masih ada ${usedPorts} ONU di Splitter ini`
-                                          : `Hapus Splitter ${o.name}`
-                                      }
-                                      onClick={() => {
-                                        if (usedPorts > 0) {
-                                          showToast(
-                                            `⚠ Splitter / ODP "${o.name}" tidak dapat dihapus karena masih ada ${usedPorts} ONU yang terhubung di Splitter ini!`
+                                  {!isViewerUser ? (
+                                    <div className="inline-flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingSplitter(o);
+                                          setSplitterFormName(o.name);
+                                          setSplitterFormZoneId(
+                                            o.zone_id || db.zones[0]?.id || 1
                                           );
-                                          return;
+                                          setSplitterFormSectorId(
+                                            o.sector_id ?? 'NONE'
+                                          );
+                                          setSplitterFormOltId(
+                                            o.olt_id || db.olts[0]?.id || 1
+                                          );
+                                          setSplitterFormPortId(
+                                            o.pon_port_id || 1
+                                          );
+                                          setSplitterFormRatio(o.splitter_ratio);
+                                          setSplitterFormPole(o.pole_number);
+                                          setSplitterFormLat(String(o.latitude));
+                                          setSplitterFormLng(String(o.longitude));
+                                          setSplitterFormDesc(o.description || '');
+                                          setShowSplitterModal(true);
+                                        }}
+                                        className="rounded bg-[#0275d8] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#025aa5]"
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        type="button"
+                                        title={
+                                          usedPorts > 0
+                                            ? `Tidak dapat dihapus: masih ada ${usedPorts} ONU di Splitter ini`
+                                            : `Hapus Splitter ${o.name}`
                                         }
-                                        nextSyncIsUserMutationRef.current = true;
-                                        lastUserMutationAtRef.current = Date.now();
-                                        setDb((prev) => ({
-                                          ...prev,
-                                          odbs: prev.odbs.filter(
-                                            (item) => item.id !== o.id
-                                          ),
-                                        }));
-                                        showToast(
-                                          `Splitter "${o.name}" dihapus.`
-                                        );
-                                      }}
-                                      className={`rounded p-1 transition ${
-                                        usedPorts > 0
-                                          ? 'cursor-not-allowed bg-slate-700/70 text-slate-400 hover:bg-slate-700'
-                                          : 'bg-[#d9534f] text-white hover:bg-[#c9302c]'
-                                      }`}
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                    </button>
-                                  </div>
+                                        onClick={() => {
+                                          if (usedPorts > 0) {
+                                            showToast(
+                                              `⚠ Splitter / ODP "${o.name}" tidak dapat dihapus karena masih ada ${usedPorts} ONU yang terhubung di Splitter ini!`
+                                            );
+                                            return;
+                                          }
+                                          nextSyncIsUserMutationRef.current = true;
+                                          lastUserMutationAtRef.current = Date.now();
+                                          setDb((prev) => ({
+                                            ...prev,
+                                            odbs: prev.odbs.filter(
+                                              (item) => item.id !== o.id
+                                            ),
+                                          }));
+                                          showToast(
+                                            `Splitter "${o.name}" dihapus.`
+                                          );
+                                        }}
+                                        className={`rounded p-1 transition ${
+                                          usedPorts > 0
+                                            ? 'cursor-not-allowed bg-slate-700/70 text-slate-400 hover:bg-slate-700'
+                                            : 'bg-[#d9534f] text-white hover:bg-[#c9302c]'
+                                        }`}
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <span className="text-[11px] text-slate-500">Read-Only</span>
+                                  )}
                                 </td>
                               </tr>
                             );
@@ -7373,7 +7666,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </div>
 
                 {/* Add / Edit Splitter Modal */}
-                {showSplitterModal && (
+                {showSplitterModal && !isViewerUser && (
                   <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs">
                     <div className="w-full max-w-md rounded-xl border border-slate-700 bg-[#151c28] p-6 text-xs text-slate-100 shadow-2xl">
                       <div className="mb-4 flex items-center justify-between border-b border-slate-700 pb-3">
@@ -9005,7 +9298,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       </div>
 
       {/* Global "Update ONU mode" Modal when triggered from Configured ONUs table or VPN_TR069 */}
-      {updatingModeOnu && (
+      {updatingModeOnu && !isViewerUser && (
         <UpdateOnuModeModal
           onu={updatingModeOnu}
           db={db}
@@ -9025,7 +9318,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       {/* =====================================================================
           MODAL: CONFIGURE AUTO-AUTHORIZE ACTIONS (UNCONFIGURED ONUS)
          ===================================================================== */}
-      {showAutoActionsModal && (
+      {showAutoActionsModal && !isViewerUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
           <div className="w-full max-w-md overflow-hidden rounded-lg border border-slate-700 bg-[#15202e] text-slate-100 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-700/80 px-5 py-3.5">
@@ -9245,7 +9538,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       {/* =====================================================================
           MODAL: ADD NEW OLT
          ===================================================================== */}
-      {showAddOltModal && (
+      {showAddOltModal && !isViewerUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
           <div className="w-full max-w-md overflow-hidden rounded-lg border border-slate-700 bg-[#15202e] text-slate-100 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-700/80 px-5 py-3.5">
@@ -9403,7 +9696,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       {/* =====================================================================
           MODAL: REGISTER UNCONFIGURED ONU SN TO DATABASE
          ===================================================================== */}
-      {showAddUncfgModal && (
+      {showAddUncfgModal && !isViewerUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
           <div className="w-full max-w-md overflow-hidden rounded-lg border border-slate-700 bg-[#15202e] text-slate-100 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-700/80 px-5 py-3.5">
@@ -9555,7 +9848,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       {/* =====================================================================
           MODAL: POSTGRESQL CONNECTION SETTINGS (localhost:5435 | user: likhin)
          ===================================================================== */}
-      {showPgConfigModal && (
+      {showPgConfigModal && !isViewerUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
           <div className="w-full max-w-md overflow-hidden rounded-lg border border-slate-700 bg-[#15202e] text-slate-100 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-700/80 px-5 py-3.5">
@@ -9699,7 +9992,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       {/* ===================================================================
           BACKUP & RESTORE DATABASE + OLT RUNNING-CONFIG MODAL
          =================================================================== */}
-      {showBackupModal && (
+      {showBackupModal && !isViewerUser && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
           onClick={() => setShowBackupModal(false)}
