@@ -721,8 +721,8 @@ ${oltVlans
         </div>
       )}
 
-      {/* 10 Navigation Tabs matching Screenshots 1-5 */}
-      <div className="flex flex-wrap items-center gap-1 border-b border-[#1e3a5f]">
+      {/* 10 Navigation Tabs — Clean Horizontally Scrollable Strip on Mobile */}
+      <div className="no-scrollbar -mx-1 flex items-center gap-1 overflow-x-auto border-b border-slate-800 px-1">
         {tabs.map((t) => {
           const Icon = t.icon;
           const isActive = activeTab === t.id;
@@ -731,14 +731,14 @@ ${oltVlans
               key={t.id}
               type="button"
               onClick={() => handleSelectTab(t.id)}
-              className={`flex items-center gap-1.5 rounded-t border px-3.5 py-2.5 text-xs font-semibold transition ${
+              className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3.5 py-2.5 text-xs font-semibold transition ${
                 isActive
-                  ? '-mb-px border-[#3b6998] border-b-[#0a192f] bg-[#0d2038] text-white'
-                  : 'border-transparent text-slate-300 hover:bg-[#102542]/50 hover:text-white'
+                  ? 'border-sky-400 bg-slate-900/80 text-sky-300'
+                  : 'border-transparent text-slate-400 hover:bg-slate-900/40 hover:text-slate-200'
               }`}
             >
-              <Icon className="h-3.5 w-3.5" />
-              {t.label}
+              <Icon className="h-3.5 w-3.5 shrink-0" />
+              <span>{t.label}</span>
             </button>
           );
         })}
@@ -876,15 +876,15 @@ ${oltVlans
           {/* 2-Column Layout: Settings Table on Left + ZTE C300 Chassis & Telemetry on Right */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
             {/* Left Settings Table */}
-            <div className="overflow-hidden rounded border border-[#1e3a5f] bg-[#0c1c30]/90 lg:col-span-8">
+            <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/70 lg:col-span-8">
               <table className="w-full text-left text-xs">
-                <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
+                <thead className="border-b border-slate-800 bg-slate-900 text-slate-400">
                   <tr>
                     <th className="w-1/3 px-4 py-2.5">OLT setting</th>
                     <th className="px-4 py-2.5">Value</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#1e3a5f]/70">
+                <tbody className="divide-y divide-slate-800/80">
                   <tr>
                     <td className="px-4 py-2.5 font-semibold text-slate-200">Name</td>
                     <td className="px-4 py-2.5 font-semibold text-white">{olt.name}</td>

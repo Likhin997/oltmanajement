@@ -1031,12 +1031,12 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
       {/* Main 2-Column ONU Metadata & Optical/WAN Panel */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* LEFT METADATA COLUMN */}
-        <div className="divide-y divide-[#1e3a5f]/70 border-t border-b border-[#1e3a5f]/70 lg:col-span-6">
+        <div className="divide-y divide-slate-800/80 rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-1 lg:col-span-6">
           {/* OLT */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">OLT</div>
-            <div className="col-span-8 flex items-center gap-3 text-white">
-              <span>
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">OLT</div>
+            <div className="flex flex-wrap items-center gap-3 text-white sm:col-span-8">
+              <span className="font-medium">
                 {olt.id} - {olt.name}
               </span>
               {onViewOlt && (
@@ -1052,13 +1052,15 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* Board / Port / Allocated ONU */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">Board</div>
-            <div className="col-span-8 flex flex-wrap items-center gap-5 text-white">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">Board</div>
+            <div className="flex flex-wrap items-center gap-3 text-white sm:col-span-8 sm:gap-4">
               <span className="font-mono">{onu.board}</span>
-              <span className="font-semibold text-slate-300">Port</span>
+              <span className="text-slate-500">·</span>
+              <span className="font-medium text-slate-400">Port</span>
               <span className="font-mono">{onu.port}</span>
-              <span className="font-semibold text-slate-300">Allocated ONU</span>
+              <span className="text-slate-500">·</span>
+              <span className="font-medium text-slate-400">ONU</span>
               <span className="font-mono">{onu.onu_index || 8}</span>
               {!isReadOnly && (
                 <button
@@ -1078,19 +1080,19 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* GPON channel */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">
               GPON channel
             </div>
-            <div className="col-span-8 flex items-center gap-1.5 text-white">
-              <span className="font-bold text-emerald-400">G</span> GPON
+            <div className="flex items-center gap-1.5 text-white sm:col-span-8">
+              <span className="font-mono font-bold text-emerald-400">G</span> GPON
             </div>
           </div>
 
           {/* SN */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">SN</div>
-            <div className="col-span-8 flex items-center gap-3 font-mono text-white">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">SN</div>
+            <div className="flex items-center gap-3 font-mono text-white sm:col-span-8">
               <span>{onu.serial_number}</span>
               {!isReadOnly && (
                 <button
@@ -1105,12 +1107,12 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* ONU type */}
-          <div className="grid grid-cols-12 items-start py-2">
-            <div className="col-span-4 font-semibold text-slate-300">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-start sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">
               ONU type
             </div>
-            <div className="col-span-8 space-y-1 text-white">
-              <div className="flex items-center gap-2">
+            <div className="space-y-1 text-white sm:col-span-8">
+              <div className="flex flex-wrap items-center gap-2">
                 <span>ALL (Original: F609V3.0)</span>
                 {!isReadOnly && (
                   <button
@@ -1122,7 +1124,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                   </button>
                 )}
               </div>
-              <div className="text-slate-300">Capability: Bridging/Routing</div>
+              <div className="text-slate-400">Capability: Bridging/Routing</div>
               <div>
                 <button
                   type="button"
@@ -1141,17 +1143,17 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* Configuration Preset */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">
               Configuration Preset
             </div>
-            <div className="col-span-8 text-white">None</div>
+            <div className="text-white sm:col-span-8">None</div>
           </div>
 
           {/* Zone */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">Zone</div>
-            <div className="col-span-8 flex items-center gap-3 text-white">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">Zone</div>
+            <div className="flex items-center gap-3 text-white sm:col-span-8">
               <span>{zone ? zone.name : 'None'}</span>
               {!isReadOnly && (
                 <button
@@ -1166,11 +1168,11 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* Splitter */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">
               Splitter
             </div>
-            <div className="col-span-8 flex items-center gap-3 text-white">
+            <div className="flex items-center gap-3 text-white sm:col-span-8">
               <span>
                 {odb
                   ? `${odb.name}${onu.odb_port ? ` Port ${onu.odb_port}` : ''}`
@@ -1189,9 +1191,9 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* Sector */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">Sector</div>
-            <div className="col-span-8 flex items-center gap-3 text-white">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">Sector</div>
+            <div className="flex items-center gap-3 text-white sm:col-span-8">
               <span>{sector ? sector.name : 'None'}</span>
               {!isReadOnly && (
                 <button
@@ -1206,9 +1208,9 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* Name */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">Name</div>
-            <div className="col-span-8 flex items-center gap-3 text-white">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">Name</div>
+            <div className="flex items-center gap-3 text-white sm:col-span-8">
               <span className="font-semibold">{onu.customer_name || 'RATMI'}</span>
               {!isReadOnly && (
                 <button
@@ -1223,11 +1225,11 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* Address or comment */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">
               Address or comment
             </div>
-            <div className="col-span-8 flex items-center gap-3 text-white">
+            <div className="flex items-center gap-3 text-white sm:col-span-8">
               <span>{onu.address || 'None'}</span>
               {!isReadOnly && (
                 <button
@@ -1242,9 +1244,9 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* Contact */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">Contact</div>
-            <div className="col-span-8 flex items-center gap-3 text-white">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">Contact</div>
+            <div className="flex items-center gap-3 text-white sm:col-span-8">
               <span>{onu.contact || 'None'}</span>
               {!isReadOnly && (
                 <button
@@ -1259,21 +1261,21 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* Authorization date */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">
               Authorization date
             </div>
-            <div className="col-span-8 text-white">
+            <div className="font-mono text-white sm:col-span-8">
               {onu.last_online_at || '10-Nov-2026 15:05:57'}
             </div>
           </div>
 
           {/* ONU external ID */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">
               ONU external ID
             </div>
-            <div className="col-span-8 flex items-center gap-3 font-mono text-white">
+            <div className="flex items-center gap-3 font-mono text-white sm:col-span-8">
               <span>{onu.external_id || onu.serial_number}</span>
               {!isReadOnly && (
                 <button
@@ -1288,11 +1290,11 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* Location */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">
               Location
             </div>
-            <div className="col-span-8 flex items-center gap-3">
+            <div className="flex items-center gap-3 sm:col-span-8">
               <button
                 type="button"
                 onClick={() =>
@@ -1318,11 +1320,11 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
           </div>
 
           {/* VIP customer */}
-          <div className="grid grid-cols-12 items-center py-2">
-            <div className="col-span-4 font-semibold text-slate-300">
+          <div className="grid grid-cols-1 gap-1 py-2.5 sm:grid-cols-12 sm:items-center sm:gap-2">
+            <div className="font-medium text-slate-400 sm:col-span-4">
               VIP customer
             </div>
-            <div className="col-span-8">
+            <div className="sm:col-span-8">
               <input
                 type="checkbox"
                 disabled={isReadOnly}
@@ -1339,7 +1341,7 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
         {/* RIGHT COLUMN: Rear Panel Diagram + Status + Rx Gauges + WAN/TR069 */}
         <div className="space-y-3 lg:col-span-6">
           {/* ONU Rear-Panel Port Graphic */}
-          <div className="flex flex-wrap items-center gap-2 rounded border border-[#1e3a5f] bg-[#162942] px-4 py-3 shadow-inner">
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/70 px-4 py-3">
             <div className="flex flex-col items-center rounded bg-slate-800 px-2.5 py-1.5">
               <div
                 className={`h-4 w-5 rounded-xs border-2 ${

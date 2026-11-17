@@ -2589,55 +2589,41 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
   if (!currentUser) {
     return (
-      <div
-        className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-[#060d18] px-4 py-10 text-slate-100"
-        style={{
-          backgroundImage: `radial-gradient(circle at 50% 0%, rgba(14, 165, 233, 0.16) 0%, transparent 55%), radial-gradient(circle at 80% 85%, rgba(16, 185, 129, 0.10) 0%, transparent 50%), linear-gradient(180deg, #060d18 0%, #091322 100%)`,
-        }}
-      >
-        {/* Subtle Architectural Grid Backdrop */}
-        <div
-          className="pointer-events-none absolute inset-0 opacity-20"
-          style={{
-            backgroundImage: `linear-gradient(to right, rgba(148, 163, 184, 0.08) 1px, transparent 1px), linear-gradient(to bottom, rgba(148, 163, 184, 0.08) 1px, transparent 1px)`,
-            backgroundSize: '40px 40px',
-          }}
-        />
-
-        <div className="relative z-10 w-full max-w-[420px]">
-          <div className="overflow-hidden rounded-2xl border border-slate-800/90 bg-[#0b1526]/95 shadow-[0_24px_60px_-15px_rgba(0,0,0,0.85)] backdrop-blur-xl">
-            {/* Top Brand Header */}
-            <div className="border-b border-slate-800/80 bg-gradient-to-b from-[#0f1e36]/80 to-[#0b1526] px-7 pt-7 pb-6 text-center">
-              <div className="mx-auto mb-3.5 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500/20 to-emerald-500/10 ring-1 ring-sky-400/30 shadow-inner">
-                <Wifi className="h-6 w-6 text-sky-400" />
+      <div className="flex min-h-screen flex-col items-center justify-center bg-[#090d16] px-4 py-10 text-slate-100">
+        <div className="w-full max-w-[400px]">
+          <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/90 shadow-2xl">
+            {/* Clean Brand Header */}
+            <div className="border-b border-slate-800/80 px-6 pt-7 pb-5 text-center sm:px-8">
+              <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
+                <Wifi className="h-5 w-5" />
               </div>
-              <div className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/25 bg-sky-950/60 px-2.5 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-sky-300 uppercase">
-                <ShieldCheck className="h-3 w-3 text-emerald-400" />
-                GPON / XGPON OLT MANAGEMENT
-              </div>
-              <h1 className="mt-2.5 text-2xl font-extrabold tracking-tight text-white">
+              <h1 className="text-xl font-bold tracking-tight text-white">
                 JETCYBERNET
               </h1>
-              <p className="mt-1 text-xs leading-relaxed text-slate-400">
-                Masuk untuk mengelola OLT, ONU, Zone &amp; Distribusi RK / ODP
+              <p className="mt-1 text-xs text-slate-400">
+                GPON / XGPON OLT &amp; ONU Management Console
               </p>
             </div>
 
             {/* Login Form */}
-            <form onSubmit={handleLoginSubmit} className="space-y-4 p-7 text-xs" autoComplete="off">
+            <form
+              onSubmit={handleLoginSubmit}
+              className="space-y-4 p-6 text-xs sm:p-8"
+              autoComplete="off"
+            >
               {loginError && (
-                <div className="flex items-start gap-2.5 rounded-xl border border-red-500/40 bg-red-950/50 px-3.5 py-3 text-xs font-medium text-red-200">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+                <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/40 bg-rose-950/40 px-3.5 py-2.5 text-xs font-medium text-rose-200">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
                   <span>{loginError}</span>
                 </div>
               )}
 
               <div>
-                <label className="mb-1.5 block text-xs font-semibold text-slate-200">
+                <label className="mb-1.5 block text-xs font-medium text-slate-300">
                   Username atau Email
                 </label>
                 <div className="relative">
-                  <User className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <User className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-slate-500" />
                   <input
                     type="text"
                     required
@@ -2646,14 +2632,14 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     value={loginUsername}
                     onChange={(e) => setLoginUsername(e.target.value)}
                     placeholder="Masukkan username atau email"
-                    className="w-full rounded-xl border border-slate-700/80 bg-[#0f1d32] py-2.5 pr-3.5 pl-10 text-xs text-white placeholder-slate-500 transition focus:border-sky-400 focus:bg-[#12233c] focus:outline-none"
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-950/80 py-2.5 pr-3.5 pl-10 text-xs text-white placeholder-slate-500 transition focus:border-sky-400 focus:outline-none"
                   />
                 </div>
               </div>
 
               <div>
                 <div className="mb-1.5 flex items-center justify-between">
-                  <label className="block text-xs font-semibold text-slate-200">
+                  <label className="block text-xs font-medium text-slate-300">
                     Password
                   </label>
                   <button
@@ -2665,7 +2651,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </button>
                 </div>
                 <div className="relative">
-                  <Lock className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <Lock className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-slate-500" />
                   <input
                     type={showLoginPassword ? 'text' : 'password'}
                     required
@@ -2673,7 +2659,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     value={loginPassword}
                     onChange={(e) => setLoginPassword(e.target.value)}
                     placeholder="Masukkan password"
-                    className="w-full rounded-xl border border-slate-700/80 bg-[#0f1d32] py-2.5 pr-3.5 pl-10 text-xs text-white placeholder-slate-500 transition focus:border-sky-400 focus:bg-[#12233c] focus:outline-none"
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-950/80 py-2.5 pr-3.5 pl-10 text-xs text-white placeholder-slate-500 transition focus:border-sky-400 focus:outline-none"
                   />
                 </div>
               </div>
@@ -2681,7 +2667,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               <button
                 type="submit"
                 disabled={loginLoading}
-                className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 py-2.5 text-xs font-bold text-white shadow-lg shadow-sky-950/60 transition hover:from-sky-400 hover:to-blue-500 disabled:opacity-60"
+                className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg bg-sky-600 py-2.5 text-xs font-semibold text-white transition hover:bg-sky-500 disabled:opacity-60"
               >
                 {loginLoading ? (
                   <>
@@ -2694,12 +2680,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               </button>
             </form>
 
-            {/* Security Footer */}
-            <div className="flex items-center justify-between border-t border-slate-800/80 bg-[#08101e] px-7 py-3 text-[11px] text-slate-400">
-              <span className="inline-flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                Enkripsi Sesi Aktif
-              </span>
+            {/* Clean Footer */}
+            <div className="flex items-center justify-between border-t border-slate-800/80 bg-slate-950/60 px-6 py-3 text-[11px] text-slate-400 sm:px-8">
+              <span>Auto-Logout Idle 30m</span>
               <span className="font-mono text-[10px] text-slate-500">Asia/Jakarta (WIB)</span>
             </div>
           </div>
@@ -2941,23 +2924,20 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
   return (
     <div
-      className="min-h-screen bg-[#060d18] text-slate-100"
-      style={{
-        backgroundImage: `radial-gradient(circle at 80% 0%, rgba(14, 165, 233, 0.09) 0%, transparent 50%), radial-gradient(circle at 20% 90%, rgba(16, 185, 129, 0.05) 0%, transparent 50%), linear-gradient(180deg, #060d18 0%, #091322 100%)`,
-      }}
+      className="min-h-screen bg-[#090d16] text-slate-100"
       onClick={() => {
         if (openDropdown) setOpenDropdown(null);
       }}
     >
-      {/* MODERN TOP NAVIGATION BAR */}
-      <header className="sticky top-0 z-40 border-b border-slate-800/85 bg-[#091322]/90 backdrop-blur-md">
-        <div className="mx-auto flex h-14 max-w-[1600px] items-center justify-between gap-3 px-3 sm:px-5">
-          {/* Left: Mobile Drawer Trigger + Brand + Primary Quick Links */}
-          <div className="flex items-center gap-2 sm:gap-3">
+      {/* CLEAN 3-ZONE TOP NAVIGATION BAR */}
+      <header className="sticky top-0 z-40 border-b border-slate-800/80 bg-[#090d16]/90 backdrop-blur-md">
+        <div className="mx-auto flex h-14 max-w-[1600px] items-center justify-between gap-3 px-4 sm:px-6">
+          {/* Zone 1 (Left): Mobile Drawer Trigger + Brand Wordmark */}
+          <div className="flex items-center gap-2.5">
             <button
               type="button"
               onClick={() => setMobileSidebarOpen((v) => !v)}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/70 text-slate-300 transition hover:border-slate-700 hover:text-white lg:hidden"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-800 bg-slate-900 text-slate-300 transition hover:border-slate-700 hover:text-white lg:hidden"
               title="Buka Menu Navigasi"
             >
               <Menu className="h-4 w-4" />
@@ -2966,369 +2946,182 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             <button
               type="button"
               onClick={() => setActiveView('DASHBOARD')}
-              className="group flex items-center gap-2.5 pr-2 text-left"
+              className="flex items-center gap-2.5 text-left"
             >
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-sky-500 to-blue-600 text-white shadow-md shadow-sky-950/50 transition group-hover:scale-105">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
                 <Wifi className="h-4 w-4" />
               </div>
-              <div>
-                <div className="text-sm font-extrabold tracking-tight text-white group-hover:text-sky-300">
-                  JETCYBERNET
-                </div>
-                <div className="hidden font-mono text-[10px] text-slate-400 sm:block">
-                  OLT MANAGEMENT CONSOLE
-                </div>
-              </div>
+              <span className="text-sm font-bold tracking-tight text-white whitespace-nowrap">
+                JETCYBERNET
+              </span>
             </button>
-
-            <div className="hidden h-5 w-px bg-slate-800 xl:block" />
-
-            {/* Top Quick Links (Preserving all original navbar shortcuts & dropdowns) */}
-            <nav className="hidden items-center gap-1 xl:flex">
-              <button
-                type="button"
-                onClick={() => setActiveView('UNCONFIGURED')}
-                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
-                  activeView === 'UNCONFIGURED' || activeView === 'AUTHORIZE_FORM'
-                    ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
-                    : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
-                }`}
-              >
-                <span>Unconfigured</span>
-                {unconfiguredOnus.length > 0 && (
-                  <span className="rounded-md bg-amber-500/20 px-1.5 py-0.2 font-mono text-[10px] font-bold text-amber-300">
-                    {unconfiguredOnus.length}
-                  </span>
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveView('CONFIGURED')}
-                className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
-                  activeView === 'CONFIGURED' || activeView === 'ONU_DETAIL'
-                    ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
-                    : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
-                }`}
-              >
-                Configured
-              </button>
-
-              {/* Map Dropdown */}
-              <div className="relative" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setOpenDropdown(openDropdown === 'MAP' ? null : 'MAP')
-                  }
-                  className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
-                    openDropdown === 'MAP' ||
-                    activeView === 'ZONES' ||
-                    activeView === 'SECTORS' ||
-                    activeView === 'SPLITTERS'
-                      ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
-                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
-                  }`}
-                >
-                  Map <ChevronDown className="h-3.5 w-3.5 opacity-75" />
-                </button>
-                {openDropdown === 'MAP' && (
-                  <div className="animate-modal-in absolute left-0 mt-1.5 w-48 rounded-xl border border-slate-700/80 bg-[#0d192b] p-1.5 text-xs shadow-2xl">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveView('ZONES');
-                        setOpenDropdown(null);
-                      }}
-                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-slate-200 transition hover:bg-slate-800/80 hover:text-white"
-                    >
-                      <MapPin className="h-3.5 w-3.5 text-sky-400" />
-                      Zones &amp; ODB Map
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveView('SECTORS');
-                        setOpenDropdown(null);
-                      }}
-                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-slate-200 transition hover:bg-slate-800/80 hover:text-white"
-                    >
-                      <Layers className="h-3.5 w-3.5 text-indigo-400" />
-                      Sectors (RK)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveView('SPLITTERS');
-                        setOpenDropdown(null);
-                      }}
-                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-slate-200 transition hover:bg-slate-800/80 hover:text-white"
-                    >
-                      <GitBranch className="h-3.5 w-3.5 text-emerald-400" />
-                      Splitters (ODP)
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setActiveView('GRAPHS')}
-                className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
-                  activeView === 'GRAPHS'
-                    ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
-                    : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
-                }`}
-              >
-                Graphs
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveView('DASHBOARD')}
-                className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-slate-800/60 hover:text-white"
-              >
-                Events
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveView('DIAG_PARSER')}
-                className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
-                  activeView === 'DIAG_PARSER'
-                    ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
-                    : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
-                }`}
-              >
-                Diag
-              </button>
-
-              {/* Tasks Dropdown */}
-              <div className="relative" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setOpenDropdown(openDropdown === 'TASKS' ? null : 'TASKS')
-                  }
-                  className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
-                    activeView === 'TASKS' || openDropdown === 'TASKS'
-                      ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
-                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
-                  }`}
-                >
-                  Tasks <ChevronDown className="h-3.5 w-3.5 opacity-75" />
-                </button>
-                {openDropdown === 'TASKS' && (
-                  <div className="animate-modal-in absolute left-0 mt-1.5 w-40 rounded-xl border border-slate-700/80 bg-[#0d192b] p-1.5 text-xs shadow-2xl">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveView('TASKS');
-                        setOpenDropdown(null);
-                      }}
-                      className="block w-full rounded-lg px-3 py-2 text-left text-white transition hover:bg-slate-800/80"
-                    >
-                      Tasks
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveView('TASKS');
-                        setOpenDropdown(null);
-                      }}
-                      className="block w-full rounded-lg px-3 py-2 text-left text-slate-200 transition hover:bg-slate-800/80"
-                    >
-                      Tickets
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Reports Dropdown */}
-              <div className="relative" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setOpenDropdown(openDropdown === 'REPORTS' ? null : 'REPORTS')
-                  }
-                  className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-slate-800/60 hover:text-white"
-                >
-                  Reports <ChevronDown className="h-3.5 w-3.5 opacity-75" />
-                </button>
-                {openDropdown === 'REPORTS' && (
-                  <div className="animate-modal-in absolute left-0 mt-1.5 w-52 rounded-xl border border-slate-700/80 bg-[#0d192b] p-1.5 text-xs shadow-2xl">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveView('GRAPHS');
-                        setOpenDropdown(null);
-                      }}
-                      className="block w-full rounded-lg px-3 py-2 text-left text-slate-200 transition hover:bg-slate-800/80"
-                    >
-                      Optical Signal Report
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveView('SOURCE_CODE');
-                        setOpenDropdown(null);
-                      }}
-                      className="block w-full rounded-lg px-3 py-2 text-left text-emerald-400 transition hover:bg-slate-800/80"
-                    >
-                      Export SQL &amp; Backend Code
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Settings Dropdown */}
-              <div className="relative" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setOpenDropdown(openDropdown === 'SETTINGS' ? null : 'SETTINGS')
-                  }
-                  className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
-                    openDropdown === 'SETTINGS' ||
-                    activeView === 'USERS' ||
-                    activeView === 'OLTS_LIST' ||
-                    activeView === 'OLT_DETAIL'
-                      ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30'
-                      : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
-                  }`}
-                >
-                  Settings <ChevronDown className="h-3.5 w-3.5 opacity-75" />
-                </button>
-                {openDropdown === 'SETTINGS' && (
-                  <div className="animate-modal-in absolute left-0 mt-1.5 w-52 rounded-xl border border-slate-700/80 bg-[#0d192b] p-1.5 text-xs shadow-2xl">
-                    {[
-                      { label: 'Zones', view: 'ZONES' as NavigationView },
-                      { label: 'Sectors (RK)', view: 'SECTORS' as NavigationView },
-                      { label: 'Splitters (ODP)', view: 'SPLITTERS' as NavigationView },
-                      ...(isAdminUser
-                        ? [
-                            {
-                              label: 'Users & Hak Akses',
-                              view: 'USERS' as NavigationView,
-                            },
-                          ]
-                        : []),
-                      { label: 'ONU types', view: 'SPEED_PROFILES' as NavigationView },
-                      {
-                        label: 'Speed profiles',
-                        view: 'SPEED_PROFILES' as NavigationView,
-                      },
-                      { label: 'OLTs', view: 'OLTS_LIST' as NavigationView },
-                      { label: 'VPN & TR069', view: 'VPN_TR069' as NavigationView },
-                      { label: 'Presets', view: 'VPN_TR069' as NavigationView },
-                      { label: 'General', view: 'SOURCE_CODE' as NavigationView },
-                      { label: 'Billing', view: 'SOURCE_CODE' as NavigationView },
-                    ].map((item) => (
-                      <button
-                        key={item.label}
-                        type="button"
-                        onClick={() => {
-                          setActiveView(item.view);
-                          setOpenDropdown(null);
-                        }}
-                        className={`block w-full rounded-lg px-3 py-1.5 text-left transition hover:bg-slate-800/80 hover:text-white ${
-                          activeView === item.view
-                            ? 'bg-sky-500/15 font-bold text-sky-400'
-                            : 'text-slate-200'
-                        }`}
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                    {!isViewerUser && (
-                      <>
-                        <div className="my-1 border-t border-slate-800" />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setOpenDropdown(null);
-                            openBackupRestoreModal();
-                          }}
-                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-semibold text-emerald-400 transition hover:bg-slate-800/80 hover:text-emerald-300"
-                        >
-                          <Download className="h-3.5 w-3.5" />
-                          Backup &amp; Restore
-                        </button>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            </nav>
           </div>
 
-          {/* Right Utility Actions + Idle Timer + Backup & Restore + User Session Profile */}
-          <div className="flex items-center gap-2 text-slate-200">
-            <div className="hidden items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/60 px-2.5 py-1 font-mono text-[11px] text-slate-400 md:flex">
-              <Clock className="h-3.5 w-3.5 text-sky-400" />
-              <span>WIB (UTC+7)</span>
-            </div>
+          {/* Zone 2 (Center): Clean Single-Line Navigation Links */}
+          <nav className="hidden items-center gap-1 md:flex">
+            <button
+              type="button"
+              onClick={() => setActiveView('DASHBOARD')}
+              className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                activeView === 'DASHBOARD'
+                  ? 'bg-slate-800 text-white'
+                  : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'
+              }`}
+            >
+              Dashboard
+            </button>
 
+            <button
+              type="button"
+              onClick={() => setActiveView('UNCONFIGURED')}
+              className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                activeView === 'UNCONFIGURED' || activeView === 'AUTHORIZE_FORM'
+                  ? 'bg-slate-800 text-white'
+                  : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'
+              }`}
+            >
+              <span>Unconfigured</span>
+              {unconfiguredOnus.length > 0 && (
+                <span className="rounded bg-amber-500/20 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-300">
+                  {unconfiguredOnus.length}
+                </span>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveView('CONFIGURED')}
+              className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                activeView === 'CONFIGURED' || activeView === 'ONU_DETAIL'
+                  ? 'bg-slate-800 text-white'
+                  : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'
+              }`}
+            >
+              Configured
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveView('OLTS_LIST')}
+              className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                activeView === 'OLTS_LIST' ||
+                activeView === 'OLT_DETAIL' ||
+                activeView === 'ADD_OLT'
+                  ? 'bg-slate-800 text-white'
+                  : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'
+              }`}
+            >
+              OLTs
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveView('GRAPHS')}
+              className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                activeView === 'GRAPHS'
+                  ? 'bg-slate-800 text-white'
+                  : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'
+              }`}
+            >
+              Graphs
+            </button>
+
+            {/* Settings Dropdown for Secondary Views */}
+            <div className="relative" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                onClick={() =>
+                  setOpenDropdown(openDropdown === 'SETTINGS' ? null : 'SETTINGS')
+                }
+                className={`flex items-center gap-1 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  openDropdown === 'SETTINGS' ||
+                  activeView === 'ZONES' ||
+                  activeView === 'SECTORS' ||
+                  activeView === 'SPLITTERS' ||
+                  activeView === 'USERS' ||
+                  activeView === 'SPEED_PROFILES' ||
+                  activeView === 'VPN_TR069' ||
+                  activeView === 'TASKS' ||
+                  activeView === 'DIAG_PARSER' ||
+                  activeView === 'SOURCE_CODE'
+                    ? 'bg-slate-800 text-white'
+                    : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'
+                }`}
+              >
+                <span>Lainnya</span>
+                <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+              </button>
+              {openDropdown === 'SETTINGS' && (
+                <div className="animate-modal-in absolute left-0 mt-1.5 w-52 rounded-xl border border-slate-800 bg-slate-900 p-1.5 text-xs shadow-2xl">
+                  {[
+                    { label: 'Zones (Wilayah)', view: 'ZONES' as NavigationView },
+                    { label: 'Sectors (RK)', view: 'SECTORS' as NavigationView },
+                    { label: 'Splitters (ODP)', view: 'SPLITTERS' as NavigationView },
+                    ...(isAdminUser
+                      ? [
+                          {
+                            label: 'Users & Hak Akses',
+                            view: 'USERS' as NavigationView,
+                          },
+                        ]
+                      : []),
+                    { label: 'Speed & ONU Types', view: 'SPEED_PROFILES' as NavigationView },
+                    { label: 'VPN & TR-069 ACS', view: 'VPN_TR069' as NavigationView },
+                    { label: 'Tasks & Log CLI', view: 'TASKS' as NavigationView },
+                    { label: 'CLI Diagnostics', view: 'DIAG_PARSER' as NavigationView },
+                    { label: 'SQL & Backend Code', view: 'SOURCE_CODE' as NavigationView },
+                  ].map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      onClick={() => {
+                        setActiveView(item.view);
+                        setOpenDropdown(null);
+                      }}
+                      className={`block w-full rounded-lg px-3 py-1.5 text-left transition hover:bg-slate-800 hover:text-white ${
+                        activeView === item.view
+                          ? 'bg-sky-500/15 font-semibold text-sky-400'
+                          : 'text-slate-300'
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                  {!isViewerUser && (
+                    <>
+                      <div className="my-1 border-t border-slate-800" />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOpenDropdown(null);
+                          openBackupRestoreModal();
+                        }}
+                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-semibold text-emerald-400 transition hover:bg-slate-800"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Backup &amp; Restore
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </nav>
+
+          {/* Zone 3 (Right): Idle Countdown + User Session + Logout */}
+          <div className="flex items-center gap-2 text-slate-200">
             <div
               title="Auto-logout otomatis jika tidak ada aktivitas selama 30 menit"
               className={`hidden items-center gap-1.5 rounded-lg border px-2.5 py-1 font-mono text-[11px] sm:flex ${
                 idleRemainingMs <= IDLE_WARNING_THRESHOLD_MS
-                  ? 'border-amber-500/60 bg-amber-950/60 text-amber-300 animate-pulse'
-                  : 'border-slate-800 bg-slate-900/60 text-slate-300'
+                  ? 'border-amber-500/50 bg-amber-950/50 text-amber-300'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-400'
               }`}
             >
-              <ShieldCheck
-                className={`h-3.5 w-3.5 ${
-                  idleRemainingMs <= IDLE_WARNING_THRESHOLD_MS
-                    ? 'text-amber-400'
-                    : 'text-emerald-400'
-                }`}
-              />
-              <span>Idle {formatRemainingIdleTime(idleRemainingMs)}</span>
+              <Clock className="h-3 w-3 text-slate-400" />
+              <span>{formatRemainingIdleTime(idleRemainingMs)}</span>
             </div>
 
-            {!isViewerUser && (
-              <button
-                type="button"
-                onClick={async () => {
-                  await fetch('/api/state/sync', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ state: db }),
-                  });
-                  showToast(
-                    `State synced to ${dbMeta.dbEngine} Database (${db.olts.length} OLTs, ${configuredOnus.length} ONUs).`
-                  );
-                }}
-                title="Save state to SQL Database & OLT NVRAM"
-                className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300 transition hover:border-sky-500/40 hover:bg-slate-800 hover:text-white"
-              >
-                <Save className="h-4 w-4" />
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={() => setActiveView('VPN_TR069')}
-              title="TR-069 CWMP ACS & Remote Access"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300 transition hover:border-emerald-500/40 hover:bg-slate-800 hover:text-emerald-400"
-            >
-              <Contrast className="h-4 w-4" />
-            </button>
-
-            {!isViewerUser && (
-              <button
-                type="button"
-                onClick={openBackupRestoreModal}
-                title="Backup & Restore Database (OLT, ONU, Zone, RK & Konfigurasi CLI)"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-emerald-950/40 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 shadow-xs transition hover:border-emerald-400/60 hover:bg-emerald-900/50 hover:text-white"
-              >
-                <Database className="h-3.5 w-3.5 text-emerald-400" />
-                <span className="hidden sm:inline">Backup &amp; Restore</span>
-              </button>
-            )}
-
-            {/* Logged-in User Profile & User Management Button */}
             <button
               type="button"
               onClick={() => {
@@ -3336,41 +3129,22 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   setActiveView('USERS');
                 } else {
                   showToast(
-                    `Login sebagai ${currentUser.full_name} (${currentUser.role}) — Akses: ${
-                      currentUser.access_all_olts
-                        ? 'Semua OLT'
-                        : `${visibleOlts.length} OLT`
-                    }, ${
-                      currentUser.access_all_zones
-                        ? 'Semua Zone'
-                        : `${visibleZones.length} Zone`
-                    }, ${
-                      currentUser.access_all_rks
-                        ? 'Semua RK'
-                        : `${visibleSectors.length} RK/Sector & ${visibleOdbs.length} ODP`
-                    }`
+                    `Login sebagai ${currentUser.full_name} (${currentUser.role})`
                   );
                 }
               }}
-              title={
-                isAdminUser
-                  ? `Klik untuk membuka User Management (Sesi #${sessionTokenId || 'AKTIF'})`
-                  : `Logged in as ${currentUser.full_name} (Sesi #${sessionTokenId || 'AKTIF'})`
-              }
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-700/80 bg-[#0f1e34] px-2.5 py-1 text-xs font-semibold text-white transition hover:border-sky-400/60 hover:bg-[#132642]"
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-xs font-medium text-white transition hover:border-slate-700 hover:bg-slate-800"
             >
-              <div className="flex h-5 w-5 items-center justify-center rounded-md bg-sky-500/20 text-sky-400">
-                <User className="h-3.5 w-3.5" />
-              </div>
-              <span className="max-w-[100px] truncate">{currentUser.username}</span>
+              <User className="h-3.5 w-3.5 text-sky-400" />
+              <span className="max-w-[90px] truncate">{currentUser.username}</span>
               <span
-                className={`rounded-md px-1.5 py-0.2 font-mono text-[10px] ${
+                className={`hidden rounded px-1.5 py-0.5 font-mono text-[10px] sm:inline-block ${
                   isViewerUser
-                    ? 'border border-amber-500/40 bg-amber-500/20 text-amber-300'
-                    : 'bg-sky-500/20 text-sky-300'
+                    ? 'bg-amber-500/15 text-amber-300'
+                    : 'bg-sky-500/15 text-sky-300'
                 }`}
               >
-                {isViewerUser ? 'VIEWER · READ-ONLY' : currentUser.role}
+                {currentUser.role}
               </span>
             </button>
 
@@ -3378,7 +3152,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               type="button"
               onClick={handleLogout}
               title="Keluar (Logout)"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/35 bg-rose-950/35 px-2.5 py-1.5 text-xs font-semibold text-rose-300 transition hover:border-rose-400/60 hover:bg-rose-900/50 hover:text-white"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition hover:border-rose-500/40 hover:bg-rose-950/40 hover:text-rose-300"
             >
               <LogOut className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Logout</span>
@@ -3590,13 +3364,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         </aside>
 
         {/* MAIN PAGE CONTAINER */}
-        <main className="min-w-0 flex-1 px-4 py-5 sm:px-6">
+        <main className="min-w-0 flex-1 px-4 pt-5 pb-24 sm:px-6 lg:pb-8">
           {/* Contextual Page Header Bar */}
-          <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3.5">
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-4">
             <div>
-              <div className="flex items-center gap-2 text-[11px] font-medium text-sky-400">
-                <span>JETCYBERNET</span>
-                <span className="text-slate-600">/</span>
+              <div className="flex items-center gap-2 text-[11px] font-medium text-slate-400">
+                <span className="text-sky-400">JETCYBERNET</span>
+                <span>·</span>
                 <span className="font-mono uppercase">{activeView.replace('_', ' ')}</span>
               </div>
               <h1 className="mt-0.5 text-lg font-bold tracking-tight text-white sm:text-xl">
@@ -3608,8 +3382,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {isViewerUser && (
-                <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-950/50 px-3 py-1.5 text-xs font-bold text-amber-300">
-                  MODE VIEWER (Hanya Lihat / Read-Only)
+                <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/35 bg-amber-950/40 px-3 py-1.5 text-xs font-semibold text-amber-300">
+                  Mode Viewer (Hanya Lihat)
                 </span>
               )}
               {!isViewerUser &&
@@ -3629,29 +3403,48 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         void syncOltFromTelnetLive(targetOlt.id, targetOlt);
                       }
                     }}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/50 px-3 py-1.5 text-xs font-semibold text-emerald-300 transition hover:bg-emerald-900/60 hover:text-white disabled:opacity-60"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-60"
                   >
                     <RefreshCw
-                      className={`h-3.5 w-3.5 text-emerald-400 ${
+                      className={`h-3.5 w-3.5 ${
                         isSyncingAllOnus ? 'animate-spin' : ''
                       }`}
                     />
                     <span>
                       {isSyncingAllOnus
                         ? 'Menarik ONU dari OLT...'
-                        : 'Sync Semua ONU dari OLT'}
+                        : 'Sync ONU dari OLT'}
                     </span>
                   </button>
                 )}
-              {activeView !== 'DASHBOARD' && (
-                <button
-                  type="button"
-                  onClick={() => setActiveView('DASHBOARD')}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700/80 bg-slate-900/70 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-slate-600 hover:bg-slate-800 hover:text-white"
-                >
-                  <LayoutDashboard className="h-3.5 w-3.5 text-sky-400" />
-                  Dashboard
-                </button>
+              {!isViewerUser && (
+                <>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await fetch('/api/state/sync', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ state: db }),
+                      });
+                      showToast(
+                        `State synced to ${dbMeta.dbEngine} Database (${db.olts.length} OLTs, ${configuredOnus.length} ONUs).`
+                      );
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:border-slate-700 hover:bg-slate-800 hover:text-white"
+                  >
+                    <Save className="h-3.5 w-3.5 text-sky-400" />
+                    <span className="hidden sm:inline">Save DB</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openBackupRestoreModal}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:border-slate-700 hover:bg-slate-800 hover:text-white"
+                  >
+                    <Database className="h-3.5 w-3.5 text-emerald-400" />
+                    <span className="hidden sm:inline">Backup</span>
+                  </button>
+                </>
               )}
               {unconfiguredOnus.length > 0 && activeView !== 'UNCONFIGURED' && (
                 <button
@@ -3660,46 +3453,33 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-950/40 px-3 py-1.5 text-xs font-semibold text-amber-300 transition hover:bg-amber-900/50 hover:text-white"
                 >
                   <Radio className="h-3.5 w-3.5 text-amber-400" />
-                  <span>{unconfiguredOnus.length} ONU Waiting Auth</span>
+                  <span>{unconfiguredOnus.length} Waiting Auth</span>
                 </button>
               )}
             </div>
           </div>
 
           {/* ===================================================================
-              VIEW 1: DASHBOARD (Modernized KPI Summary Cards & Telemetry Panels)
+              VIEW 1: DASHBOARD (Clean SaaS KPI Cards & Telemetry Panels)
              =================================================================== */}
           {activeView === 'DASHBOARD' && (
             <div className="space-y-5">
-              {/* Top 4 Modern KPI Summary Cards */}
+              {/* Top 4 Clean Single-Elevation KPI Cards */}
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 {/* Card 1: Waiting authorization */}
                 <div
                   onClick={() => setActiveView('UNCONFIGURED')}
-                  className="group relative cursor-pointer overflow-hidden rounded-xl border border-sky-500/30 bg-gradient-to-br from-[#0c213d] via-[#0b192e] to-[#091322] p-4 text-white shadow-lg transition hover:-translate-y-0.5 hover:border-sky-400/60"
+                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-sky-500/40 hover:bg-slate-900"
                 >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <span className="text-xs font-semibold tracking-wide text-sky-300 uppercase">
-                        Waiting Authorization
-                      </span>
-                      <div className="mt-2 font-mono text-3xl font-extrabold tracking-tight text-white">
-                        {unconfiguredOnus.length}
-                      </div>
-                    </div>
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-sky-500/20 text-sky-400 ring-1 ring-sky-500/30 transition group-hover:bg-sky-500 group-hover:text-white">
-                      <Radio className="h-5 w-5" />
-                    </div>
+                  <div className="flex items-center justify-between text-xs font-medium text-slate-400">
+                    <span>Waiting Authorization</span>
+                    <Radio className="h-4 w-4 text-sky-400" />
                   </div>
-                  <div className="mt-4 flex items-center justify-between border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-300">
-                    <span>Discovered Queue</span>
-                    <div className="flex items-center gap-2.5">
-                      <span>D: 0</span>
-                      <span>Resync: 0</span>
-                      <span className="font-bold text-sky-300">
-                        New: {unconfiguredOnus.length}
-                      </span>
-                    </div>
+                  <div className="mt-2 font-mono text-3xl font-bold tracking-tight text-white">
+                    {unconfiguredOnus.length}
+                  </div>
+                  <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
+                    Discovered · <span className="text-sky-400">New {unconfiguredOnus.length}</span>
                   </div>
                 </div>
 
@@ -3709,51 +3489,35 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     setFilterSignalLevel('ALL');
                     setActiveView('CONFIGURED');
                   }}
-                  className="group relative cursor-pointer overflow-hidden rounded-xl border border-emerald-500/30 bg-gradient-to-br from-[#0b2622] via-[#0a1c24] to-[#091322] p-4 text-white shadow-lg transition hover:-translate-y-0.5 hover:border-emerald-400/60"
+                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-emerald-500/40 hover:bg-slate-900"
                 >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <span className="text-xs font-semibold tracking-wide text-emerald-300 uppercase">
-                        Online ONUs
-                      </span>
-                      <div className="mt-2 font-mono text-3xl font-extrabold tracking-tight text-white">
-                        {onlineOnus.length}
-                      </div>
-                    </div>
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30 transition group-hover:bg-emerald-500 group-hover:text-white">
-                      <Wifi className="h-5 w-5" />
-                    </div>
+                  <div className="flex items-center justify-between text-xs font-medium text-slate-400">
+                    <span>Online ONUs</span>
+                    <Wifi className="h-4 w-4 text-emerald-400" />
                   </div>
-                  <div className="mt-4 flex items-center justify-between border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-300">
-                    <span>Active Working</span>
-                    <span className="font-bold text-emerald-300">
-                      Total authorized: {configuredOnus.length}
-                    </span>
+                  <div className="mt-2 font-mono text-3xl font-bold tracking-tight text-white">
+                    {onlineOnus.length}
+                  </div>
+                  <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
+                    Active · <span className="text-emerald-400">Authorized {configuredOnus.length}</span>
                   </div>
                 </div>
 
                 {/* Card 3: Total offline */}
                 <div
                   onClick={() => setActiveView('CONFIGURED')}
-                  className="group relative cursor-pointer overflow-hidden rounded-xl border border-slate-700/80 bg-gradient-to-br from-[#162032] via-[#0e1726] to-[#091322] p-4 text-white shadow-lg transition hover:-translate-y-0.5 hover:border-slate-500"
+                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-slate-700 hover:bg-slate-900"
                 >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <span className="text-xs font-semibold tracking-wide text-slate-300 uppercase">
-                        Total Offline
-                      </span>
-                      <div className="mt-2 font-mono text-3xl font-extrabold tracking-tight text-white">
-                        {totalOfflineCount}
-                      </div>
-                    </div>
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-700/40 text-slate-300 ring-1 ring-slate-600/40 transition group-hover:bg-slate-700 group-hover:text-white">
-                      <Power className="h-5 w-5" />
-                    </div>
+                  <div className="flex items-center justify-between text-xs font-medium text-slate-400">
+                    <span>Total Offline</span>
+                    <Power className="h-4 w-4 text-slate-400" />
                   </div>
-                  <div className="mt-4 flex items-center justify-between border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-300">
-                    <span className="text-amber-300">PwrFail: {pwrFailOnus.length}</span>
-                    <span className="text-rose-400">LoS: {losOnus.length}</span>
-                    <span>N/A: {otherOfflineOnus.length}</span>
+                  <div className="mt-2 font-mono text-3xl font-bold tracking-tight text-white">
+                    {totalOfflineCount}
+                  </div>
+                  <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
+                    <span className="text-amber-400">PwrFail {pwrFailOnus.length}</span> ·{' '}
+                    <span className="text-rose-400">LoS {losOnus.length}</span> · N/A {otherOfflineOnus.length}
                   </div>
                 </div>
 
@@ -3763,29 +3527,18 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     setFilterSignalLevel('CRITICAL');
                     setActiveView('CONFIGURED');
                   }}
-                  className="group relative cursor-pointer overflow-hidden rounded-xl border border-amber-500/30 bg-gradient-to-br from-[#2b1d12] via-[#191622] to-[#091322] p-4 text-white shadow-lg transition hover:-translate-y-0.5 hover:border-amber-400/60"
+                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-amber-500/40 hover:bg-slate-900"
                 >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <span className="text-xs font-semibold tracking-wide text-amber-300 uppercase">
-                        Low Signals
-                      </span>
-                      <div className="mt-2 font-mono text-3xl font-extrabold tracking-tight text-white">
-                        {totalLowSignalCount}
-                      </div>
-                    </div>
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/30 transition group-hover:bg-amber-500 group-hover:text-white">
-                      <AlertTriangle className="h-5 w-5" />
-                    </div>
+                  <div className="flex items-center justify-between text-xs font-medium text-slate-400">
+                    <span>Low Signals</span>
+                    <AlertTriangle className="h-4 w-4 text-amber-400" />
                   </div>
-                  <div className="mt-4 flex items-center justify-between border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-300">
-                    <span>Optical Attenuation</span>
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-amber-300">Warning: {warningSignalOnus.length}</span>
-                      <span className="font-bold text-rose-400">
-                        Critical: {criticalSignalOnus.length}
-                      </span>
-                    </div>
+                  <div className="mt-2 font-mono text-3xl font-bold tracking-tight text-white">
+                    {totalLowSignalCount}
+                  </div>
+                  <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
+                    <span className="text-amber-400">Warning {warningSignalOnus.length}</span> ·{' '}
+                    <span className="text-rose-400">Critical {criticalSignalOnus.length}</span>
                   </div>
                 </div>
               </div>
@@ -3793,32 +3546,27 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               {/* Middle Row: Network status chart + OLTs online */}
               <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
                 {/* Network status area graph */}
-                <div className="rounded-xl border border-slate-800/90 bg-[#0b1526]/90 p-5 shadow-lg lg:col-span-6">
-                  <div className="mb-3 flex items-center justify-between text-xs">
+                <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5 lg:col-span-6">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs">
                     <div className="flex items-center gap-2">
                       <Activity className="h-4 w-4 text-sky-400" />
-                      <span className="text-sm font-bold text-white">
+                      <span className="text-sm font-semibold text-white">
                         Network Status Telemetry
                       </span>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className="rounded-md bg-sky-500/15 px-2 py-0.5 font-semibold text-sky-300">
-                        Hourly
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setActiveView('GRAPHS')}
-                        className="rounded-md border border-slate-700/80 bg-slate-900/70 px-2.5 py-0.5 font-medium text-sky-400 transition hover:border-sky-500/40 hover:text-sky-300"
-                      >
-                        Buka Graphs 24h →
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveView('GRAPHS')}
+                      className="text-xs font-medium text-sky-400 transition hover:text-sky-300"
+                    >
+                      Buka Graphs 24h →
+                    </button>
                   </div>
 
-                  <div className="rounded-xl border border-slate-800/90 bg-[#060c17] p-3.5">
-                    <div className="flex items-center justify-between font-mono text-[11px] text-slate-300">
-                      <span>Live SQL Telemetry</span>
-                      <span className="font-bold text-white">
+                  <div className="rounded-lg border border-slate-800/80 bg-slate-950/70 p-3.5">
+                    <div className="flex items-center justify-between font-mono text-[11px] text-slate-400">
+                      <span>Hourly Optical Health</span>
+                      <span className="font-semibold text-slate-200">
                         Total: {configuredOnus.length} ONUs
                       </span>
                     </div>
@@ -3843,43 +3591,30 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         </div>
                       ))}
                     </div>
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] text-slate-300">
-                      <span className="inline-flex items-center gap-1.5 text-emerald-400">
-                        <span className="h-2 w-2 rounded-xs bg-emerald-400" />
-                        Online: {onlineOnus.length}
-                      </span>
-                      <span className="inline-flex items-center gap-1.5 text-amber-400">
-                        <span className="h-2 w-2 rounded-xs bg-amber-400" />
-                        Low signal: {totalLowSignalCount}
-                      </span>
-                      <span className="inline-flex items-center gap-1.5 text-rose-400">
-                        <span className="h-2 w-2 rounded-xs bg-rose-400" />
-                        LOS: {losOnus.length}
-                      </span>
-                      <span className="inline-flex items-center gap-1.5 text-sky-400">
-                        <span className="h-2 w-2 rounded-xs bg-sky-400" />
-                        Power fail: {pwrFailOnus.length}
-                      </span>
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] text-slate-400">
+                      <span className="text-emerald-400">Online: {onlineOnus.length}</span>
+                      <span className="text-amber-400">Low signal: {totalLowSignalCount}</span>
+                      <span className="text-rose-400">LOS: {losOnus.length}</span>
+                      <span className="text-sky-400">Power fail: {pwrFailOnus.length}</span>
                     </div>
                   </div>
                 </div>
 
                 {/* OLTs online list */}
-                <div className="rounded-xl border border-slate-800/90 bg-[#0b1526]/90 p-5 shadow-lg lg:col-span-6">
-                  <div className="mb-3 flex items-center justify-between">
-                    <div className="flex items-center gap-2.5">
+                <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 sm:p-5 lg:col-span-6">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
                       <Server className="h-4 w-4 text-emerald-400" />
-                      <span className="text-sm font-bold text-white">OLT Chassis</span>
-                      <span className="rounded-md border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 font-mono text-[11px] font-bold text-emerald-300">
-                        {visibleOlts.filter((o) => o.status === 'ONLINE').length}/
-                        {visibleOlts.length} online
+                      <span className="text-sm font-semibold text-white">OLT Chassis</span>
+                      <span className="font-mono text-xs text-emerald-400">
+                        · {visibleOlts.filter((o) => o.status === 'ONLINE').length}/{visibleOlts.length} online
                       </span>
                     </div>
                     {isAdminUser && (
                       <button
                         type="button"
                         onClick={() => setActiveView('ADD_OLT')}
-                        className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white shadow-xs transition hover:bg-emerald-500"
+                        className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500"
                       >
                         <Plus className="h-3.5 w-3.5" />
                         Add OLT
@@ -3888,37 +3623,27 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </div>
 
                   {visibleOlts.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-slate-700/80 bg-[#08111f]/60 p-6 text-center text-xs text-slate-300">
+                    <div className="rounded-lg border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-xs text-slate-400">
                       <p className="font-semibold text-white">
                         {db.olts.length === 0
                           ? `Belum ada OLT terdaftar di Database (${dbMeta.dbEngine}).`
                           : 'Tidak ada OLT yang di-assign ke akun Anda.'}
                       </p>
-                      <p className="mt-1 text-slate-400">
+                      <p className="mt-1">
                         {db.olts.length === 0
-                          ? 'Klik tombol + Add OLT untuk menghubungkan OLT baru atau mengimpor #show running-config.'
+                          ? 'Klik tombol + Add OLT untuk menghubungkan OLT baru.'
                           : 'Hubungi Administrator untuk memberikan akses OLT pada akun Anda.'}
                       </p>
-                      {isAdminUser && (
-                        <button
-                          type="button"
-                          onClick={() => setActiveView('ADD_OLT')}
-                          className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-4 py-2 text-xs font-bold text-white transition hover:bg-sky-500"
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                          Add Your First OLT
-                        </button>
-                      )}
                     </div>
                   ) : (
                     <div className="divide-y divide-slate-800/80 text-xs">
                       {visibleOlts.map((o) => (
                         <div
                           key={o.id}
-                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg px-2.5 py-2.5 transition hover:bg-slate-800/40"
+                          className="flex flex-wrap items-center justify-between gap-2 py-2.5"
                         >
-                          <div className="flex items-center gap-2.5">
-                            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 ring-4 ring-emerald-500/15" />
+                          <div className="flex items-center gap-2">
+                            <span className="h-2 w-2 rounded-full bg-emerald-400" />
                             <button
                               type="button"
                               onClick={() => {
@@ -3932,27 +3657,27 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                               <span className="font-mono text-slate-400">({o.ip_address})</span>
                             </button>
                           </div>
-                          <div className="flex flex-wrap items-center gap-3 font-mono text-xs">
+                          <div className="flex flex-wrap items-center gap-2.5 font-mono text-xs">
                             {!isViewerUser && (
                               <button
                                 type="button"
                                 onClick={() => void syncOltFromTelnetLive(o.id, o)}
-                                className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-600/20 px-2.5 py-1 font-sans text-[11px] font-semibold text-emerald-300 transition hover:bg-emerald-600 hover:text-white"
-                                title="Ambil semua VLAN, ONU, Uplink & Running Config langsung dari OLT via Telnet"
+                                className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 font-sans text-[11px] font-medium text-slate-200 transition hover:border-emerald-500/40 hover:text-emerald-300"
                               >
                                 <RefreshCw className="h-3 w-3" />
-                                Sync Data &amp; Config OLT
+                                Sync OLT
                               </button>
                             )}
-                            <span className="text-slate-400">Uptime: {o.uptime_str}</span>
+                            <span className="text-slate-400">{o.uptime_str}</span>
+                            <span className="text-slate-600">·</span>
                             <span
-                              className={`rounded-md px-1.5 py-0.5 text-[11px] font-bold ${
+                              className={
                                 o.temperature_c >= 50
-                                  ? 'bg-rose-500/15 text-rose-400'
+                                  ? 'text-rose-400'
                                   : o.temperature_c >= 42
-                                    ? 'bg-amber-500/15 text-amber-400'
-                                    : 'bg-emerald-500/15 text-emerald-400'
-                              }`}
+                                    ? 'text-amber-400'
+                                    : 'text-emerald-400'
+                              }
                             >
                               {o.temperature_c}°C
                             </span>
@@ -3964,26 +3689,18 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </div>
               </div>
 
-              {/* Bottom Row: PON outage accordions + Info activity feed */}
+              {/* Bottom Row: PON outage + Provisioning activity feed */}
               <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-                {/* PON outage (Live from SQL Database) */}
+                {/* PON outage */}
                 <div className="space-y-2.5 lg:col-span-6">
                   <div className="flex items-center justify-between">
-                    <span className="text-sm font-bold text-white">PON Outage &amp; Alarms</span>
-                    <span className="text-xs text-slate-400">
-                      Live optical monitoring
+                    <span className="text-sm font-semibold text-white">PON Outage &amp; Alarms</span>
+                    <span className="font-mono text-xs text-rose-400">
+                      {criticalSignalOnus.length + losOnus.length} critical
                     </span>
                   </div>
 
-                  <div className="overflow-hidden rounded-xl border border-slate-800/90 bg-[#0b1526]/90 shadow-lg">
-                    <div className="flex items-center justify-between border-b border-slate-800 bg-[#101f36] px-4 py-2.5 text-xs font-semibold text-white">
-                      <span>Signal variations &amp; LOS</span>
-                      <div className="flex items-center gap-1.5">
-                        <span className="rounded-md bg-rose-600 px-2 py-0.5 font-mono text-[10px] font-bold">
-                          {criticalSignalOnus.length + losOnus.length} Critical
-                        </span>
-                      </div>
-                    </div>
+                  <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70">
                     {criticalSignalOnus.length === 0 && losOnus.length === 0 ? (
                       <div className="px-4 py-6 text-center text-xs text-slate-400">
                         Tidak ada PON outage atau sinyal kritis pada database saat ini.
@@ -3991,42 +3708,39 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     ) : (
                       <div className="overflow-x-auto">
                         <table className="w-full text-left text-xs">
-                          <thead className="border-b border-slate-800 bg-[#091220] text-[11px] font-semibold text-slate-400 uppercase">
+                          <thead className="border-b border-slate-800 bg-slate-900/90 text-[11px] text-slate-400">
                             <tr>
-                              <th className="px-3.5 py-2">OLT</th>
-                              <th className="px-3.5 py-2">ONU / PON</th>
-                              <th className="px-3.5 py-2">SN</th>
-                              <th className="px-3.5 py-2">Signal / State</th>
+                              <th className="px-3.5 py-2.5">OLT</th>
+                              <th className="px-3.5 py-2.5">ONU / PON</th>
+                              <th className="px-3.5 py-2.5">SN</th>
+                              <th className="px-3.5 py-2.5">State</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-slate-800/60">
+                          <tbody className="divide-y divide-slate-800/70">
                             {[...losOnus, ...pwrFailOnus, ...otherOfflineOnus, ...criticalSignalOnus]
                               .slice(0, 6)
                               .map((item) => {
                                 const o = db.olts.find((x) => x.id === item.olt_id);
                                 return (
-                                  <tr key={item.id} className="transition hover:bg-slate-800/35">
+                                  <tr key={item.id} className="hover:bg-slate-800/40">
                                     <td className="px-3.5 py-2 font-medium text-slate-200">
                                       {o ? `${o.id} - ${o.name}` : `OLT ${item.olt_id}`}
                                     </td>
                                     <td className="px-3.5 py-2 font-medium text-sky-400">
-                                      1/{item.board}/{item.port}:{item.onu_index} (
-                                      {item.customer_name})
+                                      1/{item.board}/{item.port}:{item.onu_index} ({item.customer_name})
                                     </td>
                                     <td className="px-3.5 py-2 font-mono text-slate-300">
                                       {item.serial_number}
                                     </td>
-                                    <td className="px-3.5 py-2">
+                                    <td className="px-3.5 py-2 font-mono text-[11px]">
                                       <span
-                                        className={`inline-block rounded-md px-2 py-0.5 font-mono text-[10px] font-bold text-white ${
+                                        className={
                                           item.phase_state === 'LOS'
-                                            ? 'bg-rose-600'
+                                            ? 'font-semibold text-rose-400'
                                             : item.phase_state === 'DyingGasp'
-                                              ? 'bg-amber-600'
-                                              : item.phase_state !== 'working'
-                                                ? 'bg-slate-600'
-                                                : 'bg-orange-600'
-                                        }`}
+                                              ? 'font-semibold text-amber-400'
+                                              : 'text-orange-400'
+                                        }
                                       >
                                         {item.phase_state === 'LOS'
                                           ? 'LOS'
@@ -4047,10 +3761,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </div>
                 </div>
 
-                {/* Info activity feed (Live from SQL Database) */}
+                {/* Provisioning & System Activity */}
                 <div className="space-y-2.5 lg:col-span-6">
                   <div className="flex items-center justify-between">
-                    <span className="text-sm font-bold text-white">Provisioning &amp; System Activity</span>
+                    <span className="text-sm font-semibold text-white">Provisioning Activity</span>
                     <button
                       type="button"
                       onClick={() => setActiveView('TASKS')}
@@ -4059,7 +3773,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       Lihat Semua →
                     </button>
                   </div>
-                  <div className="divide-y divide-slate-800/70 overflow-hidden rounded-xl border border-slate-800/90 bg-[#0b1526]/90 text-xs shadow-lg">
+                  <div className="divide-y divide-slate-800/70 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70 text-xs">
                     {db.provisioning_logs.length === 0 ? (
                       <div className="px-4 py-6 text-center text-slate-400">
                         Belum ada riwayat aktivitas provisioning di database.
@@ -4070,19 +3784,19 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         return (
                           <div
                             key={log.id}
-                            className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 transition hover:bg-slate-800/40"
+                            className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 hover:bg-slate-800/40"
                           >
                             <div>
-                              <span className="font-mono font-semibold text-sky-400">
+                              <span className="font-mono font-medium text-sky-400">
                                 {log.summary_text ||
                                   `${log.interface_target} ${log.action_type}`}
                               </span>{' '}
-                              <span className="text-slate-300">
-                                on {log.olt_id} - {logOlt?.name || 'OLT'}
+                              <span className="text-slate-400">
+                                · {log.olt_id} - {logOlt?.name || 'OLT'}
                               </span>
                             </div>
-                            <div className="font-mono text-[11px] text-slate-400">
-                              by {log.executed_by} · {log.created_at}
+                            <div className="font-mono text-[11px] text-slate-500">
+                              {log.executed_by} · {log.created_at}
                             </div>
                           </div>
                         );
@@ -4095,21 +3809,21 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           )}
 
         {/* ===================================================================
-            VIEW 2: UNCONFIGURED ONUS (Strict `show gpon onu uncfg` Poll Only — No Full OLT Sync)
+            VIEW 2: UNCONFIGURED ONUS (Responsive Table + Mobile Cards)
            =================================================================== */}
         {activeView === 'UNCONFIGURED' && (
           <div className="space-y-5 text-xs">
-            {/* Top Row: OLT Selector + Scan Unconfigured Only on Left, Auto actions on Right */}
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-bold text-white">OLT</span>
+            {/* Responsive Filter & Action Bar */}
+            <div className="flex flex-col justify-between gap-4 rounded-xl border border-slate-800 bg-slate-900/70 p-4 sm:flex-row sm:items-center">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="font-semibold text-slate-300">OLT</span>
                 <select
                   value={uncfgOltFilter}
                   onChange={(e) => {
                     const val = e.target.value;
                     setUncfgOltFilter(val === 'ALL' ? 'ALL' : Number(val));
                   }}
-                  className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white"
                 >
                   <option value="ALL">All selected ({visibleOlts.length})</option>
                   {visibleOlts.map((o) => (
@@ -4126,14 +3840,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       onClick={() => {
                         void pollUnconfiguredOnusOnly(uncfgOltFilter);
                       }}
-                      className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-60"
+                      className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3.5 py-2 text-xs font-semibold text-white transition hover:bg-sky-500 disabled:opacity-60"
                     >
                       <RefreshCw
                         className={`h-3.5 w-3.5 ${isPollingUncfg ? 'animate-spin' : ''}`}
                       />
-                      {isPollingUncfg
-                        ? 'Checking show gpon onu uncfg...'
-                        : 'Scan Unconfigured ONU (Telnet)'}
+                      <span>
+                        {isPollingUncfg
+                          ? 'Scanning OLT...'
+                          : 'Scan Unconfigured (Telnet)'}
+                      </span>
                     </button>
                     <button
                       type="button"
@@ -4148,71 +3864,49 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         );
                         setShowAddUncfgModal(true);
                       }}
-                      className="flex items-center gap-1 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                      className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-700 hover:text-white"
                     >
-                      <Plus className="h-3.5 w-3.5" />
-                      Register Unconfigured SN
+                      <Plus className="h-3.5 w-3.5 text-emerald-400" />
+                      <span>Register SN</span>
                     </button>
                   </>
                 )}
               </div>
 
-              {/* Auto actions box matching top-right of Screenshot _C1DBB18F */}
-              <div className="space-y-1.5 text-right">
-                <div className="text-xs text-slate-200">
-                  Auto actions:{' '}
-                  <span className="text-slate-300">
-                    Authorization: {autoAuthEnabled ? 'yes' : 'no'} · Move: no · Resync: no
-                  </span>
-                </div>
-                <div className="flex flex-wrap items-center justify-end gap-2">
-                  {!isViewerUser && (
-                    <button
-                      type="button"
-                      onClick={() => setShowAutoActionsModal(true)}
-                      className="flex items-center gap-1 rounded bg-[#5cb85c] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#4cae4c]"
-                    >
-                      <Play className="h-3 w-3" />
-                      Configure actions
-                    </button>
-                  )}
+              <div className="flex flex-wrap items-center gap-2">
+                {!isViewerUser && (
                   <button
                     type="button"
-                    onClick={() => setActiveView('TASKS')}
-                    className="flex items-center gap-1 rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
+                    onClick={() => setShowAutoActionsModal(true)}
+                    className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
                   >
-                    <History className="h-3 w-3" />
-                    Task history
+                    <Play className="h-3 w-3 text-emerald-400" />
+                    <span>Auto Auth ({autoAuthEnabled ? 'ON' : 'OFF'})</span>
                   </button>
-                  {!isViewerUser && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAutoAuthEnabled(false);
-                        showToast('Auto-actions stopped.');
-                      }}
-                      className="flex items-center gap-1 rounded bg-[#6c757d] px-3 py-1.5 text-xs font-bold text-slate-200 hover:bg-slate-600"
-                    >
-                      <Square className="h-3 w-3" />
-                      Stop auto actions
-                    </button>
-                  )}
-                </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setActiveView('TASKS')}
+                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
+                >
+                  <History className="h-3 w-3 text-sky-400" />
+                  <span>Task History</span>
+                </button>
               </div>
             </div>
 
             {lastUncfgCliOutput && (
-              <div className="rounded border border-sky-500/30 bg-[#081424] p-3">
+              <div className="rounded-xl border border-sky-500/30 bg-slate-950 p-3.5">
                 <div className="mb-1.5 flex items-center justify-between">
-                  <span className="font-mono text-[11px] font-bold text-sky-300">
-                    Output Perintah Langsung OLT (`show gpon onu uncfg`)
+                  <span className="font-mono text-[11px] font-semibold text-sky-300">
+                    Output Perintah OLT (`show gpon onu uncfg`)
                   </span>
                   <button
                     type="button"
                     onClick={() => setLastUncfgCliOutput(null)}
                     className="text-[11px] text-slate-400 hover:text-white"
                   >
-                    Tutup Output
+                    Tutup
                   </button>
                 </div>
                 <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-emerald-300">
@@ -4221,7 +3915,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               </div>
             )}
 
-            {/* Per-OLT Unconfigured Sections matching Screenshot _C1DBB18F */}
+            {/* Per-OLT Unconfigured Sections */}
             <div className="space-y-4">
               {(uncfgOltFilter === 'ALL'
                 ? visibleOlts
@@ -4232,67 +3926,104 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 );
                 return (
                   <div key={oltItem.id} className="space-y-2">
-                    <div className="rounded bg-[#1b314e] px-3.5 py-2 text-xs font-bold text-white">
-                      {oltItem.id} - {oltItem.name}
+                    <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white">
+                      <span>{oltItem.id} - {oltItem.name}</span>
+                      <span className="font-mono text-[11px] text-slate-400">
+                        {oltUncfg.length} discovered
+                      </span>
                     </div>
                     {oltUncfg.length === 0 ? (
-                      <div className="px-2 py-1 text-xs text-slate-300">
-                        No unconfigured ONUs found.
+                      <div className="px-2 py-2 text-xs text-slate-400">
+                        No unconfigured ONUs found on this OLT.
                       </div>
                     ) : (
-                      <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
-                        <table className="w-full max-w-3xl text-left text-xs">
-                          <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
-                            <tr>
-                              <th className="px-3 py-2">PON type</th>
-                              <th className="px-3 py-2">Board</th>
-                              <th className="px-3 py-2">Port</th>
-                              <th className="px-3 py-2">PON description</th>
-                              <th className="px-3 py-2">Model</th>
-                              <th className="px-3 py-2">SN</th>
-                              <th className="px-3 py-2">Action</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-[#1e3a5f]/60">
-                            {oltUncfg.map((u) => (
-                              <tr key={u.id} className="hover:bg-[#132842]/50">
-                                <td className="px-3 py-2.5 text-white">GPON</td>
-                                <td className="px-3 py-2.5 font-mono text-white">
-                                  {u.board}
-                                </td>
-                                <td className="px-3 py-2.5 font-mono text-white">
-                                  {u.port}
-                                </td>
-                                <td className="px-3 py-2.5 text-slate-400"></td>
-                                <td className="px-3 py-2.5 font-mono text-white">
-                                  {u.onu_type}
-                                </td>
-                                <td className="px-3 py-2.5 font-mono font-bold text-white">
+                      <>
+                        {/* Mobile Card List (md:hidden) */}
+                        <div className="grid grid-cols-1 gap-2.5 md:hidden">
+                          {oltUncfg.map((u) => (
+                            <div
+                              key={u.id}
+                              className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/70 p-3.5"
+                            >
+                              <div className="space-y-1">
+                                <div className="font-mono text-sm font-bold text-white">
                                   {u.serial_number}
-                                </td>
-                                <td className="px-3 py-2.5">
-                                  {!isViewerUser ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setAuthorizingOnu(u);
-                                        setActiveView('AUTHORIZE_FORM');
-                                      }}
-                                      className="font-semibold text-sky-400 hover:underline"
-                                    >
-                                      Authorize
-                                    </button>
-                                  ) : (
-                                    <span className="text-[11px] text-slate-500">
-                                      Read-Only
-                                    </span>
-                                  )}
-                                </td>
+                                </div>
+                                <div className="font-mono text-[11px] text-slate-400">
+                                  GPON · Board {u.board} · Port {u.port} · {u.onu_type}
+                                </div>
+                              </div>
+                              {!isViewerUser ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setAuthorizingOnu(u);
+                                    setActiveView('AUTHORIZE_FORM');
+                                  }}
+                                  className="rounded-lg bg-sky-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-sky-500"
+                                >
+                                  Authorize
+                                </button>
+                              ) : (
+                                <span className="text-[11px] text-slate-500">Read-Only</span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Desktop Table (hidden md:block) */}
+                        <div className="hidden overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/70 md:block">
+                          <table className="w-full text-left text-xs">
+                            <thead className="border-b border-slate-800 bg-slate-900 text-slate-400">
+                              <tr>
+                                <th className="px-4 py-2.5">PON type</th>
+                                <th className="px-4 py-2.5">Board</th>
+                                <th className="px-4 py-2.5">Port</th>
+                                <th className="px-4 py-2.5">Model</th>
+                                <th className="px-4 py-2.5">SN</th>
+                                <th className="px-4 py-2.5 text-right">Action</th>
                               </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
+                            </thead>
+                            <tbody className="divide-y divide-slate-800/70">
+                              {oltUncfg.map((u) => (
+                                <tr key={u.id} className="hover:bg-slate-800/40">
+                                  <td className="px-4 py-2.5 text-slate-300">GPON</td>
+                                  <td className="px-4 py-2.5 font-mono text-white">
+                                    {u.board}
+                                  </td>
+                                  <td className="px-4 py-2.5 font-mono text-white">
+                                    {u.port}
+                                  </td>
+                                  <td className="px-4 py-2.5 font-mono text-slate-300">
+                                    {u.onu_type}
+                                  </td>
+                                  <td className="px-4 py-2.5 font-mono font-semibold text-white">
+                                    {u.serial_number}
+                                  </td>
+                                  <td className="px-4 py-2.5 text-right">
+                                    {!isViewerUser ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setAuthorizingOnu(u);
+                                          setActiveView('AUTHORIZE_FORM');
+                                        }}
+                                        className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500"
+                                      >
+                                        Authorize
+                                      </button>
+                                    ) : (
+                                      <span className="text-[11px] text-slate-500">
+                                        Read-Only
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
                     )}
                   </div>
                 );
@@ -4302,7 +4033,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         )}
 
         {/* ===================================================================
-            VIEW 3: AUTHORIZE ONU FORM PAGE (Exact match to Screenshot _1F161B1B)
+            VIEW 3: AUTHORIZE ONU FORM PAGE
            =================================================================== */}
         {activeView === 'AUTHORIZE_FORM' && authorizingOnu && !isViewerUser && (
           <AuthorizeOnuModal
@@ -4317,32 +4048,35 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         )}
 
         {/* ===================================================================
-            VIEW 4: CONFIGURED ONUS (Exact match to Screenshot _D6CCC96A)
+            VIEW 4: CONFIGURED ONUS (Responsive Filter Grid + Mobile Cards + Table)
            =================================================================== */}
         {activeView === 'CONFIGURED' && (
           <div className="space-y-4 text-xs">
-            {/* 2-Row Filter Panel matching top of Screenshot _D6CCC96A */}
-            <div className="space-y-3 rounded border border-[#1e3a5f] bg-[#0c1c30]/90 p-3.5">
-              {/* Row 1 */}
-              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-6 lg:grid-cols-11">
+            {/* Clean Responsive Filter Panel */}
+            <div className="space-y-3.5 rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-8">
                 <div className="sm:col-span-2">
-                  <label className="block font-bold text-white">Search</label>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-400">
+                    Search ONU
+                  </label>
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Name, SN, PPPoE, IP..."
-                    className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2.5 py-1.5 text-xs text-white"
+                    placeholder="Nama, SN, PPPoE, IP..."
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-950 px-3 py-1.5 text-xs text-white placeholder-slate-500"
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-white">OLT</label>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-400">
+                    OLT
+                  </label>
                   <select
                     value={filterOlt}
                     onChange={(e) => setFilterOlt(e.target.value)}
-                    className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white"
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-950 px-2.5 py-1.5 text-xs text-white"
                   >
-                    <option value="ANY">Any</option>
+                    <option value="ANY">Semua OLT</option>
                     {visibleOlts.map((o) => (
                       <option key={o.id} value={o.id}>
                         {o.id} - {o.name}
@@ -4351,41 +4085,47 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </select>
                 </div>
                 <div>
-                  <label className="block font-bold text-white">Board</label>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-400">
+                    Board
+                  </label>
                   <select
                     value={filterBoard}
                     onChange={(e) => setFilterBoard(e.target.value)}
-                    className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white"
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-950 px-2.5 py-1.5 text-xs text-white"
                   >
-                    <option value="ANY">Any</option>
-                    <option value="2">2</option>
-                    <option value="3">3</option>
-                    <option value="4">4</option>
+                    <option value="ANY">Semua</option>
+                    <option value="2">Board 2</option>
+                    <option value="3">Board 3</option>
+                    <option value="4">Board 4</option>
                   </select>
                 </div>
                 <div>
-                  <label className="block font-bold text-white">Port</label>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-400">
+                    Port PON
+                  </label>
                   <select
                     value={filterPort}
                     onChange={(e) => setFilterPort(e.target.value)}
-                    className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white"
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-950 px-2.5 py-1.5 text-xs text-white"
                   >
-                    <option value="ANY">Any</option>
+                    <option value="ANY">Semua</option>
                     {Array.from({ length: 16 }, (_, i) => i + 1).map((p) => (
                       <option key={p} value={p}>
-                        {p}
+                        Port {p}
                       </option>
                     ))}
                   </select>
                 </div>
                 <div>
-                  <label className="block font-bold text-white">Zone</label>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-400">
+                    Zone
+                  </label>
                   <select
                     value={filterZone}
                     onChange={(e) => setFilterZone(e.target.value)}
-                    className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white"
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-950 px-2.5 py-1.5 text-xs text-white"
                   >
-                    <option value="ANY">Any</option>
+                    <option value="ANY">Semua Zone</option>
                     {visibleZones.map((z) => (
                       <option key={z.id} value={z.id}>
                         {z.name}
@@ -4394,13 +4134,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </select>
                 </div>
                 <div>
-                  <label className="block font-bold text-white">Splitter</label>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-400">
+                    Splitter / ODP
+                  </label>
                   <select
                     value={filterSplitter}
                     onChange={(e) => setFilterSplitter(e.target.value)}
-                    className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white"
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-950 px-2.5 py-1.5 text-xs text-white"
                   >
-                    <option value="ANY">Any</option>
+                    <option value="ANY">Semua ODP</option>
                     {visibleOdbs.map((o) => (
                       <option key={o.id} value={o.id}>
                         {o.name}
@@ -4409,13 +4151,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </select>
                 </div>
                 <div>
-                  <label className="block font-bold text-white">VLAN</label>
+                  <label className="mb-1 block text-[11px] font-medium text-slate-400">
+                    VLAN
+                  </label>
                   <select
                     value={filterVlan}
                     onChange={(e) => setFilterVlan(e.target.value)}
-                    className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white"
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-950 px-2.5 py-1.5 text-xs text-white"
                   >
-                    <option value="ANY">Any</option>
+                    <option value="ANY">Semua VLAN</option>
                     {db.vlans.map((v) => (
                       <option key={v.id} value={v.id}>
                         {v.vlan_id} - {v.name}
@@ -4423,60 +4167,27 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     ))}
                   </select>
                 </div>
-                <div>
-                  <label className="block font-bold text-white">ONU type</label>
-                  <select className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white">
-                    <option>Any</option>
-                    <option>ALL</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-bold text-white">Profile</label>
-                  <select className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white">
-                    <option>Any</option>
-                    <option>1G</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-bold text-white">PON type</label>
-                  <select className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-2 py-1.5 text-xs text-white">
-                    <option>Any</option>
-                    <option>GPON</option>
-                  </select>
-                </div>
               </div>
 
-              {/* Row 2: Signal & Mode Quick Filters */}
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                <div className="flex flex-wrap items-center gap-4">
-                  {/* Signal filter buttons */}
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-bold text-white">Signal:</span>
+              {/* Row 2: Segmented Signal Filter + Reset */}
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/80 pt-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] font-medium text-slate-400">Signal:</span>
+                  <div className="inline-flex rounded-lg border border-slate-800 bg-slate-950 p-0.5">
                     {(['ALL', 'GOOD', 'WARNING', 'CRITICAL'] as const).map((lvl) => (
                       <button
                         key={lvl}
                         type="button"
                         onClick={() => setFilterSignalLevel(lvl)}
-                        className={`rounded px-2 py-1 text-[11px] font-bold ${
+                        className={`rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
                           filterSignalLevel === lvl
                             ? 'bg-sky-600 text-white'
-                            : 'bg-[#152c4a] text-slate-300 hover:text-white'
+                            : 'text-slate-400 hover:text-white'
                         }`}
                       >
                         {lvl}
                       </button>
                     ))}
-                  </div>
-
-                  {/* Mode B / R */}
-                  <div className="flex items-center gap-1">
-                    <span className="font-bold text-white">Mode:</span>
-                    <span className="rounded bg-[#152c4a] px-2 py-1 font-bold text-white">
-                      B
-                    </span>
-                    <span className="rounded bg-[#152c4a] px-2 py-1 font-bold text-white">
-                      R
-                    </span>
                   </div>
                 </div>
 
@@ -4492,15 +4203,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     setFilterVlan('ANY');
                     setFilterSignalLevel('ALL');
                   }}
-                  className="text-xs font-semibold text-slate-300 hover:text-white"
+                  className="text-xs font-medium text-slate-400 transition hover:text-white"
                 >
-                  ✖ Reset filters
+                  Reset Filters
                 </button>
               </div>
             </div>
 
-            {/* Pagination Info Row */}
-            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-300">
+            {/* Pagination Bar */}
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex items-center gap-1">
                   {activeConfiguredPage > 1 && (
@@ -4509,7 +4220,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       onClick={() =>
                         setConfiguredOnusPage((p) => Math.max(1, p - 1))
                       }
-                      className="rounded bg-[#10233a] px-2.5 py-1 text-sky-400 hover:bg-[#163050] hover:text-white"
+                      className="rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1 text-slate-300 hover:bg-slate-800 hover:text-white"
                     >
                       ‹
                     </button>
@@ -4519,7 +4230,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     totalConfiguredPages
                   ).map((item, idx) =>
                     item === '...' ? (
-                      <span key={`ellipsis-${idx}`} className="px-1 text-slate-400">
+                      <span key={`ellipsis-${idx}`} className="px-1 text-slate-500">
                         ...
                       </span>
                     ) : (
@@ -4527,10 +4238,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         key={item}
                         type="button"
                         onClick={() => setConfiguredOnusPage(item)}
-                        className={`rounded px-2.5 py-1 transition ${
+                        className={`rounded-lg px-2.5 py-1 font-mono transition ${
                           activeConfiguredPage === item
-                            ? 'bg-[#0275d8] font-bold text-white'
-                            : 'bg-[#10233a] text-sky-400 hover:bg-[#163050] hover:text-white'
+                            ? 'bg-sky-600 font-semibold text-white'
+                            : 'border border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white'
                         }`}
                       >
                         {item}
@@ -4545,25 +4256,24 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           Math.min(totalConfiguredPages, p + 1)
                         )
                       }
-                      className="rounded bg-[#10233a] px-2.5 py-1 text-sky-400 hover:bg-[#163050] hover:text-white"
+                      className="rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1 text-slate-300 hover:bg-slate-800 hover:text-white"
                     >
                       ›
                     </button>
                   )}
                 </div>
 
-                {/* Per-page selector (Default 50, options 50 | 100 | 1000, persistent) */}
-                <div className="flex items-center gap-1.5 border-l border-[#1e3a5f] pl-3">
-                  <span className="text-slate-400">Show:</span>
+                <div className="flex items-center gap-1.5 border-l border-slate-800 pl-3">
+                  <span>Show:</span>
                   {([50, 100, 1000] as const).map((size) => (
                     <button
                       key={size}
                       type="button"
                       onClick={() => handleSelectConfiguredPerPage(size)}
-                      className={`rounded px-2.5 py-1 font-mono transition ${
+                      className={`rounded-lg px-2 py-1 font-mono transition ${
                         configuredOnusPerPage === size
-                          ? 'bg-[#0275d8] font-bold text-white'
-                          : 'bg-[#10233a] text-sky-400 hover:bg-[#163050] hover:text-white'
+                          ? 'bg-sky-600 font-semibold text-white'
+                          : 'border border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white'
                       }`}
                     >
                       {size}
@@ -4571,15 +4281,54 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   ))}
                 </div>
               </div>
-              <div>
-                {paginatedConfiguredOnus.length} of {filteredConfiguredOnus.length} ONUs displayed.
+              <div className="font-mono text-[11px]">
+                {paginatedConfiguredOnus.length} of {filteredConfiguredOnus.length} ONUs
               </div>
             </div>
 
-            {/* Configured ONUs Table matching Screenshot _D6CCC96A */}
-            <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+            {/* Mobile Card List for Configured ONUs (md:hidden) */}
+            <div className="grid grid-cols-1 gap-2.5 md:hidden">
+              {paginatedConfiguredOnus.map((o) => {
+                const z = db.zones.find((item) => item.id === o.zone_id);
+                const sp = db.odbs.find((item) => item.id === o.odb_id);
+                const vl = db.vlans.find((item) => item.id === o.vlan_id);
+                return (
+                  <div
+                    key={o.id}
+                    onClick={() => {
+                      setSelectedOnuId(o.id);
+                      setActiveView('ONU_DETAIL');
+                    }}
+                    className="cursor-pointer space-y-2 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5 transition hover:border-slate-700"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="font-semibold text-white">
+                          {o.customer_name || o.serial_number}
+                        </div>
+                        <div className="font-mono text-[11px] text-slate-400">
+                          {o.serial_number} · OLT {o.olt_id} (1/{o.board}/{o.port})
+                        </div>
+                      </div>
+                      <div>{renderSignalCell(o)}</div>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/80 pt-2 text-[11px] text-slate-400">
+                      <span>
+                        {z ? z.name : 'No Zone'}
+                        {sp ? ` · ${sp.name}` : ''}
+                        {vl ? ` · VLAN ${vl.vlan_id}` : ''}
+                      </span>
+                      <span className="font-medium text-sky-400">Detail →</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Desktop Table for Configured ONUs (hidden md:block) */}
+            <div className="hidden overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/70 md:block">
               <table className="w-full text-left text-xs">
-                <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
+                <thead className="border-b border-slate-800 bg-slate-900 text-slate-400">
                   <tr>
                     <th className="px-3 py-2.5">View</th>
                     <th className="px-2 py-2.5">Status</th>
@@ -4591,14 +4340,14 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     <th className="px-3 py-2.5">Zone</th>
                     <th className="px-3 py-2.5">Splitter</th>
                     <th className="px-3 py-2.5">Signal</th>
-                    <th className="px-3 py-2.5">B/R</th>
+                    <th className="px-3 py-2.5">Mode</th>
                     <th className="px-2 py-2.5">VLAN</th>
-                    <th className="px-2 py-2.5">TR069</th>
+                    <th className="px-2 py-2.5">Method</th>
                     <th className="px-2 py-2.5">Type</th>
                     <th className="px-3 py-2.5">Auth date</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#1e3a5f]/60">
+                <tbody className="divide-y divide-slate-800/70">
                   {paginatedConfiguredOnus.map((o) => {
                     const z = db.zones.find((item) => item.id === o.zone_id);
                     const sec = (db.sectors || []).find(
@@ -4607,7 +4356,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     const sp = db.odbs.find((item) => item.id === o.odb_id);
                     const vl = db.vlans.find((item) => item.id === o.vlan_id);
                     return (
-                      <tr key={o.id} className="hover:bg-[#132842]/60">
+                      <tr key={o.id} className="hover:bg-slate-800/40">
                         <td className="px-3 py-2.5">
                           <button
                             type="button"
@@ -4615,47 +4364,35 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                               setSelectedOnuId(o.id);
                               setActiveView('ONU_DETAIL');
                             }}
-                            className="rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
+                            className="rounded-lg bg-sky-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-sky-500"
                           >
                             View
                           </button>
                         </td>
                         <td className="px-2 py-2.5">
                           {o.phase_state === 'working' ? (
-                            <span
-                              title="Online (working)"
-                              className="inline-flex items-center gap-1 text-emerald-400 font-semibold"
-                            >
-                              <Wifi className="h-4 w-4" />
-                              <span className="text-[10px]">Online</span>
+                            <span className="inline-flex items-center gap-1 font-medium text-emerald-400">
+                              <Wifi className="h-3.5 w-3.5" />
+                              <span className="text-[11px]">Online</span>
                             </span>
                           ) : o.phase_state === 'DyingGasp' ? (
-                            <span
-                              title="Power fail (DyingGasp)"
-                              className="inline-flex items-center gap-1 text-amber-400 font-semibold"
-                            >
-                              <Power className="h-4 w-4" />
-                              <span className="text-[10px]">PwrFail</span>
+                            <span className="inline-flex items-center gap-1 font-medium text-amber-400">
+                              <Power className="h-3.5 w-3.5" />
+                              <span className="text-[11px]">PwrFail</span>
                             </span>
                           ) : o.phase_state === 'LOS' ? (
-                            <span
-                              title="LOS (Loss of Signal)"
-                              className="inline-flex items-center gap-1 text-red-500 font-semibold"
-                            >
-                              <AlertTriangle className="h-4 w-4" />
-                              <span className="text-[10px]">LOS</span>
+                            <span className="inline-flex items-center gap-1 font-medium text-rose-400">
+                              <AlertTriangle className="h-3.5 w-3.5" />
+                              <span className="text-[11px]">LOS</span>
                             </span>
                           ) : (
-                            <span
-                              title={`Offline (${o.phase_state})`}
-                              className="inline-flex items-center gap-1 text-slate-400 font-semibold"
-                            >
-                              <AlertTriangle className="h-4 w-4" />
-                              <span className="text-[10px]">Offline</span>
+                            <span className="inline-flex items-center gap-1 font-medium text-slate-400">
+                              <AlertTriangle className="h-3.5 w-3.5" />
+                              <span className="text-[11px]">Offline</span>
                             </span>
                           )}
                         </td>
-                        <td className="px-3 py-2.5 font-bold text-white">
+                        <td className="px-3 py-2.5 font-semibold text-white">
                           <button
                             type="button"
                             onClick={() => {
@@ -4667,7 +4404,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             {o.customer_name}
                           </button>
                         </td>
-                        <td className="px-3 py-2.5 font-mono text-slate-200">
+                        <td className="px-3 py-2.5 font-mono text-slate-300">
                           {o.serial_number}
                         </td>
                         <td className="px-2 py-2.5 font-mono text-white">
@@ -4682,20 +4419,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         <td className="px-3 py-2.5 text-slate-200">
                           <div>{z ? z.name : '-'}</div>
                           {sec && (
-                            <div className="text-[10px] font-mono text-sky-400">
-                              Sector: {sec.name}
+                            <div className="font-mono text-[10px] text-sky-400">
+                              {sec.name}
                             </div>
                           )}
                         </td>
-                        <td className="px-3 py-2.5">
-                          {sp ? (
-                            <span className="rounded bg-[#28a745] px-2 py-0.5 font-mono text-[11px] font-bold text-white">
-                              {sp.name}
-                              {o.odb_port ? ` (${o.odb_port})` : ''}
-                            </span>
-                          ) : (
-                            <span className="text-slate-500">-</span>
-                          )}
+                        <td className="px-3 py-2.5 font-mono text-[11px] text-slate-300">
+                          {sp ? `${sp.name}${o.odb_port ? ` (${o.odb_port})` : ''}` : '-'}
                         </td>
                         <td className="px-3 py-2.5">{renderSignalCell(o)}</td>
                         <td className="px-3 py-2.5">
@@ -4705,13 +4435,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             onClick={() => {
                               if (!isViewerUser) setUpdatingModeOnu(o);
                             }}
-                            title={
-                              isViewerUser
-                                ? 'Mode Read-Only (VIEWER)'
-                                : 'Click to open Update ONU mode & WAN remote access modal'
-                            }
-                            className={`rounded bg-[#28a745] px-2 py-0.5 text-[11px] font-bold text-white ${
-                              isViewerUser ? 'cursor-default' : 'hover:bg-[#218838]'
+                            className={`rounded-md border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 font-mono text-[11px] font-semibold text-emerald-300 ${
+                              isViewerUser ? 'cursor-default' : 'hover:bg-emerald-500/25'
                             }`}
                           >
                             {o.onu_mode === 'Bridging'
@@ -4722,23 +4447,11 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         <td className="px-2 py-2.5 font-mono text-white">
                           {vl?.vlan_id || o.vlan_id || 101}
                         </td>
-                        <td className="px-2 py-2.5">
-                          <button
-                            type="button"
-                            disabled={isViewerUser}
-                            onClick={() => {
-                              if (!isViewerUser) setUpdatingModeOnu(o);
-                            }}
-                            className={`inline-flex items-center gap-1 rounded bg-emerald-950/90 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300 border border-emerald-600/40 ${
-                              isViewerUser ? 'cursor-default' : ''
-                            }`}
-                          >
-                            <Radio className="h-3 w-3" />
-                            {o.config_method}
-                          </button>
+                        <td className="px-2 py-2.5 font-mono text-[11px] text-slate-300">
+                          {o.config_method}
                         </td>
-                        <td className="px-2 py-2.5 text-white">{o.onu_type}</td>
-                        <td className="px-3 py-2.5 text-slate-300">
+                        <td className="px-2 py-2.5 text-slate-300">{o.onu_type}</td>
+                        <td className="px-3 py-2.5 font-mono text-[11px] text-slate-400">
                           {o.auth_date_label || 'Today 15:05:57'}
                         </td>
                       </tr>
@@ -4751,7 +4464,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         )}
 
         {/* ===================================================================
-            VIEW 5: ONU DETAIL VIEW (Exact match to Screenshot _5EEB9112)
+            VIEW 5: ONU DETAIL VIEW
            =================================================================== */}
         {activeView === 'ONU_DETAIL' && selectedOnu && (
           <OnuDetailView
@@ -4773,23 +4486,17 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         )}
 
         {/* ===================================================================
-            VIEW 6: OLTS LIST PAGE (Exact match to Screenshot image_2631e0fd.png)
+            VIEW 6: OLTS LIST PAGE (Responsive Filter + Mobile Cards + Table)
            =================================================================== */}
         {activeView === 'OLTS_LIST' && (
           <div className="space-y-4 text-xs">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div>
-                <h1 className="text-xl font-bold text-white">OLTs</h1>
-                <p className="text-xs text-slate-300">
-                  Add and manage the OLTs that SmartOLT connects to.
-                </p>
-              </div>
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2">
                 {!isViewerUser && (
                   <button
                     type="button"
                     onClick={() => setActiveView('ADD_OLT')}
-                    className="flex items-center gap-1 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                    className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
                   >
                     <Plus className="h-3.5 w-3.5" />
                     Add OLT
@@ -4798,10 +4505,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 <button
                   type="button"
                   onClick={() => setShowMismatchModal(true)}
-                  className="flex items-center gap-1 rounded bg-[#5a6268] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4e555b]"
+                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700"
                 >
-                  <Search className="h-3.5 w-3.5" />
-                  Find config mismatches
+                  <Search className="h-3.5 w-3.5 text-sky-400" />
+                  Find Config Mismatches
                 </button>
                 <button
                   type="button"
@@ -4816,81 +4523,82 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     navigator.clipboard.writeText(csv);
                     showToast('Daftar OLT berhasil disalin dalam format CSV.');
                   }}
-                  className="flex items-center gap-1 rounded bg-[#5a6268] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4e555b]"
+                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700"
                 >
-                  <Download className="h-3.5 w-3.5" />
-                  Export
+                  <Download className="h-3.5 w-3.5 text-emerald-400" />
+                  Export CSV
                 </button>
               </div>
             </div>
 
-            {/* Filter Box */}
-            <div className="flex flex-wrap items-end gap-3 rounded border border-[#1e3a5f] bg-[#0c1c30]/90 p-4">
-              <div className="w-52">
-                <label className="block font-bold text-white">Search</label>
-                <input
-                  type="text"
-                  placeholder="Name, IP, port, model"
-                  className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
-                />
-              </div>
-              <div className="w-36">
-                <label className="block font-bold text-white">Status</label>
-                <select className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white">
-                  <option>Any</option>
-                  <option>Online</option>
-                </select>
-              </div>
-              <div className="w-36">
-                <label className="block font-bold text-white">Traps</label>
-                <select className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white">
-                  <option>Any</option>
-                  <option>Enabled</option>
-                </select>
-              </div>
-              <div className="w-36">
-                <label className="block font-bold text-white">VPN</label>
-                <select className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white">
-                  <option>Any</option>
-                </select>
-              </div>
-              <div className="w-36">
-                <label className="block font-bold text-white">Vendor</label>
-                <select className="mt-1 w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white">
-                  <option>Any</option>
-                  <option>ZTE</option>
-                </select>
-              </div>
-              <button
-                type="button"
-                className="ml-auto pb-2 text-xs font-semibold text-white hover:text-sky-300"
-              >
-                ✖ Reset filters
-              </button>
+            {/* Mobile Card List for OLTs (md:hidden) */}
+            <div className="grid grid-cols-1 gap-3 md:hidden">
+              {visibleOlts.map((o) => (
+                <div
+                  key={o.id}
+                  className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-4"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-2 font-semibold text-white">
+                        <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                        <span>{o.id} - {o.name}</span>
+                      </div>
+                      <div className="mt-0.5 font-mono text-[11px] text-slate-400">
+                        {o.ip_address} · TCP {o.telnet_port} · {o.hardware_model}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedOltId(o.id);
+                        setInitialOltTab('OLT_DETAILS');
+                        setActiveView('OLT_DETAIL');
+                      }}
+                      className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white"
+                    >
+                      Manage
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-2.5">
+                    <span className="font-mono text-[11px] text-slate-400">
+                      VPN: {o.vpn_name} · SW {o.firmware_version || '2.1.0'}
+                    </span>
+                    {!isViewerUser && (
+                      <button
+                        type="button"
+                        onClick={() => void syncOltFromTelnetLive(o.id, o)}
+                        className="flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-white"
+                      >
+                        <RefreshCw className="h-3 w-3" />
+                        Sync OLT
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
 
-            {/* OLTs Table */}
-            <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+            {/* Desktop OLTs Table (hidden md:block) */}
+            <div className="hidden overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/70 md:block">
               <table className="w-full text-left text-xs">
-                <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
+                <thead className="border-b border-slate-800 bg-slate-900 text-slate-400">
                   <tr>
                     <th className="px-4 py-3">View</th>
                     <th className="px-3 py-3">ID</th>
                     <th className="px-3 py-3">Status</th>
-                    <th className="px-3 py-3">Traps</th>
                     <th className="px-3 py-3">VPN</th>
                     <th className="px-4 py-3">Name</th>
                     <th className="px-4 py-3">OLT IP</th>
-                    <th className="px-3 py-3">TCP</th>
-                    <th className="px-3 py-3">UDP</th>
-                    <th className="px-4 py-3">OLT hardware version</th>
-                    <th className="px-3 py-3">OLT SW version</th>
+                    <th className="px-3 py-3">TCP / UDP</th>
+                    <th className="px-4 py-3">Hardware</th>
+                    <th className="px-3 py-3">SW Version</th>
                     <th className="px-4 py-3 text-right">Action</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#1e3a5f]/70">
+                <tbody className="divide-y divide-slate-800/70">
                   {visibleOlts.map((o) => (
-                    <tr key={o.id} className="hover:bg-[#132842]/60">
+                    <tr key={o.id} className="hover:bg-slate-800/40">
                       <td className="px-4 py-3">
                         <button
                           type="button"
@@ -4899,50 +4607,34 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             setInitialOltTab('OLT_DETAILS');
                             setActiveView('OLT_DETAIL');
                           }}
-                          className="rounded bg-[#0275d8] px-3.5 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5]"
+                          className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500"
                         >
                           View
                         </button>
                       </td>
                       <td className="px-3 py-3 font-mono text-white">{o.id}</td>
                       <td className="px-3 py-3">
-                        <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-400" />
-                      </td>
-                      <td className="px-3 py-3">
-                        <span
-                          className={
-                            o.snmp_traps_enabled
-                              ? 'text-emerald-400'
-                              : 'text-red-400'
-                          }
-                        >
-                          ツ
+                        <span className="inline-flex items-center gap-1.5 font-medium text-emerald-400">
+                          <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                          Online
                         </span>
                       </td>
-                      <td className="px-3 py-3">
-                        <div className="flex flex-col items-start">
-                          <span className="text-emerald-400">✓</span>
-                          <span className="text-[11px] text-sky-400 underline">
-                            {o.vpn_name}
-                          </span>
-                        </div>
+                      <td className="px-3 py-3 font-mono text-[11px] text-sky-400">
+                        {o.vpn_name}
                       </td>
-                      <td className="px-4 py-3 font-bold text-white">
+                      <td className="px-4 py-3 font-semibold text-white">
                         {o.name}
                       </td>
-                      <td className="px-4 py-3 font-mono text-white">
+                      <td className="px-4 py-3 font-mono text-slate-200">
                         {o.ip_address}
                       </td>
-                      <td className="px-3 py-3 font-mono text-white">
-                        {o.telnet_port}
+                      <td className="px-3 py-3 font-mono text-slate-300">
+                        {o.telnet_port} / {o.snmp_port}
                       </td>
-                      <td className="px-3 py-3 font-mono text-white">
-                        {o.snmp_port}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-white">
+                      <td className="px-4 py-3 font-mono text-slate-200">
                         {o.hardware_model}
                       </td>
-                      <td className="px-3 py-3 font-mono text-white">
+                      <td className="px-3 py-3 font-mono text-slate-300">
                         {o.firmware_version || '2.1.0'}
                       </td>
                       <td className="px-4 py-3 text-right">
@@ -4951,8 +4643,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                             <button
                               type="button"
                               onClick={() => void syncOltFromTelnetLive(o.id, o)}
-                              title="Sync VLAN, ONU, Uplink & Running Config dari OLT via Telnet"
-                              className="flex items-center gap-1 rounded bg-emerald-600 px-2.5 py-1.5 text-[11px] font-bold text-white hover:bg-emerald-500"
+                              className="flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500"
                             >
                               <RefreshCw className="h-3.5 w-3.5" />
                               Sync OLT
@@ -4966,7 +4657,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                               setActiveView('OLT_DETAIL');
                             }}
                             title="Open VLANs & Uplink Tagging"
-                            className="rounded bg-slate-600 p-1.5 text-white hover:bg-slate-500"
+                            className="rounded-lg border border-slate-700 bg-slate-800 p-1.5 text-slate-200 hover:bg-slate-700"
                           >
                             <Eye className="h-3.5 w-3.5" />
                           </button>
@@ -4985,7 +4676,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                 }));
                                 showToast(`OLT ${o.name} beserta datanya dihapus dari Database.`);
                               }}
-                              className="rounded bg-[#d9534f] p-1.5 text-white hover:bg-[#c9302c]"
+                              className="rounded-lg bg-rose-600 p-1.5 text-white hover:bg-rose-500"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </button>
@@ -10338,6 +10029,68 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           </div>
         </div>
       )}
+
+      {/* MOBILE BOTTOM QUICK-NAVIGATION BAR (lg:hidden) */}
+      <nav className="fixed right-0 bottom-0 left-0 z-40 flex h-16 items-center justify-around border-t border-slate-800 bg-[#090d16]/95 px-2 backdrop-blur-md lg:hidden">
+        <button
+          type="button"
+          onClick={() => setActiveView('DASHBOARD')}
+          className={`flex flex-1 flex-col items-center justify-center gap-1 py-1 text-[10px] font-medium transition ${
+            activeView === 'DASHBOARD' ? 'text-sky-400' : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <LayoutDashboard className="h-4 w-4" />
+          <span>Dashboard</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveView('UNCONFIGURED')}
+          className={`relative flex flex-1 flex-col items-center justify-center gap-1 py-1 text-[10px] font-medium transition ${
+            activeView === 'UNCONFIGURED' || activeView === 'AUTHORIZE_FORM'
+              ? 'text-sky-400'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Radio className="h-4 w-4" />
+          <span>Uncfg ({unconfiguredOnus.length})</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveView('CONFIGURED')}
+          className={`flex flex-1 flex-col items-center justify-center gap-1 py-1 text-[10px] font-medium transition ${
+            activeView === 'CONFIGURED' || activeView === 'ONU_DETAIL'
+              ? 'text-sky-400'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Wifi className="h-4 w-4" />
+          <span>ONUs</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveView('OLTS_LIST')}
+          className={`flex flex-1 flex-col items-center justify-center gap-1 py-1 text-[10px] font-medium transition ${
+            activeView === 'OLTS_LIST' || activeView === 'OLT_DETAIL' || activeView === 'ADD_OLT'
+              ? 'text-sky-400'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Server className="h-4 w-4" />
+          <span>OLTs</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setMobileSidebarOpen(true)}
+          className="flex flex-1 flex-col items-center justify-center gap-1 py-1 text-[10px] font-medium text-slate-400 transition hover:text-slate-200"
+        >
+          <Menu className="h-4 w-4" />
+          <span>Menu</span>
+        </button>
+      </nav>
     </div>
   );
 }

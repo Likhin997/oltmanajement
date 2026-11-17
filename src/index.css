@@ -1,75 +1,70 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 @import "tailwindcss";
-@custom-variant dark (&:where(.dark, .dark *));
-
-:root {
-  --color-bg-canvas: #060d18;
-  --color-bg-surface: #0b1626;
-  --color-bg-elevated: #101f35;
-  --color-bg-hover: #162a46;
-  --color-border-subtle: rgba(148, 163, 184, 0.14);
-  --color-border-strong: rgba(56, 189, 248, 0.28);
-  --color-primary: #0ea5e9;
-  --color-primary-hover: #0284c7;
-  --color-secondary: #6366f1;
-  --color-accent: #38bdf8;
-  --color-text-primary: #f8fafc;
-  --color-text-secondary: #cbd5e1;
-  --color-text-muted: #94a3b8;
-  --color-success: #10b981;
-  --color-warning: #f59e0b;
-  --color-danger: #ef4444;
-  --color-info: #0ea5e9;
-}
 
 @layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+    /* Clean Dark-Slate SaaS Palette */
+    --bg-canvas: #090d16;
+    --bg-surface: #0f172a;
+    --bg-elevated: #1e293b;
+    --border-subtle: rgba(148, 163, 184, 0.14);
+    --border-focus: rgba(56, 189, 248, 0.45);
+  }
+
+  * {
+    border-color: var(--border-subtle);
+  }
+
   html {
+    font-family: var(--font-sans);
+    background-color: var(--bg-canvas);
+    color: #f8fafc;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     scroll-behavior: smooth;
-    color-scheme: dark;
   }
 
   body {
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
-    background-color: var(--color-bg-canvas);
-    color: var(--color-text-primary);
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
+    background-color: var(--bg-canvas);
+    color: #e2e8f0;
+    overflow-x: hidden;
   }
 
   code, pre, .font-mono {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
 
-  /* Global modern form element polish */
-  input, select, textarea {
-    transition: border-color 150ms cubic-bezier(0.16, 1, 0.3, 1),
-                box-shadow 150ms cubic-bezier(0.16, 1, 0.3, 1),
-                background-color 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  /* Clean Modern Form Controls */
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    border-radius: 0.5rem;
+    transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
   }
 
-  input:focus-visible, select:focus-visible, textarea:focus-visible {
+  input:not([type="checkbox"]):not([type="radio"]):focus,
+  select:focus,
+  textarea:focus {
     outline: none;
-    border-color: var(--color-accent) !important;
-    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
+    border-color: #38bdf8 !important;
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.14);
   }
 
-  button {
-    transition: all 150ms cubic-bezier(0.16, 1, 0.3, 1);
-  }
-
-  button:active:not(:disabled) {
-    transform: scale(0.985);
-  }
-
-  /* Refined table styling across all views */
+  /* Clean Table Refinements */
   table {
-    border-collapse: separate;
-    border-spacing: 0;
+    border-collapse: collapse;
+    width: 100%;
   }
 
   thead th {
-    letter-spacing: 0.03em;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: #94a3b8;
+    white-space: nowrap;
   }
 
   tbody tr {
@@ -77,8 +72,70 @@
   }
 }
 
-.tabular-nums {
-  font-variant-numeric: tabular-nums;
+/* Harmonize Legacy Deep-Blue SmartOLT Surfaces into Clean Slate SaaS Surfaces */
+.bg-\[\#0c1c30\]\/90,
+.bg-\[\#0c1c30\],
+.bg-\[\#0b1526\]\/90,
+.bg-\[\#0b1526\] {
+  background-color: rgba(15, 23, 42, 0.85) !important;
+  backdrop-filter: blur(8px);
+}
+
+.bg-\[\#162942\],
+.bg-\[\#1b314e\],
+.bg-\[\#101f36\] {
+  background-color: rgba(30, 41, 59, 0.75) !important;
+}
+
+.bg-\[\#10233a\],
+.bg-\[\#152c4a\] {
+  background-color: #0f172a !important;
+}
+
+.border-\[\#1e3a5f\],
+.border-\[\#284870\] {
+  border-color: rgba(148, 163, 184, 0.16) !important;
+}
+
+.divide-\[\#1e3a5f\]\/70 > :not([hidden]) ~ :not([hidden]),
+.divide-\[\#1e3a5f\]\/60 > :not([hidden]) ~ :not([hidden]) {
+  border-color: rgba(148, 163, 184, 0.12) !important;
+}
+
+/* Refined Action Button Colors */
+.bg-\[\#0275d8\] {
+  background-color: #0284c7 !important;
+  border-radius: 0.5rem;
+}
+.bg-\[\#0275d8\]:hover {
+  background-color: #0369a1 !important;
+}
+
+.bg-\[\#5cb85c\],
+.bg-\[\#28a745\] {
+  background-color: #059669 !important;
+  border-radius: 0.5rem;
+}
+.bg-\[\#5cb85c\]:hover,
+.bg-\[\#28a745\]:hover {
+  background-color: #047857 !important;
+}
+
+.bg-\[\#d9534f\] {
+  background-color: #e11d48 !important;
+  border-radius: 0.5rem;
+}
+.bg-\[\#d9534f\]:hover {
+  background-color: #be123c !important;
+}
+
+/* Hide scrollbar for clean horizontal tab strips on mobile */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
 /* Custom sleek scrollbars */
@@ -88,22 +145,24 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(8, 18, 34, 0.65);
+  background: #090d16;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(51, 78, 114, 0.75);
+  background: #1e293b;
   border-radius: 9999px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(56, 189, 248, 0.6);
+  background: #334155;
 }
 
+/* Smooth subtle animations for modals & drawers */
 @keyframes modalFadeIn {
   from {
     opacity: 0;
-    transform: translateY(6px) scale(0.99);
+    transform: translateY(6px) scale(0.985);
   }
   to {
     opacity: 1;
@@ -112,5 +171,5 @@
 }
 
 .animate-modal-in {
-  animation: modalFadeIn 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: modalFadeIn 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
