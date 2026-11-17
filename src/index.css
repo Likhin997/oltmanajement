@@ -88,13 +88,27 @@
 }
 
 .bg-\[\#10233a\],
-.bg-\[\#152c4a\] {
+.bg-\[\#152c4a\],
+.bg-\[\#132842\],
+.bg-\[\#132842\]\/60,
+.bg-\[\#151c28\],
+.bg-\[\#1c2536\] {
   background-color: #0f172a !important;
 }
 
 .border-\[\#1e3a5f\],
-.border-\[\#284870\] {
+.border-\[\#284870\],
+.border-\[\#162d4c\] {
   border-color: rgba(148, 163, 184, 0.16) !important;
+}
+
+@media (max-width: 640px) {
+  table th,
+  table td {
+    padding-left: 0.625rem !important;
+    padding-right: 0.625rem !important;
+    white-space: nowrap;
+  }
 }
 
 .divide-\[\#1e3a5f\]\/70 > :not([hidden]) ~ :not([hidden]),

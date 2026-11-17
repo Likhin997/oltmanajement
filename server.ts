@@ -846,6 +846,18 @@ async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
         parsed.zones = mergeCollectionById(sqliteState.zones, parsed.zones);
         parsed.sectors = mergeCollectionById(sqliteState.sectors, parsed.sectors);
         parsed.odbs = mergeCollectionById(sqliteState.odbs, parsed.odbs);
+        parsed.auto_provisioning_tasks = mergeCollectionById(
+          sqliteState.auto_provisioning_tasks,
+          parsed.auto_provisioning_tasks
+        );
+        parsed.auto_provisioning_history = mergeCollectionById(
+          sqliteState.auto_provisioning_history,
+          parsed.auto_provisioning_history
+        );
+        parsed.task_audit_logs = mergeCollectionById(
+          sqliteState.task_audit_logs,
+          parsed.task_audit_logs
+        );
         if (Array.isArray(sqliteState.onus)) {
           const sqliteOnuById = new Map(sqliteState.onus.map((u) => [u.id, u]));
           parsed.onus = parsed.onus.map((pu) => {
@@ -2895,6 +2907,138 @@ app.post('/api/auth/switch-user', async (req, res) => {
   }
 });
 
+// POST /api/auth/change-password — Allow ALL authenticated user levels (ADMIN, OPERATOR, TECHNICIAN, VIEWER)
+// to change their own password, and allow ADMIN to reset any user's password.
+app.post('/api/auth/change-password', async (req, res) => {
+  try {
+    if (!checkApiRateLimit(req, 'change-password', 15, 60_000)) {
+      res.status(429).json({
+        ok: false,
+        error: 'Terlalu banyak percobaan ubah password. Silakan tunggu sebentar.',
+      });
+      return;
+    }
+
+    const resolved = await resolveActiveSessionUser(req, {
+      touchActivity: true,
+    });
+    if (!resolved) {
+      clearSessionCookie(req, res);
+      res.status(401).json({
+        ok: false,
+        error: 'Sesi Anda telah berakhir. Silakan login kembali.',
+      });
+      return;
+    }
+
+    const {
+      targetUserId,
+      currentPassword,
+      newPassword,
+      confirmPassword,
+    } = (req.body || {}) as {
+      targetUserId?: number;
+      currentPassword?: string;
+      newPassword?: string;
+      confirmPassword?: string;
+    };
+
+    const desiredTargetId =
+      targetUserId !== undefined && targetUserId !== null
+        ? Number(targetUserId)
+        : resolved.user.id;
+
+    const isSelfChange = desiredTargetId === resolved.user.id;
+
+    // Non-admin users can ONLY change their own password
+    if (!isSelfChange && resolved.user.role !== 'ADMIN') {
+      res.status(403).json({
+        ok: false,
+        error: 'Forbidden: Anda hanya dapat mengubah password akun Anda sendiri.',
+      });
+      return;
+    }
+
+    const cleanNew = String(newPassword || '');
+    const cleanConfirm =
+      confirmPassword !== undefined ? String(confirmPassword) : cleanNew;
+
+    if (cleanNew.length < 6) {
+      res.status(400).json({
+        ok: false,
+        error: 'Password baru minimal harus terdiri dari 6 karakter.',
+      });
+      return;
+    }
+
+    if (cleanNew !== cleanConfirm) {
+      res.status(400).json({
+        ok: false,
+        error: 'Konfirmasi password baru tidak cocok.',
+      });
+      return;
+    }
+
+    const users = bootstrapAndHashUsers(resolved.state.users);
+    const targetUser = users.find((u) => u.id === desiredTargetId);
+    if (!targetUser) {
+      res.status(404).json({
+        ok: false,
+        error: 'Akun user tidak ditemukan.',
+      });
+      return;
+    }
+
+    // Verify current password when user is changing their own password (unless Admin explicitly resets another user)
+    if (isSelfChange) {
+      const cleanCurrent = String(currentPassword || '');
+      if (!cleanCurrent) {
+        res.status(400).json({
+          ok: false,
+          error: 'Password saat ini wajib diisi.',
+        });
+        return;
+      }
+      if (!timingSafePasswordEqual(cleanCurrent, targetUser.password)) {
+        res.status(401).json({
+          ok: false,
+          error: 'Password saat ini yang Anda masukkan salah.',
+        });
+        return;
+      }
+      if (timingSafePasswordEqual(cleanNew, targetUser.password)) {
+        res.status(400).json({
+          ok: false,
+          error: 'Password baru tidak boleh sama dengan password lama.',
+        });
+        return;
+      }
+    }
+
+    const hashedNewPassword = hashPasswordScrypt(cleanNew);
+    const updatedUser: AppUserRecord = {
+      ...targetUser,
+      password: hashedNewPassword,
+    };
+
+    const nextState: SmartOltDatabaseState = {
+      ...resolved.state,
+      users: users.map((u) => (u.id === targetUser.id ? updatedUser : u)),
+    };
+    await saveDatabaseState(nextState);
+
+    res.json({
+      ok: true,
+      message: isSelfChange
+        ? 'Password akun Anda berhasil diperbarui.'
+        : `Password untuk user "${targetUser.username}" berhasil diperbarui.`,
+      user: sanitizeUserForClient(updatedUser),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 // Global API Authentication Guard Middleware:
 // Every /api/* endpoint below requires a valid cryptographic session token!
 app.use('/api', async (req, res, next) => {
@@ -2903,7 +3047,8 @@ app.use('/api', async (req, res, next) => {
     req.path === '/auth/session' ||
     req.path === '/auth/logout' ||
     req.path === '/auth/keepalive' ||
-    req.path === '/auth/switch-user'
+    req.path === '/auth/switch-user' ||
+    req.path === '/auth/change-password'
   ) {
     next();
     return;
@@ -3153,6 +3298,18 @@ app.post(
           currentDbState.sectors
         );
         nextState.odbs = mergeCollectionById(nextState.odbs, currentDbState.odbs);
+        nextState.auto_provisioning_tasks = mergeCollectionById(
+          nextState.auto_provisioning_tasks,
+          currentDbState.auto_provisioning_tasks
+        );
+        nextState.auto_provisioning_history = mergeCollectionById(
+          nextState.auto_provisioning_history,
+          currentDbState.auto_provisioning_history
+        );
+        nextState.task_audit_logs = mergeCollectionById(
+          nextState.task_audit_logs,
+          currentDbState.task_audit_logs
+        );
       }
 
       if (!allowShrink) {

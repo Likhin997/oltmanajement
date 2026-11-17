@@ -17,6 +17,8 @@ import {
   OdbRecord,
   Tr069ProfileRecord,
   AppUserRecord,
+  AutoProvisioningTaskRecord,
+  AutoProvisioningHistoryRecord,
   buildLiveZteRunningConfig,
 } from './services/mockDatabase';
 import {
@@ -35,6 +37,13 @@ import { OltDetailView, OltDetailTab } from './components/OltDetailView';
 import { AddOltView } from './components/AddOltView';
 import { PrtgTrafficGraph } from './components/PrtgTrafficGraph';
 import {
+  AutoProvisioningTaskManager,
+  matchAutoProvisioningTaskForOnu,
+  buildAutoTaskCliScript,
+  verifyOltProvisioningOutput,
+  detectOnuVendorFromSn,
+} from './components/AutoProvisioningTaskManager';
+import {
   Save,
   Contrast,
   FileCode,
@@ -49,6 +58,7 @@ import {
   Plus,
   Download,
   Eye,
+  EyeOff,
   Trash2,
   Check,
   Copy,
@@ -1170,6 +1180,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   const [userFormSectorIds, setUserFormSectorIds] = useState<number[]>([]);
   const [userFormOdbIds, setUserFormOdbIds] = useState<number[]>([]);
 
+  // Change Password State (Available for ALL User Roles: ADMIN, OPERATOR, TECHNICIAN, VIEWER)
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState<boolean>(false);
+  const [changePwdTargetUser, setChangePwdTargetUser] = useState<AppUserRecord | null>(null);
+  const [currentPwdInput, setCurrentPwdInput] = useState<string>('');
+  const [newPwdInput, setNewPwdInput] = useState<string>('');
+  const [confirmPwdInput, setConfirmPwdInput] = useState<string>('');
+  const [showChangePwdText, setShowChangePwdText] = useState<boolean>(false);
+  const [changePwdError, setChangePwdError] = useState<string | null>(null);
+  const [changePwdLoading, setChangePwdLoading] = useState<boolean>(false);
+
   const appUsers: AppUserRecord[] =
     Array.isArray(db.users) && db.users.length > 0
       ? db.users
@@ -1427,6 +1447,73 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       // Ignore network error
     }
     forceClientLogout();
+  };
+
+  const openChangePasswordModal = (targetUser?: AppUserRecord) => {
+    setChangePwdTargetUser(targetUser || currentUser);
+    setCurrentPwdInput('');
+    setNewPwdInput('');
+    setConfirmPwdInput('');
+    setShowChangePwdText(false);
+    setChangePwdError(null);
+    setShowChangePasswordModal(true);
+  };
+
+  const handleChangePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentUser) return;
+    setChangePwdError(null);
+
+    const target = changePwdTargetUser || currentUser;
+    const isSelf = target.id === currentUser.id;
+
+    if (isSelf && !currentPwdInput) {
+      setChangePwdError('Password saat ini wajib diisi.');
+      return;
+    }
+    if (newPwdInput.length < 6) {
+      setChangePwdError('Password baru minimal harus 6 karakter.');
+      return;
+    }
+    if (newPwdInput !== confirmPwdInput) {
+      setChangePwdError('Konfirmasi password baru tidak cocok.');
+      return;
+    }
+
+    setChangePwdLoading(true);
+    try {
+      const resp = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetUserId: target.id,
+          currentPassword: isSelf ? currentPwdInput : undefined,
+          newPassword: newPwdInput,
+          confirmPassword: confirmPwdInput,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data || !data.ok) {
+        setChangePwdError(data?.error || 'Gagal memperbarui password.');
+        return;
+      }
+
+      if (data.user && isSelf) {
+        setAuthenticatedUser(data.user);
+      }
+
+      setShowChangePasswordModal(false);
+      setCurrentPwdInput('');
+      setNewPwdInput('');
+      setConfirmPwdInput('');
+      showToast(
+        `✓ ${data.message || 'Password berhasil diperbarui!'}`
+      );
+    } catch {
+      setChangePwdError('Gagal terhubung ke server. Silakan coba lagi.');
+    } finally {
+      setChangePwdLoading(false);
+    }
   };
 
   const handleAdminSwitchUser = async (targetUser: AppUserRecord) => {
@@ -2521,6 +2608,537 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     return { ok: true, output: cliScript, durationMs: 0 };
   };
 
+  // ============================================================================
+  // SMARTOLT AUTO ONU PROVISIONING ENGINE (Task Matching, Locking & Verification)
+  // ============================================================================
+  const [isRunningAutoEngine, setIsRunningAutoEngine] = useState(false);
+  const [uncfgSubView, setUncfgSubView] = useState<
+    'UNCONFIGURED_LIST' | 'TASKS' | 'HISTORY' | 'FAILED'
+  >('UNCONFIGURED_LIST');
+  const [openTaskWizardSignal, setOpenTaskWizardSignal] = useState<number>(0);
+  const autoProvisioningLockRef = useRef<Set<string>>(new Set());
+  const autoProcessedSignatureRef = useRef<Set<string>>(new Set());
+
+  const executeSingleOnuAutoProvisioning = async (
+    targetOnu: OnuRecord,
+    forcedTask?: AutoProvisioningTaskRecord,
+    retryCount = 0
+  ): Promise<boolean> => {
+    if (isViewerUser) return false;
+    const lockKey = `${targetOnu.olt_id}:${targetOnu.serial_number.toUpperCase()}`;
+    if (autoProvisioningLockRef.current.has(lockKey)) {
+      return false; // Prevent double provisioning while in-flight
+    }
+
+    const activeTasks = db.auto_provisioning_tasks || [];
+    const matchRes = forcedTask
+      ? { matchedTask: forcedTask, conflictTasks: [], conflictReason: null }
+      : matchAutoProvisioningTaskForOnu(targetOnu, activeTasks);
+
+    const oltObj = db.olts.find((o) => o.id === targetOnu.olt_id);
+    const oltName = oltObj?.name || `OLT #${targetOnu.olt_id}`;
+    const detectedVendor = detectOnuVendorFromSn(
+      targetOnu.serial_number,
+      targetOnu.onu_type
+    );
+    const nowStr = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+    // 1. Handle Task Conflict Detection
+    if (matchRes.conflictReason) {
+      const conflictHistoryId = Date.now() + Math.floor(Math.random() * 1000);
+      const conflictRecord: AutoProvisioningHistoryRecord = {
+        id: conflictHistoryId,
+        timestamp: nowStr,
+        onu_db_id: targetOnu.id,
+        serial_number: targetOnu.serial_number,
+        onu_vendor: detectedVendor,
+        onu_model: targetOnu.onu_type || 'ALL',
+        olt_id: targetOnu.olt_id,
+        olt_name: oltName,
+        board: targetOnu.board,
+        pon: targetOnu.port,
+        onu_id: 0,
+        task_id: matchRes.conflictTasks[0]?.id || null,
+        task_name: `CONFLICT (${matchRes.conflictTasks.map((t) => t.name).join(' vs ')})`,
+        applied_vlan: matchRes.conflictTasks[0]?.vlan_id || 0,
+        service_profile: '-',
+        speed_profile: '-',
+        zone_name: '-',
+        splitter_name: '-',
+        splitter_port: null,
+        duration_ms: 0,
+        status: 'FAILED',
+        is_conflict: true,
+        error_message: matchRes.conflictReason,
+        cli_script: '# Aborted due to Task Priority Conflict',
+        olt_response: matchRes.conflictReason,
+        verification_output: matchRes.conflictReason,
+        retry_count: retryCount,
+      };
+      setDb((prev) => ({
+        ...prev,
+        auto_provisioning_history: [
+          conflictRecord,
+          ...(prev.auto_provisioning_history || []).filter(
+            (h) =>
+              !(
+                h.serial_number.toUpperCase() ===
+                  targetOnu.serial_number.toUpperCase() && h.is_conflict
+              )
+          ),
+        ].slice(0, 500),
+      }));
+      showToast(`⚠️ ${matchRes.conflictReason}`);
+      return false;
+    }
+
+    const task = matchRes.matchedTask;
+    if (!task) return false;
+
+    // 2. Duplicate ONU Protection (Prevent provisioning if SN is already authorized)
+    const duplicateAuthorized = db.onus.find(
+      (u) =>
+        u.is_authorized &&
+        u.id !== targetOnu.id &&
+        u.serial_number.toUpperCase() === targetOnu.serial_number.toUpperCase()
+    );
+    if (duplicateAuthorized) {
+      const dupRecord: AutoProvisioningHistoryRecord = {
+        id: Date.now() + Math.floor(Math.random() * 1000),
+        timestamp: nowStr,
+        onu_db_id: targetOnu.id,
+        serial_number: targetOnu.serial_number,
+        onu_vendor: detectedVendor,
+        onu_model: targetOnu.onu_type || 'ALL',
+        olt_id: targetOnu.olt_id,
+        olt_name: oltName,
+        board: targetOnu.board,
+        pon: targetOnu.port,
+        onu_id: duplicateAuthorized.onu_index || 0,
+        task_id: task.id,
+        task_name: task.name,
+        applied_vlan: task.vlan_id,
+        service_profile: task.service_profile,
+        speed_profile:
+          db.speed_profiles.find((s) => s.id === task.speed_profile_id)
+            ?.profile_name || '-',
+        zone_name: '-',
+        splitter_name: '-',
+        splitter_port: null,
+        duration_ms: 0,
+        status: 'FAILED',
+        error_message: `Duplicate ONU Protection: Serial Number ${targetOnu.serial_number} sudah aktif pada gpon-onu_1/${duplicateAuthorized.board}/${duplicateAuthorized.port}:${duplicateAuthorized.onu_index}.`,
+        cli_script: '# Blocked by Duplicate ONU Protection',
+        olt_response: 'Blocked before CLI execution.',
+        verification_output: 'Duplicate SN detected in Configured ONUs.',
+        retry_count: retryCount,
+      };
+      setDb((prev) => ({
+        ...prev,
+        auto_provisioning_history: [
+          dupRecord,
+          ...(prev.auto_provisioning_history || []),
+        ].slice(0, 500),
+      }));
+      return false;
+    }
+
+    // Acquire execution lock
+    autoProvisioningLockRef.current.add(lockKey);
+    const startTime = Date.now();
+    const historyId = Date.now() + Math.floor(Math.random() * 1000);
+
+    try {
+      // 3. Allocate free ONU Index on OLT Board/Port
+      const usedIndices = db.onus
+        .filter(
+          (u) =>
+            u.is_authorized &&
+            u.olt_id === targetOnu.olt_id &&
+            u.board === targetOnu.board &&
+            u.port === targetOnu.port &&
+            u.onu_index !== null
+        )
+        .map((u) => u.onu_index as number);
+      const allocatedIndex = findNextAvailableOnuIndex(usedIndices, 128);
+
+      // 4. Allocate Splitter Port (if ODP/Splitter configured in Task)
+      let allocatedSplitterPort: number | null = null;
+      const splitterObj = task.odb_id
+        ? db.odbs.find((o) => o.id === task.odb_id) || null
+        : null;
+      if (splitterObj) {
+        if (task.odb_port_mode === 'SPECIFIC' && task.odb_port) {
+          allocatedSplitterPort = task.odb_port;
+        } else {
+          const usedPorts = new Set(
+            db.onus
+              .filter(
+                (u) => u.odb_id === splitterObj.id && u.odb_port !== null
+              )
+              .map((u) => u.odb_port as number)
+          );
+          for (let p = 1; p <= splitterObj.total_ports; p++) {
+            if (!usedPorts.has(p)) {
+              allocatedSplitterPort = p;
+              break;
+            }
+          }
+        }
+      }
+
+      const zoneObj = task.zone_id
+        ? db.zones.find((z) => z.id === task.zone_id) || null
+        : null;
+      const speedObj =
+        db.speed_profiles.find((s) => s.id === task.speed_profile_id) ||
+        db.speed_profiles[0];
+
+      // 5. Build CLI + Verification Script
+      const {
+        cliScript,
+        rollbackScript,
+        pppoeUser,
+        pppoePass,
+        resolvedWifiSsid,
+      } = buildAutoTaskCliScript({
+        onu: targetOnu,
+        allocatedIndex,
+        task,
+        db,
+      });
+
+      // Insert PROCESSING history record
+      const processingRecord: AutoProvisioningHistoryRecord = {
+        id: historyId,
+        timestamp: nowStr,
+        onu_db_id: targetOnu.id,
+        serial_number: targetOnu.serial_number,
+        onu_vendor: detectedVendor,
+        onu_model:
+          task.onu_model !== 'ALL' ? task.onu_model : targetOnu.onu_type || 'ALL',
+        olt_id: targetOnu.olt_id,
+        olt_name: oltName,
+        board: targetOnu.board,
+        pon: targetOnu.port,
+        onu_id: allocatedIndex,
+        task_id: task.id,
+        task_name: task.name,
+        applied_vlan: task.vlan_id,
+        service_profile: task.service_profile,
+        speed_profile: speedObj?.profile_name || 'SMARTOLT-1G-DOWN',
+        zone_name: zoneObj?.name || '-',
+        splitter_name: splitterObj?.name || '-',
+        splitter_port: allocatedSplitterPort,
+        duration_ms: 0,
+        status: retryCount > 0 ? 'RETRY' : 'PROCESSING',
+        error_message: null,
+        cli_script: cliScript,
+        olt_response: '[Executing & verifying on OLT...]',
+        verification_output: '',
+        retry_count: retryCount,
+      };
+
+      const logId = Date.now() + Math.floor(Math.random() * 1000);
+      const onuIf = `gpon-onu_1/${targetOnu.board}/${targetOnu.port}:${allocatedIndex}`;
+
+      setDb((prev) => ({
+        ...prev,
+        auto_provisioning_history: [
+          processingRecord,
+          ...(prev.auto_provisioning_history || []).filter(
+            (h) => h.id !== historyId
+          ),
+        ].slice(0, 500),
+      }));
+
+      // 6. Execute on OLT via Telnet
+      const execRes = await executeOltCliLive(
+        targetOnu.olt_id,
+        cliScript,
+        logId,
+        `Auto-Task "${task.name}": Authorize ${targetOnu.serial_number} (${onuIf})`
+      );
+
+      const finalOnuIndex = execRes.reallocatedOnuIndex || allocatedIndex;
+      const elapsedMs = Date.now() - startTime;
+
+      // 7. Verify configuration on OLT
+      const verification = verifyOltProvisioningOutput(
+        execRes.output,
+        targetOnu.serial_number,
+        finalOnuIndex
+      );
+
+      if (!execRes.ok || !verification.verified) {
+        // Attempt rollback on OLT if command partially executed
+        if (execRes.ok && !verification.verified) {
+          void executeOltCliLive(
+            targetOnu.olt_id,
+            rollbackScript,
+            Date.now(),
+            `Rollback unverified ONU ${targetOnu.serial_number}`
+          );
+        }
+
+        const errReason =
+          execRes.error ||
+          verification.reason ||
+          'Konfigurasi gagal diverifikasi pada OLT.';
+
+        setDb((prev) => ({
+          ...prev,
+          auto_provisioning_history: (prev.auto_provisioning_history || []).map(
+            (h) =>
+              h.id === historyId
+                ? {
+                    ...h,
+                    onu_id: finalOnuIndex,
+                    duration_ms: elapsedMs,
+                    status: 'FAILED',
+                    error_message: errReason,
+                    olt_response: execRes.output || errReason,
+                    verification_output: verification.verificationSnippet,
+                  }
+                : h
+          ),
+        }));
+
+        showToast(
+          `❌ Auto Provisioning gagal untuk ${targetOnu.serial_number}: ${errReason}`
+        );
+        return false;
+      }
+
+      // 8. Provisioning Verified -> Transition ONU to Configured ONU
+      const targetVlanRecord = db.vlans.find(
+        (v) => v.olt_id === targetOnu.olt_id && v.vlan_id === task.vlan_id
+      );
+
+      nextSyncIsUserMutationRef.current = true;
+      lastUserMutationAtRef.current = Date.now();
+
+      setDb((prev) => ({
+        ...prev,
+        onus: prev.onus.map((item) =>
+          item.id === targetOnu.id
+            ? {
+                ...item,
+                onu_index: finalOnuIndex,
+                onu_type:
+                  task.onu_model !== 'ALL' ? task.onu_model : item.onu_type,
+                is_authorized: true,
+                customer_name:
+                  item.customer_name ||
+                  `AUTO-${targetOnu.serial_number.slice(-4).toUpperCase()}`,
+                address: `Auto-Task: ${task.name}`,
+                zone_id: task.zone_id,
+                odb_id: task.odb_id,
+                odb_port: allocatedSplitterPort,
+                vlan_id: targetVlanRecord?.id || task.vlan_id,
+                attached_vlan_ids: [task.vlan_id],
+                speed_profile_id: task.speed_profile_id,
+                tcont_profile_id:
+                  task.dba_profile_id || speedObj?.tcont_profile_id || 1,
+                onu_mode: task.onu_profile_mode,
+                wan_mode: task.service_profile,
+                enable_nat: task.enable_nat,
+                config_method: task.tr069_enabled ? 'TR069' : task.config_method,
+                tr069_profile_id: task.tr069_enabled
+                  ? task.tr069_profile_id
+                  : null,
+                tr069_status: task.tr069_enabled
+                  ? 'ACTIVE_INFORMING'
+                  : 'DISABLED',
+                tr069_last_inform: task.tr069_enabled ? 'Just now' : null,
+                mgmt_ip_mode:
+                  task.mgmt_ip_mode === 'STATIC'
+                    ? 'STATIC_IP'
+                    : task.mgmt_ip_mode,
+                mgmt_ip:
+                  task.mgmt_ip_mode === 'STATIC'
+                    ? task.mgmt_ip_address
+                    : item.mgmt_ip,
+                mgmt_subnet_mask:
+                  task.mgmt_ip_mode === 'STATIC'
+                    ? task.mgmt_subnet_mask
+                    : item.mgmt_subnet_mask,
+                mgmt_gateway:
+                  task.mgmt_ip_mode === 'STATIC'
+                    ? task.mgmt_gateway
+                    : item.mgmt_gateway,
+                wifi_enabled: task.wifi_enabled,
+                wifi_ssid: resolvedWifiSsid,
+                wifi_password: task.wifi_enabled ? task.wifi_password : null,
+                pppoe_username: pppoeUser,
+                pppoe_password: pppoePass,
+                phase_state: 'working',
+                onu_rx_dbm: item.onu_rx_dbm ?? -18.45,
+                onu_tx_dbm: item.onu_tx_dbm ?? 2.45,
+                olt_rx_dbm: item.olt_rx_dbm ?? -20.15,
+                auth_date_label: new Date().toISOString().slice(0, 10),
+                last_online_at: 'Just now',
+              }
+            : item
+        ),
+        auto_provisioning_history: (prev.auto_provisioning_history || []).map(
+          (h) =>
+            h.id === historyId
+              ? {
+                  ...h,
+                  onu_id: finalOnuIndex,
+                  duration_ms: elapsedMs,
+                  status: 'SUCCESS',
+                  error_message: null,
+                  olt_response: execRes.output,
+                  verification_output: verification.verificationSnippet,
+                }
+              : h
+        ),
+        tasks: [
+          {
+            id: Date.now(),
+            action: 'Auto-Authorize' as const,
+            olt_label: `${targetOnu.olt_id} - ${oltName} (${task.name})`,
+            processed: 1,
+            total: 1,
+            successful: 1,
+            failed: 0,
+            user_email: currentUser?.email || currentUser?.username || 'system',
+            status: 'Finished' as const,
+            from_time: nowStr,
+            to_time: nowStr,
+          },
+          ...prev.tasks,
+        ],
+      }));
+
+      showToast(
+        `✓ Auto Provisioning Sukses: ${targetOnu.serial_number} terkonfigurasi via Task "${task.name}" (VLAN ${task.vlan_id})`
+      );
+
+      setTimeout(() => {
+        void pollRealtimeOltTelemetry(targetOnu.olt_id, targetOnu.id);
+      }, 3500);
+
+      return true;
+    } finally {
+      autoProvisioningLockRef.current.delete(lockKey);
+    }
+  };
+
+  const handleRunAutoProvisioningBatch = async (
+    specificOnu?: OnuRecord,
+    forceTaskId?: number
+  ) => {
+    if (isViewerUser || isRunningAutoEngine) return;
+    const tasksList = db.auto_provisioning_tasks || [];
+    const forcedTask = forceTaskId
+      ? tasksList.find((t) => t.id === forceTaskId)
+      : undefined;
+
+    const candidates = specificOnu ? [specificOnu] : unconfiguredOnus;
+    if (candidates.length === 0) {
+      showToast('Tidak ada Unconfigured ONU untuk diproses.');
+      return;
+    }
+
+    setIsRunningAutoEngine(true);
+    try {
+      let successCount = 0;
+      let matchAttempted = 0;
+      for (const onu of candidates) {
+        const check = forcedTask
+          ? { matchedTask: forcedTask, conflictReason: null }
+          : matchAutoProvisioningTaskForOnu(onu, tasksList);
+        if (check.matchedTask || check.conflictReason) {
+          matchAttempted++;
+          const ok = await executeSingleOnuAutoProvisioning(onu, forcedTask, 0);
+          if (ok) successCount++;
+        }
+      }
+      if (matchAttempted === 0) {
+        showToast(
+          'Tidak ditemukan Auto Provisioning Task berstatus Active yang cocok dengan ONU saat ini.'
+        );
+      } else if (successCount > 0) {
+        showToast(
+          `✓ Auto Provisioning selesai: ${successCount} dari ${matchAttempted} ONU berhasil dikonfigurasi.`
+        );
+      }
+    } finally {
+      setIsRunningAutoEngine(false);
+    }
+  };
+
+  const handleRetryFailedProvisioning = async (
+    failedRec: AutoProvisioningHistoryRecord
+  ) => {
+    if (isViewerUser) return;
+    const onu = db.onus.find(
+      (u) =>
+        !u.is_authorized &&
+        (u.id === failedRec.onu_db_id ||
+          u.serial_number.toUpperCase() ===
+            failedRec.serial_number.toUpperCase())
+    );
+    if (!onu) {
+      showToast(
+        `ONU ${failedRec.serial_number} sudah terkonfigurasi atau tidak lagi berada di daftar Unconfigured ONU.`
+      );
+      return;
+    }
+    const task = failedRec.task_id
+      ? (db.auto_provisioning_tasks || []).find(
+          (t) => t.id === failedRec.task_id
+        )
+      : undefined;
+
+    setIsRunningAutoEngine(true);
+    try {
+      await executeSingleOnuAutoProvisioning(
+        onu,
+        task,
+        (failedRec.retry_count || 0) + 1
+      );
+    } finally {
+      setIsRunningAutoEngine(false);
+    }
+  };
+
+  // Automatic Background Watcher: when a new Unconfigured ONU appears and matches an active Task, run provisioning automatically
+  useEffect(() => {
+    if (isViewerUser || isRunningAutoEngine) return;
+    const activeTasks = (db.auto_provisioning_tasks || []).filter(
+      (t) => t.status === 'ENABLED' && t.auto_provisioning
+    );
+    if (activeTasks.length === 0) return;
+
+    const currentUncfg = db.onus.filter((u) => !u.is_authorized);
+    if (currentUncfg.length === 0) return;
+
+    const tasksVersionKey = activeTasks
+      .map((t) => `${t.id}:${t.updated_at}:${t.priority}:${t.vlan_id}`)
+      .join('|');
+
+    const pendingOnu = currentUncfg.find((u) => {
+      const sig = `${u.olt_id}:${u.serial_number.toUpperCase()}@${tasksVersionKey}`;
+      if (autoProcessedSignatureRef.current.has(sig)) return false;
+      const m = matchAutoProvisioningTaskForOnu(u, activeTasks);
+      return Boolean(m.matchedTask || m.conflictReason);
+    });
+
+    if (!pendingOnu) return;
+    const sig = `${pendingOnu.olt_id}:${pendingOnu.serial_number.toUpperCase()}@${tasksVersionKey}`;
+    autoProcessedSignatureRef.current.add(sig);
+
+    const timer = setTimeout(() => {
+      void executeSingleOnuAutoProvisioning(pendingOnu);
+    }, 600);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [db.onus, db.auto_provisioning_tasks, isViewerUser, isRunningAutoEngine]);
+
   // Render Signal Bars helper matching Screenshot _D6CCC96A
   const renderSignalCell = (onu: OnuRecord) => {
     if (onu.phase_state === 'LOS' || onu.onu_rx_dbm === null) {
@@ -2638,18 +3256,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               </div>
 
               <div>
-                <div className="mb-1.5 flex items-center justify-between">
-                  <label className="block text-xs font-medium text-slate-300">
-                    Password
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => setShowLoginPassword((v) => !v)}
-                    className="text-[11px] font-medium text-sky-400 transition hover:text-sky-300"
-                  >
-                    {showLoginPassword ? 'Sembunyikan' : 'Tampilkan'}
-                  </button>
-                </div>
+                <label className="mb-1.5 block text-xs font-medium text-slate-300">
+                  Password
+                </label>
                 <div className="relative">
                   <Lock className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-slate-500" />
                   <input
@@ -2659,8 +3268,21 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     value={loginPassword}
                     onChange={(e) => setLoginPassword(e.target.value)}
                     placeholder="Masukkan password"
-                    className="w-full rounded-lg border border-slate-700/80 bg-slate-950/80 py-2.5 pr-3.5 pl-10 text-xs text-white placeholder-slate-500 transition focus:border-sky-400 focus:outline-none"
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-950/80 py-2.5 pr-10 pl-10 text-xs text-white placeholder-slate-500 transition focus:border-sky-400 focus:outline-none"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowLoginPassword((v) => !v)}
+                    title={showLoginPassword ? 'Sembunyikan password' : 'Tampilkan password'}
+                    aria-label={showLoginPassword ? 'Sembunyikan password' : 'Tampilkan password'}
+                    className="absolute top-1/2 right-3 -translate-y-1/2 rounded p-1 text-slate-400 transition hover:text-white"
+                  >
+                    {showLoginPassword ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
                 </div>
               </div>
 
@@ -3128,11 +3750,14 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 if (isAdminUser) {
                   setActiveView('USERS');
                 } else {
-                  showToast(
-                    `Login sebagai ${currentUser.full_name} (${currentUser.role})`
-                  );
+                  openChangePasswordModal(currentUser);
                 }
               }}
+              title={
+                isAdminUser
+                  ? 'Kelola User & Hak Akses'
+                  : 'Klik untuk melihat profil & mengubah password akun Anda'
+              }
               className="inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-xs font-medium text-white transition hover:border-slate-700 hover:bg-slate-800"
             >
               <User className="h-3.5 w-3.5 text-sky-400" />
@@ -3146,6 +3771,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               >
                 {currentUser.role}
               </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => openChangePasswordModal(currentUser)}
+              title="Ubah Password Akun Saya"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition hover:border-sky-500/40 hover:bg-slate-800 hover:text-white"
+            >
+              <Lock className="h-3.5 w-3.5 text-sky-400" />
+              <span className="hidden xl:inline">Ubah Password</span>
             </button>
 
             <button
@@ -3263,6 +3898,19 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </div>
                 </div>
               ))}
+            </div>
+            <div className="border-t border-slate-800 p-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileSidebarOpen(false);
+                  openChangePasswordModal(currentUser);
+                }}
+                className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-900 py-2 text-xs font-semibold text-sky-300 transition hover:bg-slate-800 hover:text-white"
+              >
+                <Lock className="h-3.5 w-3.5" />
+                <span>Ubah Password Saya</span>
+              </button>
             </div>
           </aside>
         </div>
@@ -3874,15 +4522,28 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                {!isViewerUser && (
-                  <button
-                    type="button"
-                    onClick={() => setShowAutoActionsModal(true)}
-                    className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
-                  >
-                    <Play className="h-3 w-3 text-emerald-400" />
-                    <span>Auto Auth ({autoAuthEnabled ? 'ON' : 'OFF'})</span>
-                  </button>
+                  {!isViewerUser && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUncfgSubView('TASKS');
+                        setOpenTaskWizardSignal(Date.now());
+                      }}
+                      className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-blue-700 cursor-pointer"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      <span>Add Task</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowAutoActionsModal(true)}
+                      className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
+                    >
+                      <Play className="h-3 w-3 text-emerald-400" />
+                      <span>Auto Auth ({autoAuthEnabled ? 'ON' : 'OFF'})</span>
+                    </button>
+                  </>
                 )}
                 <button
                   type="button"
@@ -3895,140 +4556,312 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               </div>
             </div>
 
-            {lastUncfgCliOutput && (
-              <div className="rounded-xl border border-sky-500/30 bg-slate-950 p-3.5">
-                <div className="mb-1.5 flex items-center justify-between">
-                  <span className="font-mono text-[11px] font-semibold text-sky-300">
-                    Output Perintah OLT (`show gpon onu uncfg`)
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setLastUncfgCliOutput(null)}
-                    className="text-[11px] text-slate-400 hover:text-white"
-                  >
-                    Tutup
-                  </button>
-                </div>
-                <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-emerald-300">
-                  {lastUncfgCliOutput}
-                </pre>
-              </div>
-            )}
-
-            {/* Per-OLT Unconfigured Sections */}
-            <div className="space-y-4">
-              {(uncfgOltFilter === 'ALL'
-                ? visibleOlts
-                : visibleOlts.filter((o) => o.id === uncfgOltFilter)
-              ).map((oltItem) => {
-                const oltUncfg = unconfiguredOnus.filter(
-                  (u) => u.olt_id === oltItem.id
-                );
-                return (
-                  <div key={oltItem.id} className="space-y-2">
-                    <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white">
-                      <span>{oltItem.id} - {oltItem.name}</span>
-                      <span className="font-mono text-[11px] text-slate-400">
-                        {oltUncfg.length} discovered
-                      </span>
-                    </div>
-                    {oltUncfg.length === 0 ? (
-                      <div className="px-2 py-2 text-xs text-slate-400">
-                        No unconfigured ONUs found on this OLT.
-                      </div>
-                    ) : (
-                      <>
-                        {/* Mobile Card List (md:hidden) */}
-                        <div className="grid grid-cols-1 gap-2.5 md:hidden">
-                          {oltUncfg.map((u) => (
-                            <div
-                              key={u.id}
-                              className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/70 p-3.5"
-                            >
-                              <div className="space-y-1">
-                                <div className="font-mono text-sm font-bold text-white">
-                                  {u.serial_number}
-                                </div>
-                                <div className="font-mono text-[11px] text-slate-400">
-                                  GPON · Board {u.board} · Port {u.port} · {u.onu_type}
-                                </div>
-                              </div>
-                              {!isViewerUser ? (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setAuthorizingOnu(u);
-                                    setActiveView('AUTHORIZE_FORM');
-                                  }}
-                                  className="rounded-lg bg-sky-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-sky-500"
-                                >
-                                  Authorize
-                                </button>
-                              ) : (
-                                <span className="text-[11px] text-slate-500">Read-Only</span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-
-                        {/* Desktop Table (hidden md:block) */}
-                        <div className="hidden overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/70 md:block">
-                          <table className="w-full text-left text-xs">
-                            <thead className="border-b border-slate-800 bg-slate-900 text-slate-400">
-                              <tr>
-                                <th className="px-4 py-2.5">PON type</th>
-                                <th className="px-4 py-2.5">Board</th>
-                                <th className="px-4 py-2.5">Port</th>
-                                <th className="px-4 py-2.5">Model</th>
-                                <th className="px-4 py-2.5">SN</th>
-                                <th className="px-4 py-2.5 text-right">Action</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-800/70">
-                              {oltUncfg.map((u) => (
-                                <tr key={u.id} className="hover:bg-slate-800/40">
-                                  <td className="px-4 py-2.5 text-slate-300">GPON</td>
-                                  <td className="px-4 py-2.5 font-mono text-white">
-                                    {u.board}
-                                  </td>
-                                  <td className="px-4 py-2.5 font-mono text-white">
-                                    {u.port}
-                                  </td>
-                                  <td className="px-4 py-2.5 font-mono text-slate-300">
-                                    {u.onu_type}
-                                  </td>
-                                  <td className="px-4 py-2.5 font-mono font-semibold text-white">
-                                    {u.serial_number}
-                                  </td>
-                                  <td className="px-4 py-2.5 text-right">
-                                    {!isViewerUser ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          setAuthorizingOnu(u);
-                                          setActiveView('AUTHORIZE_FORM');
-                                        }}
-                                        className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500"
-                                      >
-                                        Authorize
-                                      </button>
-                                    ) : (
-                                      <span className="text-[11px] text-slate-500">
-                                        Read-Only
-                                      </span>
-                                    )}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                );
-              })}
+            {/* Sub-Menu Navigation inside Unconfigured ONU */}
+            <div className="flex items-center gap-2 overflow-x-auto rounded-xl border border-slate-800/90 bg-slate-900/80 p-2 shadow-sm">
+              <button
+                type="button"
+                onClick={() => setUncfgSubView('UNCONFIGURED_LIST')}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                  uncfgSubView === 'UNCONFIGURED_LIST'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                <Radio className="h-3.5 w-3.5" />
+                <span>Unconfigured ONU ({unconfiguredOnus.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setUncfgSubView('TASKS')}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                  uncfgSubView === 'TASKS'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                <Layers className="h-3.5 w-3.5" />
+                <span>
+                  Auto Configuration Tasks (
+                  {(db.auto_provisioning_tasks || []).length})
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setUncfgSubView('HISTORY')}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                  uncfgSubView === 'HISTORY'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                <History className="h-3.5 w-3.5" />
+                <span>
+                  Provisioning History (
+                  {(db.auto_provisioning_history || []).length})
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setUncfgSubView('FAILED')}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                  uncfgSubView === 'FAILED'
+                    ? 'bg-rose-600 text-white shadow-xs'
+                    : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                <AlertTriangle className="h-3.5 w-3.5" />
+                <span>
+                  Failed Provisioning (
+                  {
+                    (db.auto_provisioning_history || []).filter(
+                      (h) => h.status === 'FAILED'
+                    ).length
+                  }
+                  )
+                </span>
+              </button>
             </div>
+
+            {uncfgSubView !== 'UNCONFIGURED_LIST' ? (
+              <AutoProvisioningTaskManager
+                key={uncfgSubView}
+                db={db}
+                setDb={(updater) => {
+                  nextSyncIsUserMutationRef.current = true;
+                  lastUserMutationAtRef.current = Date.now();
+                  setDb(updater);
+                }}
+                isReadOnlyViewer={isViewerUser}
+                currentUsername={currentUser?.username || 'admin'}
+                unconfiguredOnus={unconfiguredOnus}
+                isRunningAutoEngine={isRunningAutoEngine}
+                onRunAutoProvisioningNow={handleRunAutoProvisioningBatch}
+                onRetryFailedRecord={handleRetryFailedProvisioning}
+                initialSubTab={uncfgSubView}
+                openWizardSignal={openTaskWizardSignal}
+              />
+            ) : (
+              <>
+                {lastUncfgCliOutput && (
+                  <div className="rounded-xl border border-sky-500/30 bg-slate-950 p-3.5">
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <span className="font-mono text-[11px] font-semibold text-sky-300">
+                        Output Perintah OLT (`show gpon onu uncfg`)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setLastUncfgCliOutput(null)}
+                        className="text-[11px] text-slate-400 hover:text-white"
+                      >
+                        Tutup
+                      </button>
+                    </div>
+                    <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-emerald-300">
+                      {lastUncfgCliOutput}
+                    </pre>
+                  </div>
+                )}
+
+                {/* Per-OLT Unconfigured Sections */}
+                <div className="space-y-4">
+                  {(uncfgOltFilter === 'ALL'
+                    ? visibleOlts
+                    : visibleOlts.filter((o) => o.id === uncfgOltFilter)
+                  ).map((oltItem) => {
+                    const oltUncfg = unconfiguredOnus.filter(
+                      (u) => u.olt_id === oltItem.id
+                    );
+                    return (
+                      <div key={oltItem.id} className="space-y-2">
+                        <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white">
+                          <span>
+                            {oltItem.id} - {oltItem.name}
+                          </span>
+                          <span className="font-mono text-[11px] text-slate-400">
+                            {oltUncfg.length} discovered
+                          </span>
+                        </div>
+                        {oltUncfg.length === 0 ? (
+                          <div className="px-2 py-2 text-xs text-slate-400">
+                            No unconfigured ONUs found on this OLT.
+                          </div>
+                        ) : (
+                          <>
+                            {/* Mobile Card List (md:hidden) */}
+                            <div className="grid grid-cols-1 gap-2.5 md:hidden">
+                              {oltUncfg.map((u) => {
+                                const taskMatch = matchAutoProvisioningTaskForOnu(
+                                  u,
+                                  db.auto_provisioning_tasks || []
+                                );
+                                return (
+                                  <div
+                                    key={u.id}
+                                    className="flex flex-col gap-2 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5"
+                                  >
+                                    <div className="flex items-center justify-between">
+                                      <div className="space-y-1">
+                                        <div className="font-mono text-sm font-bold text-white">
+                                          {u.serial_number}
+                                        </div>
+                                        <div className="font-mono text-[11px] text-slate-400">
+                                          GPON · Board {u.board} · Port {u.port} ·{' '}
+                                          {u.onu_type}
+                                        </div>
+                                      </div>
+                                      {!isViewerUser ? (
+                                        <div className="flex items-center gap-1.5">
+                                          {taskMatch.matchedTask && (
+                                            <button
+                                              type="button"
+                                              disabled={isRunningAutoEngine}
+                                              onClick={() =>
+                                                void handleRunAutoProvisioningBatch(
+                                                  u,
+                                                  taskMatch.matchedTask!.id
+                                                )
+                                              }
+                                              className="rounded-lg bg-emerald-600 px-2.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
+                                            >
+                                              Auto Task
+                                            </button>
+                                          )}
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setAuthorizingOnu(u);
+                                              setActiveView('AUTHORIZE_FORM');
+                                            }}
+                                            className="rounded-lg bg-sky-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-sky-500"
+                                          >
+                                            Authorize
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <span className="text-[11px] text-slate-500">
+                                          Read-Only
+                                        </span>
+                                      )}
+                                    </div>
+                                    {taskMatch.matchedTask && (
+                                      <div className="text-[11px] text-emerald-700 font-semibold">
+                                        Matched Task: {taskMatch.matchedTask.name} (VLAN{' '}
+                                        {taskMatch.matchedTask.vlan_id})
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {/* Desktop Table (hidden md:block) */}
+                            <div className="hidden overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/70 md:block">
+                              <table className="w-full text-left text-xs">
+                                <thead className="border-b border-slate-800 bg-slate-900 text-slate-400">
+                                  <tr>
+                                    <th className="px-4 py-2.5">PON type</th>
+                                    <th className="px-4 py-2.5">Board</th>
+                                    <th className="px-4 py-2.5">Port</th>
+                                    <th className="px-4 py-2.5">Model</th>
+                                    <th className="px-4 py-2.5">SN</th>
+                                    <th className="px-4 py-2.5">Matched Auto Task</th>
+                                    <th className="px-4 py-2.5 text-right">Action</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-800/70">
+                                  {oltUncfg.map((u) => {
+                                    const taskMatch =
+                                      matchAutoProvisioningTaskForOnu(
+                                        u,
+                                        db.auto_provisioning_tasks || []
+                                      );
+                                    return (
+                                      <tr
+                                        key={u.id}
+                                        className="hover:bg-slate-800/40"
+                                      >
+                                        <td className="px-4 py-2.5 text-slate-300">
+                                          GPON
+                                        </td>
+                                        <td className="px-4 py-2.5 font-mono text-white">
+                                          {u.board}
+                                        </td>
+                                        <td className="px-4 py-2.5 font-mono text-white">
+                                          {u.port}
+                                        </td>
+                                        <td className="px-4 py-2.5 font-mono text-slate-300">
+                                          {u.onu_type}
+                                        </td>
+                                        <td className="px-4 py-2.5 font-mono font-semibold text-white">
+                                          {u.serial_number}
+                                        </td>
+                                        <td className="px-4 py-2.5">
+                                          {taskMatch.conflictReason ? (
+                                            <span className="inline-flex items-center gap-1 rounded bg-rose-50 px-2 py-0.5 text-[11px] font-bold text-rose-700 border border-rose-200">
+                                              <AlertTriangle className="h-3 w-3" />
+                                              Task Priority Conflict
+                                            </span>
+                                          ) : taskMatch.matchedTask ? (
+                                            <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700 border border-emerald-200">
+                                              {taskMatch.matchedTask.name} • VLAN{' '}
+                                              {taskMatch.matchedTask.vlan_id} (#
+                                              {taskMatch.matchedTask.priority})
+                                            </span>
+                                          ) : (
+                                            <span className="text-[11px] text-slate-400">
+                                              No matching active task
+                                            </span>
+                                          )}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right">
+                                          {!isViewerUser ? (
+                                            <div className="inline-flex items-center justify-end gap-1.5">
+                                              {taskMatch.matchedTask && (
+                                                <button
+                                                  type="button"
+                                                  disabled={isRunningAutoEngine}
+                                                  onClick={() =>
+                                                    void handleRunAutoProvisioningBatch(
+                                                      u,
+                                                      taskMatch.matchedTask!.id
+                                                    )
+                                                  }
+                                                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 cursor-pointer disabled:opacity-50"
+                                                >
+                                                  Run Task
+                                                </button>
+                                              )}
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  setAuthorizingOnu(u);
+                                                  setActiveView('AUTHORIZE_FORM');
+                                                }}
+                                                className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500 cursor-pointer"
+                                              >
+                                                Authorize
+                                              </button>
+                                            </div>
+                                          ) : (
+                                            <span className="text-[11px] text-slate-500">
+                                              Read-Only
+                                            </span>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -5411,14 +6244,29 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         )}
 
         {/* ===================================================================
-            VIEW 8: TASKS PAGE (Exact match to Screenshot image_fdf3e3de.png)
+            VIEW 8: TASKS PAGE (Auto ONU Provisioning Task Dashboard + System Tasks)
            =================================================================== */}
         {activeView === 'TASKS' && (
-          <div className="space-y-4 text-xs">
-            <div className="flex flex-wrap items-center gap-3">
+          <div className="space-y-6 text-xs">
+            <AutoProvisioningTaskManager
+              db={db}
+              setDb={(updater) => {
+                nextSyncIsUserMutationRef.current = true;
+                lastUserMutationAtRef.current = Date.now();
+                setDb(updater);
+              }}
+              isReadOnlyViewer={isViewerUser}
+              currentUsername={currentUser?.username || 'admin'}
+              unconfiguredOnus={unconfiguredOnus}
+              isRunningAutoEngine={isRunningAutoEngine}
+              onRunAutoProvisioningNow={handleRunAutoProvisioningBatch}
+              onRetryFailedRecord={handleRetryFailedProvisioning}
+              initialSubTab="TASKS"
+            />
+            <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-3 rounded-xl border border-slate-800/90 bg-slate-900/70 p-3.5">
               <div className="flex items-center gap-2">
-                <span className="font-bold text-white">OLT</span>
-                <select className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white">
+                <span className="font-semibold text-slate-300 text-xs">OLT</span>
+                <select className="w-full sm:w-auto rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white">
                   <option>Any</option>
                   {db.olts.map((o) => (
                     <option key={o.id}>
@@ -5428,16 +6276,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </select>
               </div>
               <div className="flex items-center gap-2">
-                <span className="font-bold text-white">User</span>
-                <select className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white">
+                <span className="font-semibold text-slate-300 text-xs">User</span>
+                <select className="w-full sm:w-auto rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white">
                   <option>Any</option>
                   <option>muslikhin997@gmail.com</option>
                   <option>fathanwushu@gmail.com</option>
                 </select>
               </div>
               <div className="flex items-center gap-2">
-                <span className="font-bold text-white">Action</span>
-                <select className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white">
+                <span className="font-semibold text-slate-300 text-xs">Action</span>
+                <select className="w-full sm:w-auto rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white">
                   <option>Any</option>
                   <option>Auto-Authorize</option>
                   <option>Auto-Move</option>
@@ -5445,24 +6293,24 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </select>
               </div>
               <div className="flex items-center gap-2">
-                <span className="font-bold text-white">From</span>
+                <span className="font-semibold text-slate-300 text-xs">From</span>
                 <input
                   type="text"
                   placeholder="YYYY-MM-DD"
-                  className="w-32 rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                  className="w-full sm:w-32 rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white"
                 />
               </div>
               <div className="flex items-center gap-2">
-                <span className="font-bold text-white">To</span>
+                <span className="font-semibold text-slate-300 text-xs">To</span>
                 <input
                   type="text"
                   placeholder="YYYY-MM-DD"
-                  className="w-32 rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                  className="w-full sm:w-32 rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white"
                 />
               </div>
             </div>
 
-            <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+            <div className="overflow-x-auto rounded-xl border border-slate-800/90 bg-slate-900/80">
               <table className="w-full text-left text-xs">
                 <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
                   <tr>
@@ -6280,15 +7128,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               activeView === 'SECTORS' ||
               activeView === 'SPLITTERS' ||
               activeView === 'USERS') && (
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-[#1e3a5f] bg-[#0c1c30]/95 p-3">
-                <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-slate-800/90 bg-slate-900/80 p-3">
+                <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
                   <button
                     type="button"
                     onClick={() => setActiveView('ZONES')}
-                    className={`rounded px-3.5 py-2 text-xs font-bold transition ${
+                    className={`rounded-lg px-3.5 py-2 text-xs font-semibold transition whitespace-nowrap ${
                       activeView === 'ZONES'
-                        ? 'bg-[#0275d8] text-white shadow'
-                        : 'bg-[#132842] text-slate-300 hover:text-white'
+                        ? 'bg-blue-600 text-white shadow-xs'
+                        : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
                     }`}
                   >
                     Zones ({visibleZones.length})
@@ -6296,10 +7144,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   <button
                     type="button"
                     onClick={() => setActiveView('SECTORS')}
-                    className={`rounded px-3.5 py-2 text-xs font-bold transition ${
+                    className={`rounded-lg px-3.5 py-2 text-xs font-semibold transition whitespace-nowrap ${
                       activeView === 'SECTORS'
-                        ? 'bg-[#0275d8] text-white shadow'
-                        : 'bg-[#132842] text-slate-300 hover:text-white'
+                        ? 'bg-blue-600 text-white shadow-xs'
+                        : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
                     }`}
                   >
                     Sectors / RK ({visibleSectors.length})
@@ -6307,10 +7155,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   <button
                     type="button"
                     onClick={() => setActiveView('SPLITTERS')}
-                    className={`rounded px-3.5 py-2 text-xs font-bold transition ${
+                    className={`rounded-lg px-3.5 py-2 text-xs font-semibold transition whitespace-nowrap ${
                       activeView === 'SPLITTERS'
-                        ? 'bg-[#0275d8] text-white shadow'
-                        : 'bg-[#132842] text-slate-300 hover:text-white'
+                        ? 'bg-blue-600 text-white shadow-xs'
+                        : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
                     }`}
                   >
                     Splitters / ODP ({visibleOdbs.length})
@@ -6319,10 +7167,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     <button
                       type="button"
                       onClick={() => setActiveView('USERS')}
-                      className={`rounded px-3.5 py-2 text-xs font-bold transition ${
+                      className={`rounded-lg px-3.5 py-2 text-xs font-semibold transition whitespace-nowrap ${
                         activeView === 'USERS'
-                          ? 'bg-[#0275d8] text-white shadow'
-                          : 'bg-[#132842] text-slate-300 hover:text-white'
+                          ? 'bg-blue-600 text-white shadow-xs'
+                          : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 hover:text-white'
                       }`}
                     >
                       Users &amp; Hak Akses ({appUsers.length})
@@ -6330,7 +7178,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   )}
                 </div>
 
-                <div className="text-[11px] text-emerald-300">
+                <div className="text-[11px] text-emerald-400 font-medium">
                   ✓ Otomatis tersinkronisasi ke Database SQL &amp; Hak Akses User
                 </div>
               </div>
@@ -6341,20 +7189,20 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                =============================================================== */}
             {activeView === 'ZONES' && (
               <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-bold text-white">Zones</h2>
-                    <p className="text-xs text-slate-300">
+                    <p className="text-xs text-slate-400">
                       Kelola area/wilayah jaringan (Zone). Setiap Zone otomatis tampil dan dapat dipilih saat Add/Authorize ONU.
                     </p>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                     <input
                       type="text"
                       value={zoneSearch}
                       onChange={(e) => setZoneSearch(e.target.value)}
                       placeholder="Cari Zone, Code, Kota..."
-                      className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                      className="flex-1 sm:w-56 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white"
                     />
                     {!isViewerUser && (
                       <button
@@ -6367,7 +7215,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           setZoneFormDesc('');
                           setShowZoneModal(true);
                         }}
-                        className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                        className="flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 whitespace-nowrap"
                       >
                         <Plus className="h-3.5 w-3.5" />
                         Add Zone
@@ -6376,7 +7224,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </div>
                 </div>
 
-                <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+                <div className="overflow-x-auto rounded-xl border border-slate-800/90 bg-slate-900/80">
                   <table className="w-full text-left text-xs">
                     <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
                       <tr>
@@ -6709,20 +7557,20 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                =============================================================== */}
             {activeView === 'SECTORS' && (
               <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-bold text-white">Sectors</h2>
-                    <p className="text-xs text-slate-300">
+                    <p className="text-xs text-slate-400">
                       Kelola Sector distribusi ODC/PON yang terhubung dengan Zone, OLT, dan Splitter (ODP).
                     </p>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                     <input
                       type="text"
                       value={sectorSearch}
                       onChange={(e) => setSectorSearch(e.target.value)}
                       placeholder="Cari Sector, Code, Zone..."
-                      className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                      className="flex-1 sm:w-56 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white"
                     />
                     {!isViewerUser && (
                       <button
@@ -6739,7 +7587,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           setSectorFormDesc('');
                           setShowSectorModal(true);
                         }}
-                        className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                        className="flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 whitespace-nowrap"
                       >
                         <Plus className="h-3.5 w-3.5" />
                         Add Sector
@@ -6748,7 +7596,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </div>
                 </div>
 
-                <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+                <div className="overflow-x-auto rounded-xl border border-slate-800/90 bg-slate-900/80">
                   <table className="w-full text-left text-xs">
                     <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
                       <tr>
@@ -7127,22 +7975,22 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                =============================================================== */}
             {activeView === 'SPLITTERS' && (
               <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-bold text-white">
                       Optical Splitters (ODP / ODB)
                     </h2>
-                    <p className="text-xs text-slate-300">
+                    <p className="text-xs text-slate-400">
                       Kelola titik distribusi optik (Splitter / ODP) beserta rasio port (1:2 s/d 1:64), Zone, Sector, dan kapasitas port ONU.
                     </p>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                     <input
                       type="text"
                       value={splitterSearch}
                       onChange={(e) => setSplitterSearch(e.target.value)}
                       placeholder="Cari Nama ODP/Splitter, Tiang..."
-                      className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                      className="flex-1 sm:w-56 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white"
                     />
                     {!isViewerUser && (
                       <button
@@ -7163,7 +8011,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           setSplitterFormDesc('');
                           setShowSplitterModal(true);
                         }}
-                        className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                        className="flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 whitespace-nowrap"
                       >
                         <Plus className="h-3.5 w-3.5" />
                         Add Splitter (ODP)
@@ -7172,7 +8020,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </div>
                 </div>
 
-                <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+                <div className="overflow-x-auto rounded-xl border border-slate-800/90 bg-slate-900/80">
                   <table className="w-full text-left text-xs">
                     <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
                       <tr>
@@ -7597,22 +8445,22 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                =============================================================== */}
             {activeView === 'USERS' && (
               <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-bold text-white">
                       User Management &amp; Hak Akses (OLT, Zone &amp; RK / Splitter)
                     </h2>
-                    <p className="text-xs text-slate-300">
+                    <p className="text-xs text-slate-400">
                       Kelola akun pengguna dan tentukan OLT mana saja, Zone mana saja, serta RK (Sector &amp; Splitter/ODP) mana saja yang ditampilkan untuk setiap user.
                     </p>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                     <input
                       type="text"
                       value={userSearch}
                       onChange={(e) => setUserSearch(e.target.value)}
                       placeholder="Cari Username, Nama, Role..."
-                      className="rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
+                      className="flex-1 sm:w-56 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white"
                     />
                     {isAdminUser && (
                       <button
@@ -7638,7 +8486,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           setUserFormOdbIds([]);
                           setShowUserModal(true);
                         }}
-                        className="flex items-center gap-1.5 rounded bg-[#5cb85c] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#4cae4c]"
+                        className="flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 whitespace-nowrap"
                       >
                         <Plus className="h-3.5 w-3.5" />
                         Add User &amp; Assign Akses
@@ -7647,7 +8495,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </div>
                 </div>
 
-                <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
+                <div className="overflow-x-auto rounded-xl border border-slate-800/90 bg-slate-900/80">
                   <table className="w-full text-left text-xs">
                     <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
                       <tr>
@@ -7835,6 +8683,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                       Switch User
                                     </button>
                                   )}
+                                  <button
+                                    type="button"
+                                    onClick={() => openChangePasswordModal(u)}
+                                    className="inline-flex items-center gap-1 rounded bg-slate-700 px-2.5 py-1 text-[11px] font-semibold text-sky-300 hover:bg-slate-600 hover:text-white"
+                                    title={`Ubah password untuk ${u.username}`}
+                                  >
+                                    <Lock className="h-3 w-3" />
+                                    Ubah Password
+                                  </button>
                                   <button
                                     type="button"
                                     onClick={() => {
@@ -10026,6 +10883,155 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 Tutup
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================
+          MODAL UBAH PASSWORD (UNTUK SEMUA LEVEL USER: ADMIN, OPERATOR, TECHNICIAN, VIEWER)
+         =================================================================== */}
+      {showChangePasswordModal && currentUser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
+          onClick={() => setShowChangePasswordModal(false)}
+        >
+          <div
+            className="animate-modal-in w-full max-w-md overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 text-xs text-slate-100 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
+                  <Lock className="h-4 w-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    {changePwdTargetUser &&
+                    changePwdTargetUser.id !== currentUser.id
+                      ? `Reset Password — ${changePwdTargetUser.username}`
+                      : 'Ubah Password Akun'}
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    {(changePwdTargetUser || currentUser).full_name} ·{' '}
+                    <span className="font-mono text-sky-400">
+                      {(changePwdTargetUser || currentUser).role}
+                    </span>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowChangePasswordModal(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleChangePasswordSubmit} className="space-y-4 p-6">
+              {changePwdError && (
+                <div className="flex items-start gap-2 rounded-lg border border-rose-500/40 bg-rose-950/40 px-3.5 py-2.5 text-xs font-medium text-rose-200">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+                  <span>{changePwdError}</span>
+                </div>
+              )}
+
+              {(!changePwdTargetUser ||
+                changePwdTargetUser.id === currentUser.id) && (
+                <div>
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <label className="font-medium text-slate-300">
+                      Password Saat Ini
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowChangePwdText((v) => !v)}
+                      className="text-[11px] font-medium text-sky-400 hover:text-sky-300"
+                    >
+                      {showChangePwdText ? 'Sembunyikan' : 'Tampilkan'}
+                    </button>
+                  </div>
+                  <input
+                    type={showChangePwdText ? 'text' : 'password'}
+                    required
+                    autoFocus
+                    value={currentPwdInput}
+                    onChange={(e) => setCurrentPwdInput(e.target.value)}
+                    placeholder="Masukkan password saat ini"
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:border-sky-400"
+                  />
+                </div>
+              )}
+
+              <div>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <label className="font-medium text-slate-300">
+                    Password Baru (Min. 6 Karakter)
+                  </label>
+                  {changePwdTargetUser &&
+                    changePwdTargetUser.id !== currentUser.id && (
+                      <button
+                        type="button"
+                        onClick={() => setShowChangePwdText((v) => !v)}
+                        className="text-[11px] font-medium text-sky-400 hover:text-sky-300"
+                      >
+                        {showChangePwdText ? 'Sembunyikan' : 'Tampilkan'}
+                      </button>
+                    )}
+                </div>
+                <input
+                  type={showChangePwdText ? 'text' : 'password'}
+                  required
+                  minLength={6}
+                  value={newPwdInput}
+                  onChange={(e) => setNewPwdInput(e.target.value)}
+                  placeholder="Masukkan password baru"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:border-sky-400"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1.5 block font-medium text-slate-300">
+                  Konfirmasi Password Baru
+                </label>
+                <input
+                  type={showChangePwdText ? 'text' : 'password'}
+                  required
+                  minLength={6}
+                  value={confirmPwdInput}
+                  onChange={(e) => setConfirmPwdInput(e.target.value)}
+                  placeholder="Ulangi password baru"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:border-sky-400"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 border-t border-slate-800 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowChangePasswordModal(false)}
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-700 hover:text-white"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={changePwdLoading}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-sky-500 disabled:opacity-60"
+                >
+                  {changePwdLoading ? (
+                    <>
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      <span>Menyimpan...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="h-3.5 w-3.5" />
+                      <span>Simpan Password Baru</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

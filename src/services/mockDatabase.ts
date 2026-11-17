@@ -358,6 +358,100 @@ export const DEFAULT_APP_USERS: AppUserRecord[] = [
   },
 ];
 
+export interface AutoProvisioningTaskRecord {
+  id: number;
+  // Step 1 - General Information
+  name: string;
+  description: string;
+  olt_id: number;
+  priority: number; // 1 = Highest Priority
+  status: 'ENABLED' | 'DISABLED' | 'DRAFT';
+  auto_provisioning: boolean;
+  // Step 2 - VLAN, Board & PON Configuration
+  vlan_id: number;
+  board_selection_mode: 'ALL' | 'SPECIFIC';
+  selected_boards: number[];
+  pon_selection_mode: 'ALL' | 'SPECIFIC';
+  selected_pons: number[];
+  // Step 3 - ONU Configuration
+  onu_vendor: string; // 'ALL' | 'ZTE' | 'HUAWEI' | 'FIBERHOME' | 'NOKIA' | etc.
+  onu_model: string; // 'ALL' | 'F670LV9.0' | 'F609V3.0' | 'F660' | etc.
+  onu_profile_mode: OnuModeOption; // 'Routing' | 'Bridging'
+  config_method: ConfigMethodOption; // 'OMCI' | 'TR069'
+  service_profile: WanModeOption; // 'PPPOE' | 'DHCP' | 'STATIC_IP' | 'BRIDGE'
+  enable_nat: boolean;
+  pppoe_username_template: string;
+  pppoe_password_default: string;
+  speed_profile_id: number;
+  dba_profile_id: number | null;
+  wifi_enabled: boolean;
+  wifi_ssid_prefix: string;
+  wifi_password: string;
+  // Step 4 - Location Configuration
+  zone_id: number | null;
+  odb_id: number | null;
+  odb_port_mode: 'AUTO' | 'SPECIFIC';
+  odb_port: number | null;
+  // Step 5 - TR-069 Configuration
+  tr069_enabled: boolean;
+  tr069_profile_id: number | null;
+  tr069_conn_req_username: string;
+  tr069_conn_req_password: string;
+  tr069_inform_interval: number;
+  // Step 6 - Management IP Settings
+  mgmt_ip_mode: 'INACTIVE' | 'DHCP' | 'STATIC';
+  mgmt_vlan_id: number | null;
+  mgmt_ip_address: string;
+  mgmt_subnet_mask: string;
+  mgmt_gateway: string;
+  mgmt_dns1: string;
+  mgmt_dns2: string;
+  // Metadata
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutoProvisioningHistoryRecord {
+  id: number;
+  timestamp: string;
+  onu_db_id: number | null;
+  serial_number: string;
+  onu_vendor: string;
+  onu_model: string;
+  olt_id: number;
+  olt_name: string;
+  board: number;
+  pon: number;
+  onu_id: number;
+  task_id: number | null;
+  task_name: string;
+  applied_vlan: number;
+  service_profile: string;
+  speed_profile: string;
+  zone_name: string;
+  splitter_name: string;
+  splitter_port: number | null;
+  duration_ms: number;
+  status: 'PENDING' | 'PROCESSING' | 'SUCCESS' | 'FAILED' | 'RETRY';
+  is_conflict?: boolean;
+  error_message: string | null;
+  cli_script: string;
+  olt_response: string;
+  verification_output: string;
+  retry_count: number;
+}
+
+export interface TaskAuditLogRecord {
+  id: number;
+  timestamp: string;
+  task_id: number;
+  task_name: string;
+  action: 'CREATED' | 'UPDATED' | 'ENABLED' | 'DISABLED' | 'DUPLICATED' | 'DELETED';
+  actor: string;
+  details: string;
+}
+
 export interface SmartOltDatabaseState {
   olts: OltRecord[];
   olt_cards: OltCardRecord[];
@@ -374,6 +468,9 @@ export interface SmartOltDatabaseState {
   onus: OnuRecord[];
   provisioning_logs: ProvisioningLogRecord[];
   users?: AppUserRecord[];
+  auto_provisioning_tasks?: AutoProvisioningTaskRecord[];
+  auto_provisioning_history?: AutoProvisioningHistoryRecord[];
+  task_audit_logs?: TaskAuditLogRecord[];
 }
 
 /**
@@ -475,6 +572,9 @@ export const INITIAL_DB_STATE: SmartOltDatabaseState = {
   onus: [],
   provisioning_logs: [],
   users: DEFAULT_APP_USERS,
+  auto_provisioning_tasks: [],
+  auto_provisioning_history: [],
+  task_audit_logs: [],
 };
 
 /**
