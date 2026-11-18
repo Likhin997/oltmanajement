@@ -26,6 +26,7 @@ import {
   RefreshCw,
   X,
 } from 'lucide-react';
+import { SearchableSplitterSelect } from './SearchableSplitterSelect';
 
 interface AuthorizeOnuModalProps {
   onu: OnuRecord;
@@ -1085,11 +1086,10 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
           </label>
           <div className="space-y-2 sm:col-span-8">
             <div className="flex items-center gap-2">
-              <select
+              <SearchableSplitterSelect
+                className="flex-1 min-w-0"
                 value={odbId}
-                onChange={(e) => {
-                  const val =
-                    e.target.value === 'NONE' ? 'NONE' : Number(e.target.value);
+                onChange={(val) => {
                   setOdbId(val);
                   if (val !== 'NONE') {
                     const chosen = db.odbs.find((o) => o.id === val);
@@ -1099,27 +1099,16 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
                     }
                   }
                 }}
-                className="flex-1 rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
-              >
-                <option value="NONE">
-                  {availableSplitters.length === 0
+                splitters={availableSplitters}
+                onus={db.onus}
+                zones={db.zones}
+                noneLabel={
+                  availableSplitters.length === 0
                     ? 'None (Klik + untuk tambah Splitter / ODP baru)'
-                    : 'None'}
-                </option>
-                {availableSplitters.map((o) => {
-                  const usedOnSplitter = db.onus.filter(
-                    (u) => u.is_authorized && u.odb_id === o.id
-                  ).length;
-                  const zObj = db.zones.find((z) => z.id === o.zone_id);
-                  return (
-                    <option key={o.id} value={o.id}>
-                      {o.name} ({o.splitter_ratio} · {usedOnSplitter}/
-                      {o.total_ports} ports used
-                      {zObj ? ` · ${zObj.name}` : ''})
-                    </option>
-                  );
-                })}
-              </select>
+                    : 'None'
+                }
+                maxVisibleItems={10}
+              />
               <button
                 type="button"
                 onClick={() =>

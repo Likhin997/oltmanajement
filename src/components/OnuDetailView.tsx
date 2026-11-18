@@ -26,6 +26,7 @@ import {
 } from '../services/oltEngine';
 import { UpdateOnuModeModal } from './UpdateOnuModeModal';
 import { PrtgTrafficGraph } from './PrtgTrafficGraph';
+import { SearchableSplitterSelect } from './SearchableSplitterSelect';
 import {
   ArrowLeft,
   Eye,
@@ -2976,24 +2977,16 @@ Software1 version:   V9.0.10P1N8 (Standby)`,
                         </button>
                       )}
                     </div>
-                    <select
+                    <SearchableSplitterSelect
+                      className="mt-1"
                       value={metaOdbId}
-                      onChange={(e) =>
-                        setMetaOdbId(
-                          e.target.value === 'NONE'
-                            ? 'NONE'
-                            : Number(e.target.value)
-                        )
-                      }
-                      className="mt-1 w-full rounded border border-slate-600 bg-[#1c2536] px-3 py-1.5 text-white"
-                    >
-                      <option value="NONE">None</option>
-                      {db.odbs.map((o) => (
-                        <option key={o.id} value={o.id}>
-                          {o.name} ({o.splitter_ratio})
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(val) => setMetaOdbId(val)}
+                      splitters={db.odbs}
+                      onus={db.onus}
+                      zones={db.zones}
+                      noneLabel="None"
+                      maxVisibleItems={10}
+                    />
                     {showInlineOdbAdd && onQuickAddSplitter && (
                       <div className="mt-1.5 space-y-1.5 rounded border border-emerald-500/40 bg-[#0d1f33] p-1.5">
                         <div className="flex items-center gap-1.5">

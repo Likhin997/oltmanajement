@@ -44,6 +44,7 @@ import {
   WanModeOption,
   ConfigMethodOption,
 } from '../services/oltEngine';
+import { SearchableSplitterSelect } from './SearchableSplitterSelect';
 
 // ============================================================================
 // 1. HELPER ENGINE: VENDOR DETECTION, TASK MATCHING, CONFLICT & CLI BUILDER
@@ -2710,34 +2711,28 @@ export const AutoProvisioningTaskManager: React.FC<AutoProvisioningTaskManagerPr
                       <label className="block text-xs font-bold text-slate-200">
                         2. Splitter / ODP
                       </label>
-                      <select
+                      <SearchableSplitterSelect
                         disabled={!formData.zone_id}
-                        value={formData.odb_id || ''}
-                        onChange={(e) => {
-                          const nextOdbId = e.target.value
-                            ? Number(e.target.value)
-                            : null;
+                        value={formData.odb_id ? formData.odb_id : 'NONE'}
+                        onChange={(val) => {
                           setFormData({
                             ...formData,
-                            odb_id: nextOdbId,
+                            odb_id: val === 'NONE' ? null : val,
                             odb_port: null,
                           });
                         }}
-                        className="w-full px-3 py-2 text-xs border border-slate-700 rounded-lg bg-slate-900 font-semibold text-white disabled:opacity-50"
-                      >
-                        <option value="">
-                          {!formData.zone_id
+                        splitters={availableSplittersForZone}
+                        onus={db.onus}
+                        zones={db.zones}
+                        noneLabel={
+                          !formData.zone_id
                             ? 'Pilih Zone terlebih dahulu'
                             : availableSplittersForZone.length === 0
                             ? 'Belum ada Splitter di Zone ini'
-                            : '-- Pilih Splitter / ODP --'}
-                        </option>
-                        {availableSplittersForZone.map((o) => (
-                          <option key={o.id} value={o.id}>
-                            {o.name} (Kapasitas {o.total_ports} Port)
-                          </option>
-                        ))}
-                      </select>
+                            : '-- Pilih Splitter / ODP --'
+                        }
+                        maxVisibleItems={10}
+                      />
                       {selectedSplitterObj && (
                         <p className="text-[11px] text-slate-400">
                           Terpakai: {occupiedPortsInSplitter.size} /{' '}
