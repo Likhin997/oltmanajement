@@ -98,6 +98,17 @@ import {
   setOnUnauthorizedHandler,
   apiFetch as fetch,
 } from './services/authSession';
+import {
+  initGoogleDriveAuth,
+  googleSignIn,
+  googleLogout,
+  listGoogleDriveBackups,
+  uploadFileToGoogleDrive,
+  downloadGoogleDriveFileText,
+  deleteGoogleDriveFile,
+  GoogleDriveBackupFile,
+} from './services/googleDriveService';
+import type { User as FirebaseUser } from 'firebase/auth';
 
 type NavigationView =
   | 'DASHBOARD'
@@ -1580,6 +1591,236 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     label?: string;
   } | null>(null);
 
+  // Google Drive State & Handlers
+  const [driveUser, setDriveUser] = useState<FirebaseUser | null>(null);
+  const [driveConnected, setDriveConnected] = useState<boolean>(false);
+  const [driveFiles, setDriveFiles] = useState<GoogleDriveBackupFile[]>([]);
+  const [driveBusy, setDriveBusy] = useState<boolean>(false);
+  const [driveDeleteConfirmFile, setDriveDeleteConfirmFile] =
+    useState<GoogleDriveBackupFile | null>(null);
+
+  useEffect(() => {
+    const unsubscribe = initGoogleDriveAuth((user, hasToken) => {
+      setDriveUser(user);
+      setDriveConnected(Boolean(user && hasToken));
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleLoadDriveBackups = async () => {
+    setDriveBusy(true);
+    try {
+      const files = await listGoogleDriveBackups();
+      setDriveFiles(files);
+      setDriveConnected(true);
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? `Google Drive: ${err.message}`
+          : 'Gagal memuat daftar file dari Google Drive.'
+      );
+    } finally {
+      setDriveBusy(false);
+    }
+  };
+
+  const handleConnectGoogleDrive = async () => {
+    setDriveBusy(true);
+    try {
+      const { user, accessToken } = await googleSignIn();
+      setDriveUser(user);
+      setDriveConnected(Boolean(accessToken));
+      const files = await listGoogleDriveBackups();
+      setDriveFiles(files);
+      showToast(
+        `✓ Terhubung ke Google Drive (${user.email || user.displayName || 'Google Account'}).`
+      );
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? `Gagal login Google Drive: ${err.message}`
+          : 'Login Google Drive dibatalkan.'
+      );
+    } finally {
+      setDriveBusy(false);
+    }
+  };
+
+  const handleDisconnectGoogleDrive = async () => {
+    await googleLogout();
+    setDriveUser(null);
+    setDriveConnected(false);
+    setDriveFiles([]);
+    showToast('Akun Google Drive telah diputuskan.');
+  };
+
+  const handleUploadFullBackupToDrive = async () => {
+    setDriveBusy(true);
+    try {
+      const nowWib = formatJakartaDateTime();
+      const safeStamp = nowWib.replace(/[:\s]/g, '-');
+      const fileName = `jetcybernet-smartolt-backup-${safeStamp}.json`;
+      const payload = {
+        app: 'JETCYBERNET-SMARTOLT',
+        version: '2.4',
+        exportedAtWib: `${nowWib} WIB`,
+        exportedBy: currentUser?.username || 'admin',
+        summary: {
+          olts: db.olts.length,
+          onus: db.onus.length,
+          zones: db.zones.length,
+          sectors: (db.sectors || []).length,
+          odbs: db.odbs.length,
+          vlans: db.vlans.length,
+          users: (db.users || []).length,
+        },
+        state: db,
+      };
+      await uploadFileToGoogleDrive(
+        fileName,
+        JSON.stringify(payload, null, 2),
+        'application/json'
+      );
+      const files = await listGoogleDriveBackups();
+      setDriveFiles(files);
+      setDriveConnected(true);
+      showToast(`✓ Backup "${fileName}" berhasil disimpan ke Google Drive!`);
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? `Gagal upload ke Google Drive: ${err.message}`
+          : 'Gagal menyimpan backup ke Google Drive.'
+      );
+    } finally {
+      setDriveBusy(false);
+    }
+  };
+
+  const handleUploadOltCfgToDrive = async (olt: OltRecord) => {
+    setDriveBusy(true);
+    try {
+      const nowWib = formatJakartaDateTime();
+      const safeStamp = nowWib.replace(/[:\s]/g, '-');
+      const safeName = olt.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      const fileName = `olt-${safeName}-running-config-${safeStamp}.cfg`;
+      const cliText = buildLiveZteRunningConfig(db, olt.id);
+      await uploadFileToGoogleDrive(fileName, cliText, 'text/plain');
+      const files = await listGoogleDriveBackups();
+      setDriveFiles(files);
+      setDriveConnected(true);
+      showToast(`✓ Config CLI "${fileName}" disimpan ke Google Drive!`);
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? `Gagal upload .cfg ke Google Drive: ${err.message}`
+          : 'Gagal upload .cfg ke Google Drive.'
+      );
+    } finally {
+      setDriveBusy(false);
+    }
+  };
+
+  const handleSelectDriveBackupForRestore = async (
+    file: GoogleDriveBackupFile
+  ) => {
+    setDriveBusy(true);
+    try {
+      const rawText = await downloadGoogleDriveFileText(file.id);
+      const raw = JSON.parse(rawText);
+      const candidateState: SmartOltDatabaseState | null =
+        raw && raw.state && Array.isArray(raw.state.olts)
+          ? raw.state
+          : raw && Array.isArray(raw.olts)
+          ? raw
+          : null;
+      if (!candidateState) {
+        showToast(
+          '✗ File Google Drive bukan backup JSON database OLT/ONU yang valid.'
+        );
+        return;
+      }
+      setUploadedBackupState(candidateState);
+      setUploadedBackupFileName(`[Google Drive] ${file.name}`);
+      setUploadedBackupMeta({
+        exportedAtWib: raw.exportedAtWib || file.modifiedTime || undefined,
+        label: raw.label || undefined,
+      });
+      showToast(
+        `✓ File Drive "${file.name}" dimuat (${candidateState.olts.length} OLT, ${
+          candidateState.onus?.length || 0
+        } ONU). Klik "Jalankan Restore Sekarang" untuk menerapkan.`
+      );
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? `Gagal membaca file dari Google Drive: ${err.message}`
+          : 'Gagal mengunduh file dari Google Drive.'
+      );
+    } finally {
+      setDriveBusy(false);
+    }
+  };
+
+  const handleConfirmDeleteDriveFile = async () => {
+    if (!driveDeleteConfirmFile) return;
+    const target = driveDeleteConfirmFile;
+    setDriveBusy(true);
+    try {
+      await deleteGoogleDriveFile(target.id);
+      setDriveDeleteConfirmFile(null);
+      const files = await listGoogleDriveBackups();
+      setDriveFiles(files);
+      showToast(`✓ File "${target.name}" dihapus dari Google Drive.`);
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? `Gagal menghapus file Drive: ${err.message}`
+          : 'Gagal menghapus file dari Google Drive.'
+      );
+    } finally {
+      setDriveBusy(false);
+    }
+  };
+
+  // Configured ONU Table Sorting State
+  type ConfiguredSortField =
+    | 'NONE'
+    | 'STATUS'
+    | 'NAME'
+    | 'SN'
+    | 'OLT'
+    | 'BOARD'
+    | 'PORT'
+    | 'ZONE'
+    | 'SPLITTER'
+    | 'SIGNAL'
+    | 'MODE'
+    | 'VLAN'
+    | 'METHOD'
+    | 'TYPE'
+    | 'AUTH_DATE';
+
+  const [configuredSortField, setConfiguredSortField] =
+    useState<ConfiguredSortField>('NONE');
+  const [configuredSortDir, setConfiguredSortDir] = useState<'asc' | 'desc'>(
+    'asc'
+  );
+
+  const handleToggleConfiguredSort = (field: ConfiguredSortField) => {
+    setConfiguredOnusPage(1);
+    if (configuredSortField === field) {
+      if (configuredSortDir === 'asc') {
+        setConfiguredSortDir('desc');
+      } else {
+        setConfiguredSortField('NONE');
+        setConfiguredSortDir('asc');
+      }
+    } else {
+      setConfiguredSortField(field);
+      setConfiguredSortDir('asc');
+    }
+  };
+
   const loadBackupSnapshots = async () => {
     try {
       const resp = await fetch('/api/backup/snapshots');
@@ -1965,15 +2206,104 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     return true;
   });
 
+  const sortedConfiguredOnus = [...filteredConfiguredOnus].sort((a, b) => {
+    if (configuredSortField === 'NONE') return 0;
+    const dir = configuredSortDir === 'asc' ? 1 : -1;
+
+    switch (configuredSortField) {
+      case 'STATUS': {
+        const rank = (s: string) =>
+          s === 'working' ? 1 : s === 'DyingGasp' ? 2 : s === 'LOS' ? 3 : 4;
+        return (rank(a.phase_state) - rank(b.phase_state)) * dir;
+      }
+      case 'NAME':
+        return (
+          (a.customer_name || '').localeCompare(
+            b.customer_name || '',
+            undefined,
+            { numeric: true, sensitivity: 'base' }
+          ) * dir
+        );
+      case 'SN':
+        return (
+          a.serial_number.localeCompare(b.serial_number, undefined, {
+            numeric: true,
+            sensitivity: 'base',
+          }) * dir
+        );
+      case 'OLT':
+        return (
+          (a.olt_id - b.olt_id ||
+            a.board - b.board ||
+            a.port - b.port ||
+            (a.onu_index ?? 0) - (b.onu_index ?? 0)) * dir
+        );
+      case 'BOARD':
+        return (a.board - b.board || a.port - b.port) * dir;
+      case 'PORT':
+        return (a.port - b.port || (a.onu_index ?? 0) - (b.onu_index ?? 0)) * dir;
+      case 'ZONE': {
+        const zA = db.zones.find((z) => z.id === a.zone_id)?.name || '';
+        const zB = db.zones.find((z) => z.id === b.zone_id)?.name || '';
+        if (!zA && zB) return 1;
+        if (zA && !zB) return -1;
+        return (
+          zA.localeCompare(zB, undefined, {
+            numeric: true,
+            sensitivity: 'base',
+          }) * dir
+        );
+      }
+      case 'SPLITTER': {
+        const spA = db.odbs.find((s) => s.id === a.odb_id)?.name || '';
+        const spB = db.odbs.find((s) => s.id === b.odb_id)?.name || '';
+        if (!spA && spB) return 1;
+        if (spA && !spB) return -1;
+        return (
+          spA.localeCompare(spB, undefined, {
+            numeric: true,
+            sensitivity: 'base',
+          }) * dir
+        );
+      }
+      case 'SIGNAL': {
+        const rxA = a.onu_rx_dbm;
+        const rxB = b.onu_rx_dbm;
+        if (rxA === null && rxB === null) return 0;
+        if (rxA === null) return 1;
+        if (rxB === null) return -1;
+        return (rxA - rxB) * dir;
+      }
+      case 'MODE':
+        return (a.wan_mode || '').localeCompare(b.wan_mode || '') * dir;
+      case 'VLAN': {
+        const vA = db.vlans.find((v) => v.id === a.vlan_id)?.vlan_id ?? 99999;
+        const vB = db.vlans.find((v) => v.id === b.vlan_id)?.vlan_id ?? 99999;
+        return (vA - vB) * dir;
+      }
+      case 'METHOD':
+        return (a.config_method || 'OMCI').localeCompare(b.config_method || 'OMCI') * dir;
+      case 'TYPE':
+        return (a.onu_type || '').localeCompare(b.onu_type || '') * dir;
+      case 'AUTH_DATE': {
+        const dA = a.auth_date_label || (a.last_online_at || '').slice(0, 10);
+        const dB = b.auth_date_label || (b.last_online_at || '').slice(0, 10);
+        return dA.localeCompare(dB) * dir;
+      }
+      default:
+        return 0;
+    }
+  });
+
   const totalConfiguredPages = Math.max(
     1,
-    Math.ceil(filteredConfiguredOnus.length / configuredOnusPerPage)
+    Math.ceil(sortedConfiguredOnus.length / configuredOnusPerPage)
   );
   const activeConfiguredPage = Math.min(
     Math.max(1, configuredOnusPage),
     totalConfiguredPages
   );
-  const paginatedConfiguredOnus = filteredConfiguredOnus.slice(
+  const paginatedConfiguredOnus = sortedConfiguredOnus.slice(
     (activeConfiguredPage - 1) * configuredOnusPerPage,
     activeConfiguredPage * configuredOnusPerPage
   );
@@ -5113,6 +5443,46 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     </button>
                   ))}
                 </div>
+
+                {/* Quick Sort Selector (Mobile & Desktop) */}
+                <div className="flex items-center gap-1.5 border-l border-slate-800 pl-3">
+                  <span>Sort:</span>
+                  <select
+                    value={configuredSortField}
+                    onChange={(e) => {
+                      const val = e.target.value as ConfiguredSortField;
+                      setConfiguredSortField(val);
+                      setConfiguredOnusPage(1);
+                    }}
+                    className="rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 text-xs text-slate-200 focus:border-sky-500 focus:outline-none"
+                  >
+                    <option value="NONE">Default</option>
+                    <option value="OLT">OLT</option>
+                    <option value="ZONE">Zone</option>
+                    <option value="SIGNAL">Signal (dBm)</option>
+                    <option value="AUTH_DATE">Auth date</option>
+                    <option value="NAME">Name</option>
+                    <option value="STATUS">Status</option>
+                    <option value="BOARD">Board</option>
+                    <option value="PORT">Port</option>
+                    <option value="SPLITTER">Splitter / ODP</option>
+                    <option value="VLAN">VLAN</option>
+                  </select>
+                  {configuredSortField !== 'NONE' && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setConfiguredSortDir((d) =>
+                          d === 'asc' ? 'desc' : 'asc'
+                        )
+                      }
+                      className="rounded-lg border border-sky-500/40 bg-sky-500/15 px-2 py-1 font-mono text-[11px] font-semibold text-sky-300 hover:bg-sky-500/25"
+                      title="Ubah arah urutan (Asc/Desc)"
+                    >
+                      {configuredSortDir === 'asc' ? '▲ ASC' : '▼ DESC'}
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="font-mono text-[11px]">
                 {paginatedConfiguredOnus.length} of {filteredConfiguredOnus.length} ONUs
@@ -5164,20 +5534,57 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 <thead className="border-b border-slate-800 bg-slate-900 text-slate-400">
                   <tr>
                     <th className="px-3 py-2.5">View</th>
-                    <th className="px-2 py-2.5">Status</th>
-                    <th className="px-3 py-2.5">Name</th>
-                    <th className="px-3 py-2.5">SN</th>
-                    <th className="px-2 py-2.5">OLT</th>
-                    <th className="px-2 py-2.5">Board</th>
-                    <th className="px-2 py-2.5">Port</th>
-                    <th className="px-3 py-2.5">Zone</th>
-                    <th className="px-3 py-2.5">Splitter</th>
-                    <th className="px-3 py-2.5">Signal</th>
-                    <th className="px-3 py-2.5">Mode</th>
-                    <th className="px-2 py-2.5">VLAN</th>
-                    <th className="px-2 py-2.5">Method</th>
-                    <th className="px-2 py-2.5">Type</th>
-                    <th className="px-3 py-2.5">Auth date</th>
+                    {(
+                      [
+                        { field: 'STATUS', label: 'Status', px: 'px-2' },
+                        { field: 'NAME', label: 'Name', px: 'px-3' },
+                        { field: 'SN', label: 'SN', px: 'px-3' },
+                        { field: 'OLT', label: 'OLT', px: 'px-2' },
+                        { field: 'BOARD', label: 'Board', px: 'px-2' },
+                        { field: 'PORT', label: 'Port', px: 'px-2' },
+                        { field: 'ZONE', label: 'Zone', px: 'px-3' },
+                        { field: 'SPLITTER', label: 'Splitter', px: 'px-3' },
+                        { field: 'SIGNAL', label: 'Signal', px: 'px-3' },
+                        { field: 'MODE', label: 'Mode', px: 'px-3' },
+                        { field: 'VLAN', label: 'VLAN', px: 'px-2' },
+                        { field: 'METHOD', label: 'Method', px: 'px-2' },
+                        { field: 'TYPE', label: 'Type', px: 'px-2' },
+                        { field: 'AUTH_DATE', label: 'Auth date', px: 'px-3' },
+                      ] as Array<{
+                        field: ConfiguredSortField;
+                        label: string;
+                        px: string;
+                      }>
+                    ).map((col) => {
+                      const isActive = configuredSortField === col.field;
+                      return (
+                        <th
+                          key={col.field}
+                          onClick={() => handleToggleConfiguredSort(col.field)}
+                          title={`Urutkan berdasarkan ${col.label}`}
+                          className={`${col.px} py-2.5 cursor-pointer select-none transition hover:bg-slate-800/80 hover:text-white ${
+                            isActive ? 'text-sky-400 font-bold' : ''
+                          }`}
+                        >
+                          <span className="inline-flex items-center gap-1">
+                            <span>{col.label}</span>
+                            <span
+                              className={`text-[10px] leading-none ${
+                                isActive
+                                  ? 'text-sky-400 opacity-100'
+                                  : 'text-slate-600 opacity-70'
+                              }`}
+                            >
+                              {isActive
+                                ? configuredSortDir === 'asc'
+                                  ? '▲'
+                                  : '▼'
+                                : '⇅'}
+                            </span>
+                          </span>
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/70">
@@ -10872,7 +11279,240 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   </table>
                 </div>
               </div>
+
+              {/* SECTION 4: GOOGLE DRIVE CLOUD BACKUP & RESTORE */}
+              <div className="rounded-lg border border-sky-500/35 bg-[#0d1a2b] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-bold text-sky-300">
+                        5. Google Drive Cloud Backup &amp; Restore
+                      </h4>
+                      <span className="rounded border border-sky-500/30 bg-sky-950/80 px-2 py-0.5 font-mono text-[10px] text-sky-300">
+                        Google Workspace API
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-slate-300">
+                      Simpan cadangan database (.json) atau konfigurasi CLI OLT (.cfg) langsung ke akun Google Drive Anda, atau pulihkan dari Google Drive.
+                    </p>
+                  </div>
+
+                  {!driveConnected ? (
+                    <button
+                      type="button"
+                      disabled={driveBusy}
+                      onClick={() => void handleConnectGoogleDrive()}
+                      className="inline-flex items-center gap-2.5 rounded-md border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-800 shadow-xs transition hover:bg-slate-100 disabled:opacity-50"
+                    >
+                      <svg
+                        version="1.1"
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 48 48"
+                        className="h-4 w-4 shrink-0"
+                      >
+                        <path
+                          fill="#EA4335"
+                          d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                        />
+                        <path
+                          fill="#4285F4"
+                          d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                        />
+                        <path
+                          fill="#FBBC05"
+                          d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                        />
+                        <path
+                          fill="#34A853"
+                          d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                        />
+                      </svg>
+                      <span>
+                        {driveBusy ? 'Connecting...' : 'Sign in with Google'}
+                      </span>
+                    </button>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded border border-emerald-500/30 bg-emerald-950/60 px-2.5 py-1 font-mono text-[11px] text-emerald-300">
+                        ● {driveUser?.email || driveUser?.displayName || 'Connected'}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={driveBusy}
+                        onClick={() => void handleUploadFullBackupToDrive()}
+                        className="inline-flex items-center gap-1.5 rounded bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-50"
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                        Upload Backup (.json) ke Drive
+                      </button>
+                      <button
+                        type="button"
+                        disabled={driveBusy}
+                        onClick={() => void handleLoadDriveBackups()}
+                        className="inline-flex items-center gap-1 rounded border border-slate-600 bg-[#13243a] px-2.5 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                      >
+                        <RefreshCw
+                          className={`h-3.5 w-3.5 ${
+                            driveBusy ? 'animate-spin' : ''
+                          }`}
+                        />
+                        Refresh Drive
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDisconnectGoogleDrive()}
+                        className="rounded border border-red-500/40 bg-red-950/40 px-2.5 py-1.5 text-xs text-red-300 hover:bg-red-900/60"
+                      >
+                        Sign Out
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {driveConnected && visibleOlts.length > 0 && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-800 pt-3">
+                    <span className="text-[11px] text-slate-400">
+                      Upload CLI (.cfg) OLT ke Google Drive:
+                    </span>
+                    {visibleOlts.map((olt) => (
+                      <button
+                        key={olt.id}
+                        type="button"
+                        disabled={driveBusy}
+                        onClick={() => void handleUploadOltCfgToDrive(olt)}
+                        className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-950/50 px-2.5 py-1 text-[11px] font-semibold text-sky-300 hover:bg-sky-900/70 hover:text-white disabled:opacity-50"
+                      >
+                        <Save className="h-3 w-3" />
+                        {olt.name} (.cfg)
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {driveConnected && (
+                  <div className="mt-3 overflow-x-auto rounded border border-slate-700/80">
+                    <table className="w-full text-left text-xs">
+                      <thead className="border-b border-slate-700 bg-[#101d2e] text-[11px] font-bold uppercase text-slate-300">
+                        <tr>
+                          <th className="px-3 py-2">Nama File di Google Drive</th>
+                          <th className="px-3 py-2">Terakhir Diubah</th>
+                          <th className="px-3 py-2">Ukuran</th>
+                          <th className="px-3 py-2 text-right">Aksi</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800 bg-[#0b1523]">
+                        {driveFiles.length === 0 ? (
+                          <tr>
+                            <td
+                              colSpan={4}
+                              className="px-4 py-5 text-center text-slate-400"
+                            >
+                              Belum ada file backup SmartOLT yang ditemukan di Google Drive Anda.
+                            </td>
+                          </tr>
+                        ) : (
+                          driveFiles.map((file) => (
+                            <tr
+                              key={file.id}
+                              className="hover:bg-[#13243a]/60"
+                            >
+                              <td className="px-3 py-2 font-mono font-semibold text-white">
+                                {file.name}
+                              </td>
+                              <td className="px-3 py-2 font-mono text-[11px] text-slate-300">
+                                {file.modifiedTime
+                                  ? new Date(file.modifiedTime).toLocaleString(
+                                      'id-ID'
+                                    )
+                                  : '-'}
+                              </td>
+                              <td className="px-3 py-2 font-mono text-[11px] text-slate-400">
+                                {file.size
+                                  ? `${(Number(file.size) / 1024).toFixed(1)} KB`
+                                  : '-'}
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <div className="inline-flex items-center gap-1.5">
+                                  {file.name.endsWith('.json') && (
+                                    <button
+                                      type="button"
+                                      disabled={driveBusy}
+                                      onClick={() =>
+                                        void handleSelectDriveBackupForRestore(
+                                          file
+                                        )
+                                      }
+                                      className="rounded bg-amber-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-amber-500 disabled:opacity-50"
+                                    >
+                                      Pilih untuk Restore
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    disabled={driveBusy}
+                                    onClick={() =>
+                                      setDriveDeleteConfirmFile(file)
+                                    }
+                                    className="rounded border border-red-500/40 bg-red-950/50 px-2 py-1 text-[11px] text-red-300 hover:bg-red-900/70 hover:text-white"
+                                    title="Hapus file dari Google Drive"
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
             </div>
+
+            {/* Confirmation Modal before Deleting File from Google Drive */}
+            {driveDeleteConfirmFile && (
+              <div
+                className="fixed inset-0 z-60 flex items-center justify-center bg-black/75 p-4"
+                onClick={() => setDriveDeleteConfirmFile(null)}
+              >
+                <div
+                  className="w-full max-w-md rounded-xl border border-red-500/40 bg-slate-900 p-5 text-xs text-slate-200 shadow-2xl"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-center gap-2 text-sm font-bold text-red-400">
+                    <AlertTriangle className="h-4 w-4" />
+                    <span>Konfirmasi Hapus File di Google Drive</span>
+                  </div>
+                  <p className="mt-2 text-slate-300">
+                    Apakah Anda yakin ingin menghapus file berikut secara permanen dari Google Drive Anda?
+                  </p>
+                  <div className="mt-2 rounded border border-slate-800 bg-slate-950 p-2.5 font-mono text-[11px] text-white">
+                    <div>File: {driveDeleteConfirmFile.name}</div>
+                    <div className="text-slate-400">
+                      ID: {driveDeleteConfirmFile.id}
+                    </div>
+                  </div>
+                  <div className="mt-4 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDriveDeleteConfirmFile(null)}
+                      className="rounded bg-slate-800 px-3 py-1.5 font-semibold text-slate-300 hover:bg-slate-700"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="button"
+                      disabled={driveBusy}
+                      onClick={() => void handleConfirmDeleteDriveFile()}
+                      className="rounded bg-red-600 px-3.5 py-1.5 font-bold text-white hover:bg-red-500 disabled:opacity-50"
+                    >
+                      {driveBusy ? 'Menghapus...' : 'Ya, Hapus dari Drive'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="flex items-center justify-end border-t border-slate-700/80 bg-[#101926] px-6 py-3">
               <button
