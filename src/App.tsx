@@ -6615,6 +6615,12 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 const z = db.zones.find((item) => item.id === o.zone_id);
                 const sp = db.odbs.find((item) => item.id === o.odb_id);
                 const vl = db.vlans.find((item) => item.id === o.vlan_id);
+                const isOnline = o.phase_state === 'working';
+                const isPwrFail = o.phase_state === 'DyingGasp';
+                const isLos = o.phase_state === 'LOS';
+                const isOltOffline =
+                  !isOnline && o.last_offline_reason === 'OLT Offline';
+
                 return (
                   <div
                     key={o.id}
@@ -6622,26 +6628,64 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       setSelectedOnuId(o.id);
                       setActiveView('ONU_DETAIL');
                     }}
-                    className="cursor-pointer space-y-2 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5 transition hover:border-slate-700"
+                    className={`cursor-pointer space-y-2 rounded-xl border bg-slate-900/70 p-3 transition hover:border-slate-700 ${
+                      isLos
+                        ? 'border-rose-500/35'
+                        : isPwrFail
+                          ? 'border-amber-500/35'
+                          : !isOnline
+                            ? 'border-slate-800'
+                            : 'border-slate-800'
+                    }`}
                   >
                     <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <div className="font-semibold text-white">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate font-semibold text-white">
                           {o.customer_name || o.serial_number}
                         </div>
-                        <div className="font-mono text-[11px] text-slate-400">
+                        <div className="truncate font-mono text-[11px] text-slate-400">
                           {o.serial_number} · OLT {o.olt_id} (1/{o.board}/{o.port})
                         </div>
                       </div>
-                      <div>{renderSignalCell(o)}</div>
+
+                      {/* Status ONU & Optical Signal (selalu tampil jelas di mobile) */}
+                      <div className="flex shrink-0 flex-col items-end gap-1">
+                        {isOnline ? (
+                          <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-300">
+                            <Wifi className="h-3 w-3" />
+                            Online
+                          </span>
+                        ) : isPwrFail ? (
+                          <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/35 bg-amber-500/15 px-2 py-0.5 text-[10.5px] font-semibold text-amber-300">
+                            <Power className="h-3 w-3" />
+                            PwrFail
+                          </span>
+                        ) : isLos ? (
+                          <span className="inline-flex items-center gap-1 rounded-md border border-rose-500/40 bg-rose-500/15 px-2 py-0.5 text-[10.5px] font-semibold text-rose-300">
+                            <AlertTriangle className="h-3 w-3" />
+                            LOS
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-md border border-slate-600/60 bg-slate-800/90 px-2 py-0.5 text-[10.5px] font-semibold text-slate-300">
+                            <Power className="h-3 w-3 text-rose-400" />
+                            {isOltOffline ? 'OLT Offline' : 'Offline'}
+                          </span>
+                        )}
+                        {isOnline && (
+                          <div className="text-[11px]">{renderSignalCell(o)}</div>
+                        )}
+                      </div>
                     </div>
+
                     <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/80 pt-2 text-[11px] text-slate-400">
-                      <span>
+                      <span className="truncate">
                         {z ? z.name : 'No Zone'}
                         {sp ? ` · ${sp.name}` : ''}
                         {vl ? ` · VLAN ${vl.vlan_id}` : ''}
                       </span>
-                      <span className="font-medium text-sky-400">Detail →</span>
+                      <span className="shrink-0 font-medium text-sky-400">
+                        Detail →
+                      </span>
                     </div>
                   </div>
                 );
