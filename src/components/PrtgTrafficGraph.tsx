@@ -243,8 +243,8 @@ export const PrtgTrafficGraph: React.FC<PrtgTrafficGraphProps> = ({
   return (
     <div
       onClick={onClickGraph}
-      className={`flex flex-col justify-between rounded-xl border border-slate-800/90 bg-[#0b1526]/95 text-slate-200 shadow-lg transition ${
-        compact ? 'p-3' : 'p-4'
+      className={`flex min-w-0 flex-col justify-between overflow-hidden rounded-xl border border-slate-800/90 bg-[#0b1526]/95 text-slate-200 shadow-lg transition ${
+        compact ? 'p-2.5 sm:p-3' : 'p-3 sm:p-4'
       } ${
         onClickGraph
           ? 'cursor-pointer hover:border-sky-500/60 hover:bg-[#0d192d] hover:shadow-sky-950/30'
@@ -252,10 +252,10 @@ export const PrtgTrafficGraph: React.FC<PrtgTrafficGraphProps> = ({
       }`}
     >
       {/* Top Breadcrumb Header */}
-      <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+      <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-1.5 sm:mb-2.5 sm:gap-2">
         <div
-          className={`truncate font-medium tracking-tight text-slate-200 ${
-            compact ? 'max-w-full text-[11px]' : 'text-xs sm:text-[13px]'
+          className={`min-w-0 flex-1 truncate font-medium tracking-tight text-slate-200 ${
+            compact ? 'text-[11px]' : 'text-xs sm:text-[13px]'
           }`}
           title={breadcrumbPath}
         >
@@ -686,25 +686,35 @@ export const PrtgTrafficGraph: React.FC<PrtgTrafficGraphProps> = ({
       </div>
 
       {/* Bottom Legend + Footer */}
-      <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5 border-t border-slate-800/80 pt-2 text-[10.5px] text-slate-400">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono">
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5 border-t border-slate-800/80 pt-2 text-[10px] text-slate-400 sm:text-[10.5px]">
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 font-mono sm:gap-x-3">
           <span className="flex items-center gap-1 text-sky-400">
-            <span className="inline-block h-2 w-2 rounded-full bg-sky-400" />
+            <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-sky-400" />
             Total: {formatMbitValue(curTotal)}
           </span>
           <span className="flex items-center gap-1 text-teal-300">
-            <span className="inline-block h-2 w-2 rounded-full bg-teal-400" />
+            <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-teal-400" />
             In: {formatMbitValue(series?.curDownloadMbps ?? 0)}
-            {!compact && ` (Max ${formatMbitValue(series?.maxDownloadMbps ?? 0)})`}
+            {!compact && (
+              <span className="hidden sm:inline">
+                {' '}
+                (Max {formatMbitValue(series?.maxDownloadMbps ?? 0)})
+              </span>
+            )}
           </span>
           <span className="flex items-center gap-1 text-pink-400">
-            <span className="inline-block h-2 w-2 rounded-full bg-pink-400" />
+            <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-pink-400" />
             Out: {formatMbitValue(series?.curUploadMbps ?? 0)}
-            {!compact && ` (Max ${formatMbitValue(series?.maxUploadMbps ?? 0)})`}
+            {!compact && (
+              <span className="hidden sm:inline">
+                {' '}
+                (Max {formatMbitValue(series?.maxUploadMbps ?? 0)})
+              </span>
+            )}
           </span>
         </div>
 
-        <div className="flex items-center gap-2 font-mono text-[10px] text-slate-500">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[9.5px] text-slate-500 sm:text-[10px]">
           {!compact && <span>Real OLT ({totalSamplesRecorded} sampel)</span>}
           <span>
             {polledAtStr || 'WIB'} • ID {sensorId}

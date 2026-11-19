@@ -215,6 +215,14 @@ sqliteDb.exec(`
     size_bytes INTEGER NOT NULL DEFAULT 0,
     json_payload TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS app_branding (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    brand_name TEXT NOT NULL DEFAULT 'JETCYBERNET',
+    brand_logo TEXT NOT NULL DEFAULT '',
+    page_title TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+  );
 `);
 
 const POSTGRES_SCHEMA_SQL = `
@@ -356,6 +364,14 @@ const POSTGRES_SCHEMA_SQL = `
     upload_mbps DOUBLE PRECISION NOT NULL DEFAULT 0,
     in_bytes BIGINT DEFAULT 0,
     out_bytes BIGINT DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS app_branding (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    brand_name VARCHAR(120) NOT NULL DEFAULT 'JETCYBERNET',
+    brand_logo TEXT NOT NULL DEFAULT '',
+    page_title VARCHAR(200) NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
 `;
 
@@ -3061,6 +3077,148 @@ app.post('/api/auth/change-password', async (req, res) => {
   }
 });
 
+interface AppBrandingRecord {
+  brand_name: string;
+  brand_logo: string;
+  page_title: string;
+  updated_at: string;
+}
+
+const DEFAULT_APP_BRANDING: AppBrandingRecord = {
+  brand_name: 'JETCYBERNET',
+  brand_logo: '',
+  page_title: '',
+  updated_at: '',
+};
+
+function sanitizeAppBrandingInput(input: {
+  brand_name?: unknown;
+  brand_logo?: unknown;
+  page_title?: unknown;
+}): { ok: true; data: AppBrandingRecord } | { ok: false; error: string } {
+  const rawName = typeof input.brand_name === 'string' ? input.brand_name.trim() : '';
+  const rawLogo = typeof input.brand_logo === 'string' ? input.brand_logo.trim() : '';
+  const rawTitle = typeof input.page_title === 'string' ? input.page_title.trim() : '';
+
+  const brand_name = (rawName || DEFAULT_APP_BRANDING.brand_name).slice(0, 80);
+  const page_title = rawTitle.slice(0, 160);
+
+  if (rawLogo) {
+    const isDataImage = /^data:image\/[a-zA-Z0-9.+-]+;base64,/i.test(rawLogo) || /^data:image\/svg\+xml/i.test(rawLogo);
+    const isHttpUrl = /^https?:\/\//i.test(rawLogo) || rawLogo.startsWith('/');
+    if (!isDataImage && !isHttpUrl) {
+      return {
+        ok: false,
+        error: 'Format logo tidak valid. Gunakan upload gambar atau URL http(s)://.',
+      };
+    }
+    if (rawLogo.length > 2 * 1024 * 1024) {
+      return {
+        ok: false,
+        error: 'Ukuran gambar logo terlalu besar (maksimal 2MB).',
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    data: {
+      brand_name,
+      brand_logo: rawLogo,
+      page_title,
+      updated_at: new Date().toISOString(),
+    },
+  };
+}
+
+async function loadAppBranding(): Promise<AppBrandingRecord> {
+  if (pgPool && pgConnected) {
+    try {
+      const res = await pgPool.query(
+        'SELECT brand_name, brand_logo, page_title, updated_at FROM app_branding WHERE id = 1'
+      );
+      if (res.rows && res.rows.length > 0) {
+        const r = res.rows[0];
+        const branding: AppBrandingRecord = {
+          brand_name: String(r.brand_name || DEFAULT_APP_BRANDING.brand_name),
+          brand_logo: String(r.brand_logo || ''),
+          page_title: String(r.page_title || ''),
+          updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : '',
+        };
+        try {
+          sqliteDb
+            .prepare(
+              `INSERT INTO app_branding (id, brand_name, brand_logo, page_title, updated_at)
+               VALUES (1, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 brand_name = excluded.brand_name,
+                 brand_logo = excluded.brand_logo,
+                 page_title = excluded.page_title,
+                 updated_at = excluded.updated_at`
+            )
+            .run(branding.brand_name, branding.brand_logo, branding.page_title, branding.updated_at);
+        } catch {
+          // Ignore SQLite mirror error
+        }
+        return branding;
+      }
+    } catch {
+      // Fallback to SQLite below
+    }
+  }
+
+  try {
+    const row = sqliteDb
+      .prepare('SELECT brand_name, brand_logo, page_title, updated_at FROM app_branding WHERE id = 1')
+      .get() as Partial<AppBrandingRecord> | undefined;
+    if (row) {
+      return {
+        brand_name: String(row.brand_name || DEFAULT_APP_BRANDING.brand_name),
+        brand_logo: String(row.brand_logo || ''),
+        page_title: String(row.page_title || ''),
+        updated_at: String(row.updated_at || ''),
+      };
+    }
+  } catch {
+    // Fallback to default
+  }
+
+  return { ...DEFAULT_APP_BRANDING };
+}
+
+async function saveAppBranding(branding: AppBrandingRecord): Promise<AppBrandingRecord> {
+  sqliteDb
+    .prepare(
+      `INSERT INTO app_branding (id, brand_name, brand_logo, page_title, updated_at)
+       VALUES (1, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         brand_name = excluded.brand_name,
+         brand_logo = excluded.brand_logo,
+         page_title = excluded.page_title,
+         updated_at = excluded.updated_at`
+    )
+    .run(branding.brand_name, branding.brand_logo, branding.page_title, branding.updated_at);
+
+  if (pgPool && pgConnected) {
+    try {
+      await pgPool.query(
+        `INSERT INTO app_branding (id, brand_name, brand_logo, page_title, updated_at)
+         VALUES (1, $1, $2, $3, $4)
+         ON CONFLICT (id) DO UPDATE SET
+           brand_name = EXCLUDED.brand_name,
+           brand_logo = EXCLUDED.brand_logo,
+           page_title = EXCLUDED.page_title,
+           updated_at = EXCLUDED.updated_at`,
+        [branding.brand_name, branding.brand_logo, branding.page_title, branding.updated_at]
+      );
+    } catch (pgErr) {
+      console.error('[Branding] Failed saving to PostgreSQL (SQLite updated):', formatPgError(pgErr));
+    }
+  }
+
+  return branding;
+}
+
 // Global API Authentication Guard Middleware:
 // Every /api/* endpoint below requires a valid cryptographic session token!
 app.use('/api', async (req, res, next) => {
@@ -3070,7 +3228,8 @@ app.use('/api', async (req, res, next) => {
     req.path === '/auth/logout' ||
     req.path === '/auth/keepalive' ||
     req.path === '/auth/switch-user' ||
-    req.path === '/auth/change-password'
+    req.path === '/auth/change-password' ||
+    (req.path === '/branding' && req.method === 'GET')
   ) {
     next();
     return;
@@ -3098,6 +3257,36 @@ app.use('/api', async (req, res, next) => {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
+
+// GET /api/branding — Public live branding (logo, brand name, browser tab title) from database
+app.get('/api/branding', async (_req, res) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const branding = await loadAppBranding();
+    res.json({ ok: true, branding });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// POST /api/branding — Save branding (logo, brand name, browser tab title) live to database
+app.post(
+  '/api/branding',
+  requireRoles('ADMIN', 'OPERATOR', 'TECHNICIAN'),
+  async (req, res) => {
+    try {
+      const sanitized = sanitizeAppBrandingInput(req.body || {});
+      if (!sanitized.ok) {
+        res.status(400).json({ ok: false, error: sanitized.error });
+        return;
+      }
+      const saved = await saveAppBranding(sanitized.data);
+      res.json({ ok: true, branding: saved });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: (err as Error).message });
+    }
+  }
+);
 
 // GET /api/state — Load live database state + PostgreSQL connection status
 app.get('/api/state', async (req, res) => {
@@ -4785,14 +4974,22 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         `show gpon remote-onu wan-ip ${onuIf}`
       );
     } else {
-      // Always poll real OLT Uplink & active PON port traffic during real-time telemetry cycles
+      // Always poll real OLT Uplink & active PON port traffic during real-time telemetry cycles (no VLAN interfaces)
       const oltUplinkIfs = (state.uplink_ports || [])
-        .filter((u) => u && u.olt_id === olt.id)
-        .map((u) => u.name);
+        .filter(
+          (u) =>
+            u &&
+            u.olt_id === olt.id &&
+            /^(?:x?gei|smartgroup)(?:_|\d)/i.test(String(u.name || '').trim()) &&
+            !String(u.name || '').includes('.')
+        )
+        .map((u) => u.name.trim());
       const effectiveUplinks =
         oltUplinkIfs.length > 0
           ? oltUplinkIfs
-          : [olt.uplink_interface || 'xgei_1/19/1', 'gei_1/19/3'];
+          : [olt.uplink_interface || 'xgei_1/19/1', 'gei_1/19/3'].filter(
+              (n) => /^(?:x?gei|smartgroup)(?:_|\d)/i.test(n) && !n.includes('.')
+            );
       for (const upIf of effectiveUplinks) {
         cmds.push(`show interface ${upIf}`);
       }
@@ -5310,8 +5507,10 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       const nowTrafficMs = Date.now();
       const parsedMultiTraffic = parseZteMultiInterfaceTraffic(rawOut);
       for (const [ifKey, parsed] of parsedMultiTraffic.entries()) {
-        const isUplink = /^(?:x?gei|smartgroup|eth|vlan)/i.test(ifKey);
-        const isPonPort = /^gpon-olt_/i.test(ifKey);
+        // Strictly physical/LAG Uplinks and PON ports only (ignore VLAN / sub-interfaces)
+        const isUplink =
+          /^(?:x?gei|smartgroup)(?:_|\d)/i.test(ifKey) && !ifKey.includes('.');
+        const isPonPort = /^gpon-olt_\d+\/\d+\/\d+$/i.test(ifKey);
         const isOnuIf = /^gpon-onu_/i.test(ifKey);
 
         if (isUplink || isPonPort) {
@@ -6705,14 +6904,23 @@ function buildFullOltGraphsPayload(
     (u) => u.phase_state === 'working'
   ).length;
 
-  // 1. Uplink Interfaces for this OLT
+  // 1. Physical Uplink Interfaces ONLY for this OLT (exclude any VLAN / loopback / subinterfaces)
   const rawUplinkPorts =
     Array.isArray(state?.uplink_ports) && state.uplink_ports.length > 0
       ? state.uplink_ports.filter(Boolean)
       : INITIAL_DB_STATE.uplink_ports;
   const uplinkRecords = rawUplinkPorts.filter(
-    (u) => u.olt_id === effectiveOltId
+    (u) =>
+      u.olt_id === effectiveOltId &&
+      /^(?:x?gei|smartgroup)(?:_|\d)/i.test(String(u.name || '').trim()) &&
+      !String(u.name || '').includes('.')
   );
+  const defaultPrimaryUplink =
+    olt?.uplink_interface &&
+    /^(?:x?gei|smartgroup)(?:_|\d)/i.test(olt.uplink_interface.trim()) &&
+    !olt.uplink_interface.includes('.')
+      ? olt.uplink_interface.trim()
+      : 'xgei_1/19/1';
   const uplinkList =
     uplinkRecords.length > 0
       ? uplinkRecords
@@ -6720,7 +6928,7 @@ function buildFullOltGraphsPayload(
           {
             id: 1,
             olt_id: effectiveOltId,
-            name: olt?.uplink_interface || 'xgei_1/19/1',
+            name: defaultPrimaryUplink,
             description: 'Core Router Uplink',
             type: 'Fiber' as const,
             admin_state: 'Enabled' as const,
@@ -6730,13 +6938,13 @@ function buildFullOltGraphsPayload(
             wavelength: '1310 nm',
             temp_c: 41,
             pvid_untag: 41,
-            tagged_vlans: 'Hybrid: 101,102',
+            tagged_vlans: '',
           },
           {
             id: 2,
             olt_id: effectiveOltId,
             name: 'gei_1/19/3',
-            description: 'Core Router Backup / Metro Uplink',
+            description: 'Core Router Backup Uplink',
             type: 'Fiber' as const,
             admin_state: 'Enabled' as const,
             status: 'Up' as const,
@@ -6745,19 +6953,23 @@ function buildFullOltGraphsPayload(
             wavelength: '1310 nm',
             temp_c: 40,
             pvid_untag: 1,
-            tagged_vlans: 'Trunk: 101-104',
+            tagged_vlans: '',
           },
         ];
 
   const uplinks = uplinkList.map((u, idx) => {
     const ifName = u.name || `xgei_1/19/${idx + 1}`;
     const live = liveMap?.get(ifName.toLowerCase());
+    const cleanDesc =
+      u.description && !/^hybrid:|^trunk:|^vlan/i.test(u.description.trim())
+        ? u.description.trim()
+        : 'Uplink Interface';
     return {
       id: u.id || idx + 1,
       interfaceName: ifName,
       interfaceType: 'UPLINK' as const,
-      title: `${ifName} - ${u.description || u.tagged_vlans || 'Core Router Uplink'}`,
-      subtitle: `${u.status || 'Up'} • ${u.tagged_vlans || 'Trunk'} • ${totalOnlineOnus} Active ONUs`,
+      title: `${ifName} — ${cleanDesc}`,
+      subtitle: `${u.status || 'Up'} • Uplink • ${totalOnlineOnus} Active ONUs`,
       status: u.status || 'Up',
       activeOnus: totalOnlineOnus,
       totalOnus: oltConfiguredOnus.length,
@@ -6964,25 +7176,37 @@ app.post('/api/olts/:id/poll-graphs', async (req, res) => {
     }
 
     const uplinkIfs = (state?.uplink_ports || [])
-      .filter((u) => u && u.olt_id === olt.id)
-      .map((u) => u.name);
+      .filter(
+        (u) =>
+          u &&
+          u.olt_id === olt.id &&
+          /^(?:x?gei|smartgroup)(?:_|\d)/i.test(String(u.name || '').trim()) &&
+          !String(u.name || '').includes('.')
+      )
+      .map((u) => u.name.trim());
     const activePonIfs = (state?.pon_ports || [])
       .filter(
         (p) =>
           p &&
           p.olt_id === olt.id &&
+          /^gpon-olt_\d+\/\d+\/\d+$/i.test(String(p.interface_name || '').trim()) &&
           (p.total_onus > 0 ||
             (state?.onus || []).some(
               (u) => u && u.olt_id === olt.id && u.port === p.port_number
             ))
       )
-      .map((p) => p.interface_name);
+      .map((p) => p.interface_name.trim());
+
+    const fallbackUplink =
+      olt.uplink_interface &&
+      /^(?:x?gei|smartgroup)(?:_|\d)/i.test(olt.uplink_interface.trim()) &&
+      !olt.uplink_interface.includes('.')
+        ? olt.uplink_interface.trim()
+        : 'xgei_1/19/1';
 
     const targetIfs = Array.from(
       new Set([
-        ...(uplinkIfs.length > 0
-          ? uplinkIfs
-          : [olt.uplink_interface || 'xgei_1/19/1', 'gei_1/19/3']),
+        ...(uplinkIfs.length > 0 ? uplinkIfs : [fallbackUplink, 'gei_1/19/3']),
         ...(activePonIfs.length > 0
           ? activePonIfs
           : ['gpon-olt_1/3/1', 'gpon-olt_1/3/2', 'gpon-olt_1/3/3', 'gpon-olt_1/3/4']),
@@ -7006,7 +7230,10 @@ app.post('/api/olts/:id/poll-graphs', async (req, res) => {
     if (telnetRes.reachable && telnetRes.output) {
       const parsedMap = parseZteMultiInterfaceTraffic(telnetRes.output);
       for (const [ifKey, parsed] of parsedMap.entries()) {
-        const isUplink = /^(?:x?gei|smartgroup)/i.test(ifKey);
+        const isUplink =
+          /^(?:x?gei|smartgroup)(?:_|\d)/i.test(ifKey) && !ifKey.includes('.');
+        const isPonPort = /^gpon-olt_\d+\/\d+\/\d+$/i.test(ifKey);
+        if (!isUplink && !isPonPort) continue;
         const counterKey = `${olt.id}:${ifKey}`;
         const prev = lastOltIfCounterByKey.get(counterKey);
 

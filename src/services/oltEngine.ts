@@ -833,7 +833,8 @@ export function parseZteMultiInterfaceTraffic(
   let m: RegExpExecArray | null;
   while ((m = regex.exec(cleaned)) !== null) {
     const ifName = m[1].trim().toLowerCase();
-    const isUplink = /^(?:x?gei|smartgroup|eth|vlan)/i.test(ifName);
+    if (/^vlan/i.test(ifName)) continue;
+    const isUplink = /^(?:x?gei|smartgroup)(?:_|\d)/i.test(ifName) && !ifName.includes('.');
     const parsed = parseZteInterfaceTraffic(`show interface ${ifName}\n${m[2]}`, isUplink);
     map.set(ifName, parsed);
   }
@@ -844,8 +845,9 @@ export function parseZteMultiInterfaceTraffic(
   let hm: RegExpExecArray | null;
   while ((hm = headerRegex.exec(cleaned)) !== null) {
     const ifName = hm[1].trim().toLowerCase();
+    if (/^vlan/i.test(ifName)) continue;
     if (!map.has(ifName)) {
-      const isUplink = /^(?:x?gei|smartgroup|eth|vlan)/i.test(ifName);
+      const isUplink = /^(?:x?gei|smartgroup)(?:_|\d)/i.test(ifName) && !ifName.includes('.');
       const parsed = parseZteInterfaceTraffic(`show interface ${ifName}\n${hm[2]}`, isUplink);
       map.set(ifName, parsed);
     }

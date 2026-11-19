@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   INITIAL_DB_STATE,
   DEFAULT_APP_USERS,
@@ -1684,34 +1684,75 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
   const [showBackupModal, setShowBackupModal] = useState<boolean>(false);
 
-  // Dynamic Brand Name, Custom Logo & Browser Tab Title State (persisted in localStorage)
-  const [appBrandName, setAppBrandName] = useState<string>(() => {
-    try {
-      const saved = window.localStorage.getItem('smartolt_brand_name_v1');
-      return saved && saved.trim() ? saved.trim() : 'JETCYBERNET';
-    } catch {
-      return 'JETCYBERNET';
-    }
-  });
-  const [appBrandLogo, setAppBrandLogo] = useState<string>(() => {
-    try {
-      return window.localStorage.getItem('smartolt_brand_logo_v1') || '';
-    } catch {
-      return '';
-    }
-  });
-  const [appPageTitle, setAppPageTitle] = useState<string>(() => {
-    try {
-      return window.localStorage.getItem('smartolt_page_title_v1') || '';
-    } catch {
-      return '';
-    }
-  });
+  // Dynamic Brand Name, Custom Logo & Browser Tab Title State (live-synced via Database API)
+  const [appBrandName, setAppBrandName] = useState<string>('JETCYBERNET');
+  const [appBrandLogo, setAppBrandLogo] = useState<string>('');
+  const [appPageTitle, setAppPageTitle] = useState<string>('');
   const [showEditBrandModal, setShowEditBrandModal] = useState<boolean>(false);
-  const [brandNameDraft, setBrandNameDraft] = useState<string>(appBrandName);
-  const [brandLogoDraft, setBrandLogoDraft] = useState<string>(appBrandLogo);
-  const [pageTitleDraft, setPageTitleDraft] = useState<string>(appPageTitle);
+  const [brandNameDraft, setBrandNameDraft] = useState<string>('JETCYBERNET');
+  const [brandLogoDraft, setBrandLogoDraft] = useState<string>('');
+  const [pageTitleDraft, setPageTitleDraft] = useState<string>('');
+  const [isSavingBrand, setIsSavingBrand] = useState<boolean>(false);
   const brandLogoInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Fetch live branding from database (works on Login screen & all devices like HP/Laptop)
+  const loadBrandingFromServer = useCallback(async (isBackground = false) => {
+    try {
+      const res = await fetch('/api/branding', {
+        cache: 'no-store',
+        headers: isBackground ? { 'X-Background-Poll': '1' } : undefined,
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data?.ok && data.branding) {
+        const nextName =
+          typeof data.branding.brand_name === 'string' && data.branding.brand_name.trim()
+            ? data.branding.brand_name.trim()
+            : 'JETCYBERNET';
+        const nextLogo =
+          typeof data.branding.brand_logo === 'string' ? data.branding.brand_logo.trim() : '';
+        const nextTitle =
+          typeof data.branding.page_title === 'string' ? data.branding.page_title.trim() : '';
+        setAppBrandName((prev) => (prev === nextName ? prev : nextName));
+        setAppBrandLogo((prev) => (prev === nextLogo ? prev : nextLogo));
+        setAppPageTitle((prev) => (prev === nextTitle ? prev : nextTitle));
+      }
+    } catch {
+      // Ignore transient network errors during branding poll
+    }
+  }, []);
+
+  useEffect(() => {
+    // Clean up any legacy localStorage branding keys so DB is always the single source of truth
+    try {
+      window.localStorage.removeItem('smartolt_brand_name_v1');
+      window.localStorage.removeItem('smartolt_brand_logo_v1');
+      window.localStorage.removeItem('smartolt_page_title_v1');
+    } catch {
+      // Ignore storage access errors
+    }
+
+    void loadBrandingFromServer(false);
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        void loadBrandingFromServer(true);
+      }
+    };
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    const pollTimer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void loadBrandingFromServer(true);
+      }
+    }, 10000);
+
+    return () => {
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.clearInterval(pollTimer);
+    };
+  }, [loadBrandingFromServer]);
 
   // Sync Browser Tab Title (document.title) & Favicon dynamically
   useEffect(() => {
@@ -1796,32 +1837,45 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     e.target.value = '';
   };
 
-  const handleSaveBrandName = (e: React.FormEvent) => {
+  const handleSaveBrandName = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingBrand) return;
     const cleanedName = brandNameDraft.trim() || 'JETCYBERNET';
     const cleanedLogo = brandLogoDraft.trim();
     const cleanedTitle = pageTitleDraft.trim();
-    setAppBrandName(cleanedName);
-    setAppBrandLogo(cleanedLogo);
-    setAppPageTitle(cleanedTitle);
+
+    setIsSavingBrand(true);
     try {
-      window.localStorage.setItem('smartolt_brand_name_v1', cleanedName);
-      if (cleanedLogo) {
-        window.localStorage.setItem('smartolt_brand_logo_v1', cleanedLogo);
-      } else {
-        window.localStorage.removeItem('smartolt_brand_logo_v1');
+      const res = await fetch('/api/branding', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          brand_name: cleanedName,
+          brand_logo: cleanedLogo,
+          page_title: cleanedTitle,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok || !data.branding) {
+        showToast(`⚠ Gagal menyimpan branding ke database: ${data?.error || `HTTP ${res.status}`}`);
+        return;
       }
-      if (cleanedTitle) {
-        window.localStorage.setItem('smartolt_page_title_v1', cleanedTitle);
-      } else {
-        window.localStorage.removeItem('smartolt_page_title_v1');
-      }
-    } catch {
-      showToast('⚠ Gambar logo terlalu besar untuk localStorage. Gunakan file gambar yang lebih kecil.');
-      return;
+
+      const savedName = data.branding.brand_name || cleanedName;
+      const savedLogo = data.branding.brand_logo || '';
+      const savedTitle = data.branding.page_title || '';
+      setAppBrandName(savedName);
+      setAppBrandLogo(savedLogo);
+      setAppPageTitle(savedTitle);
+      setShowEditBrandModal(false);
+      showToast(
+        `✓ Branding, logo, dan judul tab "${savedTitle || `${savedName} — GPON OLT Manager`}" tersimpan live di database untuk semua perangkat.`
+      );
+    } catch (err) {
+      showToast(`⚠ Gagal menghubungi server saat menyimpan branding: ${(err as Error).message}`);
+    } finally {
+      setIsSavingBrand(false);
     }
-    setShowEditBrandModal(false);
-    showToast(`✓ Branding, logo, dan judul tab "${cleanedTitle || `${cleanedName} — GPON OLT Manager`}" berhasil disimpan.`);
   };
 
   // ==========================================================================
@@ -5192,22 +5246,24 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
              =================================================================== */}
           {activeView === 'DASHBOARD' && (
             <div className="space-y-5">
-              {/* Top 5 Clean Single-Elevation KPI Cards */}
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
+              {/* Top 5 Compact Responsive KPI Cards (2-col on mobile, 3-col tablet, 5-col desktop) */}
+              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 sm:gap-3.5 lg:grid-cols-5">
                 {/* Card 1: Waiting authorization */}
                 <div
                   onClick={() => setActiveView('UNCONFIGURED')}
-                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-sky-500/40 hover:bg-slate-900"
+                  className="group min-w-0 cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-3 transition hover:border-sky-500/40 hover:bg-slate-900 sm:p-4"
                 >
-                  <div className="flex items-center justify-between text-xs font-medium text-slate-400">
-                    <span>Waiting Authorization</span>
-                    <Radio className="h-4 w-4 text-sky-400" />
+                  <div className="flex items-center justify-between gap-1.5 text-[11px] font-medium text-slate-400 sm:text-xs">
+                    <span className="truncate">Waiting Auth</span>
+                    <Radio className="h-3.5 w-3.5 shrink-0 text-sky-400 sm:h-4 sm:w-4" />
                   </div>
-                  <div className="mt-2 font-mono text-3xl font-bold tracking-tight text-white">
+                  <div className="mt-1 font-mono text-2xl font-bold tracking-tight text-white sm:mt-2 sm:text-3xl">
                     {unconfiguredOnus.length}
                   </div>
-                  <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
-                    Discovered · <span className="text-sky-400">New {unconfiguredOnus.length}</span>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-1.5 border-t border-slate-800/80 pt-1.5 font-mono text-[10px] text-slate-400 sm:mt-3 sm:pt-2.5 sm:text-[11px]">
+                    <span>Discovered</span>
+                    <span>·</span>
+                    <span className="text-sky-400">New {unconfiguredOnus.length}</span>
                   </div>
                 </div>
 
@@ -5219,17 +5275,18 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     setConfiguredOnusPage(1);
                     setActiveView('CONFIGURED');
                   }}
-                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-emerald-500/40 hover:bg-slate-900"
+                  className="group min-w-0 cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-3 transition hover:border-emerald-500/40 hover:bg-slate-900 sm:p-4"
                 >
-                  <div className="flex items-center justify-between text-xs font-medium text-slate-400">
-                    <span>Online ONUs</span>
-                    <Wifi className="h-4 w-4 text-emerald-400" />
+                  <div className="flex items-center justify-between gap-1.5 text-[11px] font-medium text-slate-400 sm:text-xs">
+                    <span className="truncate">Online ONUs</span>
+                    <Wifi className="h-3.5 w-3.5 shrink-0 text-emerald-400 sm:h-4 sm:w-4" />
                   </div>
-                  <div className="mt-2 font-mono text-3xl font-bold tracking-tight text-white">
+                  <div className="mt-1 font-mono text-2xl font-bold tracking-tight text-white sm:mt-2 sm:text-3xl">
                     {onlineOnus.length}
                   </div>
-                  <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
-                    Active ·{' '}
+                  <div className="mt-2 flex flex-wrap items-center gap-x-1.5 border-t border-slate-800/80 pt-1.5 font-mono text-[10px] text-slate-400 sm:mt-3 sm:pt-2.5 sm:text-[11px]">
+                    <span>Active</span>
+                    <span>·</span>
                     <span
                       onClick={(e) => {
                         e.stopPropagation();
@@ -5241,7 +5298,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       className="text-emerald-400 hover:underline"
                       title="Lihat semua Authorized ONU"
                     >
-                      Authorized {configuredOnus.length}
+                      Auth {configuredOnus.length}
                     </span>
                   </div>
                 </div>
@@ -5254,16 +5311,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     setConfiguredOnusPage(1);
                     setActiveView('CONFIGURED');
                   }}
-                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-slate-600 hover:bg-slate-900"
+                  className="group min-w-0 cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-3 transition hover:border-slate-600 hover:bg-slate-900 sm:p-4"
                 >
-                  <div className="flex items-center justify-between text-xs font-medium text-slate-400">
-                    <span>Total Offline</span>
-                    <Power className="h-4 w-4 text-slate-400" />
+                  <div className="flex items-center justify-between gap-1.5 text-[11px] font-medium text-slate-400 sm:text-xs">
+                    <span className="truncate">Total Offline</span>
+                    <Power className="h-3.5 w-3.5 shrink-0 text-slate-400 sm:h-4 sm:w-4" />
                   </div>
-                  <div className="mt-2 font-mono text-3xl font-bold tracking-tight text-white">
+                  <div className="mt-1 font-mono text-2xl font-bold tracking-tight text-white sm:mt-2 sm:text-3xl">
                     {totalOfflineCount}
                   </div>
-                  <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
+                  <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 border-t border-slate-800/80 pt-1.5 font-mono text-[10px] text-slate-400 sm:mt-3 sm:pt-2.5 sm:text-[11px]">
                     <span
                       onClick={(e) => {
                         e.stopPropagation();
@@ -5276,8 +5333,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       title="Filter ONU Power Fail (DyingGasp)"
                     >
                       PwrFail {pwrFailOnus.length}
-                    </span>{' '}
-                    ·{' '}
+                    </span>
+                    <span>·</span>
                     <span
                       onClick={(e) => {
                         e.stopPropagation();
@@ -5289,7 +5346,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       className="text-slate-300 hover:underline"
                       title="Filter ONU Offline / N/A"
                     >
-                      Offline/N/A {otherOfflineOnus.length}
+                      N/A {otherOfflineOnus.length}
                     </span>
                   </div>
                 </div>
@@ -5302,21 +5359,23 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     setConfiguredOnusPage(1);
                     setActiveView('CONFIGURED');
                   }}
-                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-rose-500/40 hover:bg-slate-900"
+                  className="group min-w-0 cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-3 transition hover:border-rose-500/40 hover:bg-slate-900 sm:p-4"
                 >
-                  <div className="flex items-center justify-between text-xs font-medium text-slate-400">
-                    <span>ONU Loss</span>
-                    <AlertTriangle className="h-4 w-4 text-rose-400" />
+                  <div className="flex items-center justify-between gap-1.5 text-[11px] font-medium text-slate-400 sm:text-xs">
+                    <span className="truncate">ONU Loss</span>
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-400 sm:h-4 sm:w-4" />
                   </div>
-                  <div className="mt-2 font-mono text-3xl font-bold tracking-tight text-white">
+                  <div className="mt-1 font-mono text-2xl font-bold tracking-tight text-white sm:mt-2 sm:text-3xl">
                     {losOnus.length}
                   </div>
-                  <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
-                    Optical LoS · <span className="text-rose-400">Loss {losOnus.length}</span>
+                  <div className="mt-2 flex flex-wrap items-center gap-x-1.5 border-t border-slate-800/80 pt-1.5 font-mono text-[10px] text-slate-400 sm:mt-3 sm:pt-2.5 sm:text-[11px]">
+                    <span>Optical LoS</span>
+                    <span>·</span>
+                    <span className="text-rose-400">Loss {losOnus.length}</span>
                   </div>
                 </div>
 
-                {/* Card 5: Low signals (Redaman > 27 dB / <= -27.0 dBm) */}
+                {/* Card 5: Low signals (Full-width compact horizontal strip on mobile, standard card on sm+) */}
                 <div
                   onClick={() => {
                     setFilterPhaseStatus('ALL');
@@ -5324,43 +5383,49 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     setConfiguredOnusPage(1);
                     setActiveView('CONFIGURED');
                   }}
-                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-amber-500/40 hover:bg-slate-900"
+                  className="group col-span-2 min-w-0 cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-3 transition hover:border-amber-500/40 hover:bg-slate-900 sm:col-span-2 sm:p-4 lg:col-span-1"
                 >
-                  <div className="flex items-center justify-between text-xs font-medium text-slate-400">
-                    <span>Low Signals</span>
-                    <AlertTriangle className="h-4 w-4 text-amber-400" />
-                  </div>
-                  <div className="mt-2 font-mono text-3xl font-bold tracking-tight text-white">
-                    {totalLowSignalCount}
-                  </div>
-                  <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
-                    <span
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setFilterPhaseStatus('ALL');
-                        setFilterSignalLevel('WARNING');
-                        setConfiguredOnusPage(1);
-                        setActiveView('CONFIGURED');
-                      }}
-                      className="text-amber-400 hover:underline"
-                      title="Filter Warning (-27 s/d -30 dBm)"
-                    >
-                      Warning {warningSignalOnus.length}
-                    </span>{' '}
-                    ·{' '}
-                    <span
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setFilterPhaseStatus('ALL');
-                        setFilterSignalLevel('CRITICAL');
-                        setConfiguredOnusPage(1);
-                        setActiveView('CONFIGURED');
-                      }}
-                      className="text-rose-400 hover:underline"
-                      title="Filter Critical (<= -30 dBm)"
-                    >
-                      Critical {criticalSignalOnus.length}
-                    </span>
+                  <div className="flex items-center justify-between gap-2 sm:block">
+                    <div className="flex items-center gap-2 sm:flex sm:items-center sm:justify-between">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400 sm:order-2 sm:h-4 sm:w-4" />
+                      <span className="text-[11px] font-medium text-slate-400 sm:order-1 sm:text-xs">
+                        Low Signals <span className="text-[10px] text-slate-500 sm:hidden">(&gt;27dB)</span>
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 sm:mt-2 sm:block">
+                      <div className="font-mono text-xl font-bold tracking-tight text-white sm:text-3xl">
+                        {totalLowSignalCount}
+                      </div>
+                      <div className="flex items-center gap-1.5 font-mono text-[10px] text-slate-400 sm:mt-3 sm:border-t sm:border-slate-800/80 sm:pt-2.5 sm:text-[11px]">
+                        <span
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFilterPhaseStatus('ALL');
+                            setFilterSignalLevel('WARNING');
+                            setConfiguredOnusPage(1);
+                            setActiveView('CONFIGURED');
+                          }}
+                          className="text-amber-400 hover:underline"
+                          title="Filter Warning (-27 s/d -30 dBm)"
+                        >
+                          Warn {warningSignalOnus.length}
+                        </span>
+                        <span>·</span>
+                        <span
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFilterPhaseStatus('ALL');
+                            setFilterSignalLevel('CRITICAL');
+                            setConfiguredOnusPage(1);
+                            setActiveView('CONFIGURED');
+                          }}
+                          className="text-rose-400 hover:underline"
+                          title="Filter Critical (<= -30 dBm)"
+                        >
+                          Crit {criticalSignalOnus.length}
+                        </span>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -6150,20 +6215,20 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               );
               if (disconnectedOlts.length === 0) return null;
               return (
-                <div className="flex flex-col justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/35 px-4 py-3 text-rose-200 sm:flex-row sm:items-center">
-                  <div className="flex items-start gap-3">
-                    <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-rose-500/40 bg-rose-500/15">
-                      <AlertTriangle className="h-4 w-4 text-rose-400" />
+                <div className="flex flex-col justify-between gap-2.5 rounded-xl border border-rose-500/40 bg-rose-950/35 px-3 py-2.5 text-rose-200 sm:flex-row sm:items-center sm:gap-3 sm:px-4 sm:py-3">
+                  <div className="flex min-w-0 items-start gap-2.5 sm:gap-3">
+                    <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-rose-500/40 bg-rose-500/15 sm:h-8 sm:w-8">
+                      <AlertTriangle className="h-3.5 w-3.5 text-rose-400 sm:h-4 sm:w-4" />
                     </div>
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="h-2 w-2 rounded-full bg-rose-500 animate-pulse" />
-                        <span className="text-xs font-bold tracking-wide text-rose-300">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+                        <span className="h-2 w-2 shrink-0 rounded-full bg-rose-500 animate-pulse" />
+                        <span className="text-[11px] font-bold tracking-wide text-rose-300 sm:text-xs">
                           OLT Disconnect ({disconnectedOlts.length} perangkat tidak terhubung)
                         </span>
                       </div>
-                      <p className="text-[11px] leading-relaxed text-rose-200/85">
-                        Koneksi ke OLT terputus atau perangkat dalam keadaan mati. Seluruh ONU pada OLT yang disconnect otomatis berstatus <span className="font-semibold text-white">Offline</span> sampai koneksi OLT kembali normal.
+                      <p className="text-[10px] leading-relaxed text-rose-200/85 sm:text-[11px]">
+                        Koneksi OLT terputus. Seluruh ONU pada OLT ini otomatis berstatus <span className="font-semibold text-white">Offline</span> sampai koneksi pulih.
                       </p>
                       <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                         {disconnectedOlts.map((offOlt) => {
@@ -6173,13 +6238,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                           return (
                             <span
                               key={offOlt.id}
-                              className="inline-flex items-center gap-1.5 rounded-md border border-rose-500/35 bg-slate-950/70 px-2 py-0.5 font-mono text-[11px] text-rose-200"
+                              className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-md border border-rose-500/35 bg-slate-950/70 px-2 py-0.5 font-mono text-[10px] text-rose-200 sm:text-[11px]"
                             >
-                              <span className="h-1.5 w-1.5 rounded-full bg-rose-500" />
+                              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-500" />
                               <span className="font-semibold text-white">
                                 {offOlt.id} - {offOlt.name}
                               </span>
-                              <span className="text-rose-300/80">
+                              <span className="hidden text-rose-300/80 sm:inline">
                                 ({offOlt.ip_address}:{offOlt.telnet_port})
                               </span>
                               <span className="text-slate-500">·</span>
@@ -6190,14 +6255,14 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       </div>
                     </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
+                  <div className="grid shrink-0 grid-cols-2 gap-2 sm:flex sm:items-center">
                     <button
                       type="button"
                       onClick={() => {
                         void pollOltRealtimeStatus();
                         showToast('Memeriksa ulang status koneksi OLT secara real-time...');
                       }}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-600/20 px-3 py-1.5 text-[11px] font-semibold text-rose-200 transition hover:bg-rose-600/35 hover:text-white cursor-pointer"
+                      className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-600/20 px-2.5 py-1.5 text-[11px] font-semibold text-rose-200 transition hover:bg-rose-600/35 hover:text-white cursor-pointer sm:px-3"
                     >
                       <RefreshCw className="h-3.5 w-3.5" />
                       Cek Ulang
@@ -6205,7 +6270,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     <button
                       type="button"
                       onClick={() => setActiveView('OLTS_LIST')}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-[11px] font-semibold text-slate-200 transition hover:bg-slate-800 hover:text-white cursor-pointer"
+                      className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-[11px] font-semibold text-slate-200 transition hover:bg-slate-800 hover:text-white cursor-pointer sm:px-3"
                     >
                       <Server className="h-3.5 w-3.5 text-rose-400" />
                       Lihat OLT
@@ -11635,374 +11700,216 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             })()}
 
             {activeView === 'GRAPHS' && (() => {
-              const allUplinks = oltGraphsData?.uplinks || [];
-              const allPonPorts = (oltGraphsData?.ponPorts || []).filter((p) =>
-                graphsShowAllPon ? true : p.activeOnus > 0 || p.totalOnus > 0
+              const allUplinks = (oltGraphsData?.uplinks || []).filter(
+                (u) =>
+                  /^(?:x?gei|smartgroup)(?:_|\d)/i.test(String(u.interfaceName || '').trim()) &&
+                  !String(u.interfaceName || '').includes('.')
               );
-              const allItems: OltInterfaceGraphItem[] = [
-                ...allUplinks,
-                ...(oltGraphsData?.ponPorts || []),
-              ];
-              const selectedGraphItem = selectedGraphInterfaceName
-                ? allItems.find(
-                    (it) =>
-                      it.interfaceName.toLowerCase() ===
-                      selectedGraphInterfaceName.toLowerCase()
-                  ) || null
-                : null;
+              const allPonPorts = (oltGraphsData?.ponPorts || []).filter(
+                (p) =>
+                  /^gpon-olt_/i.test(String(p.interfaceName || '').trim()) &&
+                  (graphsShowAllPon ? true : p.activeOnus > 0 || p.totalOnus > 0)
+              );
 
-              const renderGraphChartBlock = (
-                item: OltInterfaceGraphItem,
-                periodKey: 'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
-                watermarkLabel: string,
-                isClickableCard: boolean
-              ) => {
-                const series =
-                  periodKey === 'Live2h'
-                    ? item.periods.Live2h || item.periods.Daily
-                    : item.periods[periodKey];
-                const oltDisplayName = oltGraphsData?.oltName || 'ZTE-C320-OLT';
-                const probeGroup =
-                  item.interfaceType === 'UPLINK'
-                    ? `BGP Core ${oltDisplayName}`
-                    : `GPON Matrix ${oltDisplayName}`;
-                const breadcrumbPath = `JetCyber > Local Probe > ${oltDisplayName} > ${probeGroup} > ${item.title}`;
+              const renderLiveTrafficCard = (item: OltInterfaceGraphItem) => {
+                const series = item.periods.Live2h || item.periods.Daily;
+                const oltDisplayName = oltGraphsData?.oltName || 'ZTE-OLT';
+                const labelPrefix = item.interfaceType === 'UPLINK' ? 'UPLINK' : 'PON';
+                const headerLabel = `${labelPrefix} • ${item.interfaceName} (${oltDisplayName})`;
 
                 return (
                   <PrtgTrafficGraph
-                    key={`${item.interfaceName}-${periodKey}`}
-                    breadcrumbPath={breadcrumbPath}
-                    watermarkTitle={watermarkLabel}
+                    key={`${item.interfaceName}-Live2h`}
+                    breadcrumbPath={headerLabel}
+                    watermarkTitle="Live Traffic (Real-Time)"
                     series={series}
                     sensorId={2000 + (item.id || 1)}
                     polledAtStr={oltGraphsData?.polledAtWib || jakartaClockStr}
-                    compact={isClickableCard && graphsGridMode === '4x1'}
-                    activePeriod={isClickableCard ? graphsOverviewPeriod : periodKey}
-                    onSelectPeriod={
-                      isClickableCard
-                        ? (p) => setGraphsOverviewPeriod(p)
-                        : undefined
-                    }
-                    onClickGraph={
-                      isClickableCard
-                        ? () => {
-                            setSelectedGraphInterfaceName(item.interfaceName);
-                            setSelectedGraphPeriod('ALL_PERIODS');
-                          }
-                        : undefined
-                    }
-                    clickHintText={
-                      isClickableCard
-                        ? 'Detail Harian / Mingguan / Bulanan / Tahunan →'
-                        : undefined
-                    }
+                    compact={graphsGridMode === '4x1'}
                   />
                 );
               };
 
-              const overviewWatermarkMap: Record<
-                'Live2h' | 'Daily' | 'Weekly' | 'Monthly' | 'Yearly',
-                string
-              > = {
-                Live2h: 'Live Graph, 2 hours',
-                Daily: 'Live Graph, 24 hours',
-                Weekly: 'Weekly Graph, 7 days',
-                Monthly: 'Monthly Graph, 30 days',
-                Yearly: 'Yearly Graph, 12 months',
-              };
-
               const graphsRowGridClass =
                 graphsGridMode === '4x1'
-                  ? 'grid grid-cols-1 gap-3.5 md:grid-cols-2 xl:grid-cols-4'
+                  ? 'grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4'
                   : graphsGridMode === '2x1'
-                    ? 'grid grid-cols-1 gap-4 lg:grid-cols-2'
-                    : 'grid grid-cols-1 gap-4';
+                    ? 'grid grid-cols-1 gap-3.5 lg:grid-cols-2'
+                    : 'grid grid-cols-1 gap-3.5';
 
               return (
                 <div className="space-y-4">
-                  {/* Top Control Bar for OLT Graphs */}
-                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#1e3a5f] bg-[#0c1c30]/95 p-3.5">
-                    <div className="flex flex-wrap items-center gap-3">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-slate-200">OLT:</span>
-                        <select
-                          value={graphsOltId}
-                          onChange={(e) => {
-                            const nextId = Number(e.target.value);
-                            setGraphsOltId(nextId);
-                            setSelectedGraphInterfaceName(null);
-                          }}
-                          className="rounded border border-slate-600 bg-[#132842] px-2.5 py-1.5 font-bold text-white"
-                        >
-                          {db.olts.map((o) => (
-                            <option key={o.id} value={o.id}>
-                              {o.name} ({o.ip_address})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      {/* Filter Tabs: Semua / Uplink / PON */}
-                      <div className="flex items-center gap-1 rounded border border-[#1e3a5f] bg-[#091526] p-1">
-                        {(
-                          [
-                            { id: 'ALL', label: 'Semua (Uplink + PON)' },
-                            {
-                              id: 'UPLINK',
-                              label: `Uplink (${allUplinks.length})`,
-                            },
-                            {
-                              id: 'PON',
-                              label: `PON Ports (${oltGraphsData?.ponPorts?.length || 0})`,
-                            },
-                          ] as const
-                        ).map((tab) => (
-                          <button
-                            key={tab.id}
-                            type="button"
-                            onClick={() => {
-                              setGraphsFilterType(tab.id);
+                  {/* Top Control Bar — Mobile-First Responsive (Live Traffic Uplink & PON Only) */}
+                  <div className="flex flex-col gap-3 rounded-xl border border-[#1e3a5f] bg-[#0c1c30]/95 p-3 sm:p-3.5">
+                    <div className="flex flex-col gap-2.5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-2.5">
+                        {/* OLT Selector */}
+                        <div className="flex items-center gap-2">
+                          <span className="shrink-0 font-bold text-slate-300">OLT:</span>
+                          <select
+                            value={graphsOltId}
+                            onChange={(e) => {
+                              const nextId = Number(e.target.value);
+                              setGraphsOltId(nextId);
                               setSelectedGraphInterfaceName(null);
                             }}
-                            className={`rounded px-2.5 py-1 text-xs font-bold transition ${
-                              graphsFilterType === tab.id
-                                ? 'bg-[#0275d8] text-white'
-                                : 'text-slate-300 hover:text-white'
-                            }`}
+                            className="min-w-0 flex-1 rounded-lg border border-slate-600 bg-[#132842] px-2.5 py-1.5 font-bold text-white sm:flex-none"
                           >
-                            {tab.label}
-                          </button>
-                        ))}
+                            {db.olts.map((o) => (
+                              <option key={o.id} value={o.id}>
+                                {o.name} ({o.ip_address})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {/* Filter Tabs: Semua / Uplink / PON */}
+                        <div className="grid grid-cols-3 gap-1 rounded-lg border border-[#1e3a5f] bg-[#091526] p-1 sm:flex sm:items-center">
+                          {(
+                            [
+                              { id: 'ALL', label: 'Uplink & PON' },
+                              {
+                                id: 'UPLINK',
+                                label: `Uplink (${allUplinks.length})`,
+                              },
+                              {
+                                id: 'PON',
+                                label: `PON (${allPonPorts.length})`,
+                              },
+                            ] as const
+                          ).map((tab) => (
+                            <button
+                              key={tab.id}
+                              type="button"
+                              onClick={() => {
+                                setGraphsFilterType(tab.id);
+                                setSelectedGraphInterfaceName(null);
+                              }}
+                              className={`truncate rounded-md px-2 py-1 text-[11px] font-bold transition sm:px-2.5 sm:text-xs ${
+                                graphsFilterType === tab.id
+                                  ? 'bg-[#0275d8] text-white'
+                                  : 'text-slate-300 hover:text-white'
+                              }`}
+                            >
+                              {tab.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        {graphsFilterType !== 'UPLINK' && (
+                          <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-slate-300 sm:text-xs">
+                            <input
+                              type="checkbox"
+                              checked={!graphsShowAllPon}
+                              onChange={(e) => setGraphsShowAllPon(!e.target.checked)}
+                              className="rounded border-slate-600"
+                            />
+                            Hanya PON berisi ONU
+                          </label>
+                        )}
+
+                        {/* Desktop Grid Layout Switcher */}
+                        <div className="hidden items-center gap-1 rounded-lg border border-[#1e3a5f] bg-[#091526] p-1 md:flex">
+                          <span className="px-1.5 text-[11px] font-semibold text-slate-400">
+                            Kolom:
+                          </span>
+                          {(
+                            [
+                              { id: '1x1', label: '1x1' },
+                              { id: '2x1', label: '2x1' },
+                              { id: '4x1', label: '4x1' },
+                            ] as const
+                          ).map((mode) => (
+                            <button
+                              key={mode.id}
+                              type="button"
+                              onClick={() => setGraphsGridMode(mode.id)}
+                              className={`rounded px-2 py-0.5 font-mono text-xs font-bold transition ${
+                                graphsGridMode === mode.id
+                                  ? 'bg-[#0275d8] text-white shadow'
+                                  : 'text-slate-300 hover:bg-[#132842] hover:text-white'
+                              }`}
+                            >
+                              {mode.label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
 
-                      {graphsFilterType !== 'UPLINK' && (
-                        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-300">
-                          <input
-                            type="checkbox"
-                            checked={!graphsShowAllPon}
-                            onChange={(e) => setGraphsShowAllPon(!e.target.checked)}
-                            className="rounded border-slate-600"
-                          />
-                          Hanya PON Port berisi ONU
-                        </label>
-                      )}
-
-                      {/* Selector Layout Kolom per Baris: 1x1, 2x1, 4x1 */}
-                      <div className="flex items-center gap-1 rounded border border-[#1e3a5f] bg-[#091526] p-1">
-                        <span className="px-1.5 text-[11px] font-semibold text-slate-400">
-                          Baris:
+                      <div className="flex flex-wrap items-center justify-between gap-2 sm:justify-end">
+                        <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/50 px-2.5 py-1 font-mono text-[10.5px] text-emerald-300 sm:text-[11px]">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          LIVE • {jakartaClockStr} WIB
                         </span>
-                        {(
-                          [
-                            { id: '1x1', label: '1x1' },
-                            { id: '2x1', label: '2x1' },
-                            { id: '4x1', label: '4x1' },
-                          ] as const
-                        ).map((mode) => (
-                          <button
-                            key={mode.id}
-                            type="button"
-                            onClick={() => setGraphsGridMode(mode.id)}
-                            className={`rounded px-2.5 py-1 font-mono text-xs font-bold transition ${
-                              graphsGridMode === mode.id
-                                ? 'bg-[#0275d8] text-white shadow'
-                                : 'text-slate-300 hover:bg-[#132842] hover:text-white'
+                        <button
+                          type="button"
+                          disabled={graphsPollingLive}
+                          onClick={() => void pollOltGraphsLive(graphsOltId, false)}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-[#0275d8] px-3 py-1.5 text-[11px] font-bold text-white hover:bg-[#025aa5] disabled:opacity-50 sm:text-xs"
+                        >
+                          <RefreshCw
+                            className={`h-3.5 w-3.5 ${
+                              graphsPollingLive ? 'animate-spin' : ''
                             }`}
-                            title={`Tampilkan ${mode.label} grafik setiap baris`}
-                          >
-                            {mode.label}
-                          </button>
-                        ))}
+                          />
+                          {graphsPollingLive ? 'Polling...' : 'Refresh Live'}
+                        </button>
                       </div>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2.5">
-                      <span className="rounded border border-emerald-500/40 bg-emerald-950/50 px-2.5 py-1 font-mono text-[11px] text-emerald-300">
-                        Zona Waktu: Asia/Jakarta (WIB) • {jakartaClockStr} WIB
-                      </span>
-                      <button
-                        type="button"
-                        disabled={graphsPollingLive}
-                        onClick={() => void pollOltGraphsLive(graphsOltId, false)}
-                        className="flex items-center gap-1.5 rounded bg-[#0275d8] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#025aa5] disabled:opacity-50"
-                      >
-                        <RefreshCw
-                          className={`h-3.5 w-3.5 ${
-                            graphsPollingLive ? 'animate-spin' : ''
-                          }`}
-                        />
-                        {graphsPollingLive
-                          ? 'Polling OLT...'
-                          : 'Poll Real-Time Traffic (Live OLT)'}
-                      </button>
                     </div>
                   </div>
 
-                  {/* Drill-Down View when user clicks any Uplink or PON Graph */}
-                  {selectedGraphItem ? (
-                    <div className="space-y-4 rounded-lg border border-sky-500/50 bg-[#081322] p-4 shadow-2xl">
-                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#1e3a5f] pb-3">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedGraphInterfaceName(null)}
-                              className="rounded bg-[#132842] px-2.5 py-1 text-xs font-bold text-sky-300 hover:bg-[#1c395d] hover:text-white"
-                            >
-                              ← Kembali ke Semua Grafik
-                            </button>
-                            <h2 className="font-mono text-sm font-bold text-white">
-                              Detail Grafik Interface: {selectedGraphItem.title}
-                            </h2>
-                          </div>
-                          <p className="mt-1 text-[11px] text-slate-300">
-                            Menampilkan grafik trafik Real-Time OLT: 2 Jam (Live), Harian (24 Jam • Interval 5 Menit), Mingguan (7 Hari), Bulanan (30 Hari), dan Tahunan (12 Bulan) dalam Zona Waktu Jakarta (WIB / UTC+7).
-                          </p>
-                        </div>
-
-                        {/* Period selector buttons */}
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          {(
-                            [
-                              {
-                                id: 'ALL_PERIODS',
-                                label: 'Semua Periode',
-                              },
-                              { id: 'Live2h', label: 'Live (2 Jam)' },
-                              { id: 'Daily', label: 'Harian (24 Jam / 5m)' },
-                              { id: 'Weekly', label: 'Mingguan (7 Hari)' },
-                              { id: 'Monthly', label: 'Bulanan (30 Hari)' },
-                              { id: 'Yearly', label: 'Tahunan (12 Bulan)' },
-                            ] as const
-                          ).map((pTab) => (
-                            <button
-                              key={pTab.id}
-                              type="button"
-                              onClick={() => setSelectedGraphPeriod(pTab.id)}
-                              className={`rounded px-3 py-1.5 text-xs font-bold transition ${
-                                selectedGraphPeriod === pTab.id
-                                  ? 'bg-[#0275d8] text-white shadow'
-                                  : 'bg-[#132842] text-slate-300 hover:text-white'
-                              }`}
-                            >
-                              {pTab.label}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div
-                        className={
-                          selectedGraphPeriod === 'ALL_PERIODS'
-                            ? 'grid grid-cols-1 gap-4 lg:grid-cols-2'
-                            : 'space-y-4'
-                        }
-                      >
-                        {(selectedGraphPeriod === 'ALL_PERIODS' ||
-                          selectedGraphPeriod === 'Live2h') &&
-                          renderGraphChartBlock(
-                            selectedGraphItem,
-                            'Live2h',
-                            'Live Graph, 2 hours',
-                            false
-                          )}
-
-                        {(selectedGraphPeriod === 'ALL_PERIODS' ||
-                          selectedGraphPeriod === 'Daily') &&
-                          renderGraphChartBlock(
-                            selectedGraphItem,
-                            'Daily',
-                            'Live Graph, 24 hours',
-                            false
-                          )}
-
-                        {(selectedGraphPeriod === 'ALL_PERIODS' ||
-                          selectedGraphPeriod === 'Weekly') &&
-                          renderGraphChartBlock(
-                            selectedGraphItem,
-                            'Weekly',
-                            'Weekly Graph, 7 days',
-                            false
-                          )}
-
-                        {(selectedGraphPeriod === 'ALL_PERIODS' ||
-                          selectedGraphPeriod === 'Monthly') &&
-                          renderGraphChartBlock(
-                            selectedGraphItem,
-                            'Monthly',
-                            'Monthly Graph, 30 days',
-                            false
-                          )}
-
-                        {(selectedGraphPeriod === 'ALL_PERIODS' ||
-                          selectedGraphPeriod === 'Yearly') &&
-                          renderGraphChartBlock(
-                            selectedGraphItem,
-                            'Yearly',
-                            'Yearly Graph, 12 months',
-                            false
-                          )}
-                      </div>
+                  {graphsLoading && !oltGraphsData && (
+                    <div className="rounded-xl border border-[#1e3a5f] bg-[#0c1c30]/80 p-6 text-center text-slate-300">
+                      Memuat live traffic Uplink &amp; PON OLT...
                     </div>
-                  ) : (
-                    <>
-                      {graphsLoading && !oltGraphsData && (
-                        <div className="rounded border border-[#1e3a5f] bg-[#0c1c30]/80 p-6 text-center text-slate-300">
-                          Memuat grafik real-time Uplink & PON OLT (WIB)...
+                  )}
+
+                  {/* SECTION 1: LIVE TRAFFIC UPLINK INTERFACES */}
+                  {(graphsFilterType === 'ALL' || graphsFilterType === 'UPLINK') && (
+                    <div className="space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-1.5">
+                        <h2 className="flex items-center gap-2 font-mono text-xs font-bold text-emerald-400 sm:text-sm">
+                          <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400" />
+                          <span>1. Live Traffic Uplink ({allUplinks.length})</span>
+                        </h2>
+                        <span className="text-[10.5px] text-slate-400 sm:text-[11px]">
+                          Interface fisik Uplink saja (tanpa interface VLAN)
+                        </span>
+                      </div>
+                      {allUplinks.length === 0 ? (
+                        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-center text-xs text-slate-400">
+                          Belum ada interface Uplink terdeteksi pada OLT ini.
+                        </div>
+                      ) : (
+                        <div className={graphsRowGridClass}>
+                          {allUplinks.map((uItem) => renderLiveTrafficCard(uItem))}
                         </div>
                       )}
+                    </div>
+                  )}
 
-                      {/* SECTION 1: UPLINK PORTS */}
-                      {(graphsFilterType === 'ALL' ||
-                        graphsFilterType === 'UPLINK') &&
-                        allUplinks.length > 0 && (
-                          <div className="space-y-3">
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <h2 className="font-mono text-sm font-bold text-emerald-400">
-                                1. Grafik Uplink OLT — Real-Time Telemetry ({overviewWatermarkMap[graphsOverviewPeriod]} • Layout {graphsGridMode} • WIB)
-                              </h2>
-                              <span className="text-[11px] text-slate-400">
-                                Klik grafik mana saja untuk membuka detail 2 Jam, Harian (24 Jam), Mingguan, Bulanan & Tahunan
-                              </span>
-                            </div>
-                            <div className={graphsRowGridClass}>
-                              {allUplinks.map((uItem) =>
-                                renderGraphChartBlock(
-                                  uItem,
-                                  graphsOverviewPeriod,
-                                  overviewWatermarkMap[graphsOverviewPeriod],
-                                  true
-                                )
-                              )}
-                            </div>
-                          </div>
-                        )}
-
-                      {/* SECTION 2: GPON PON PORTS */}
-                      {(graphsFilterType === 'ALL' ||
-                        graphsFilterType === 'PON') && (
-                        <div className="space-y-3 pt-2">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <h2 className="font-mono text-sm font-bold text-sky-400">
-                              2. Grafik GPON Port OLT (`gpon-olt_1/3/*`) — Real-Time Telemetry ({overviewWatermarkMap[graphsOverviewPeriod]} • Layout {graphsGridMode} • WIB)
-                            </h2>
-                            <span className="text-[11px] text-slate-400">
-                              Menampilkan {allPonPorts.length} PON Port • Klik grafik untuk melihat 2 Jam, Harian, Mingguan, Bulanan & Tahunan
-                            </span>
-                          </div>
-                          <div className={graphsRowGridClass}>
-                            {allPonPorts.map((pItem) =>
-                              renderGraphChartBlock(
-                                pItem,
-                                graphsOverviewPeriod,
-                                overviewWatermarkMap[graphsOverviewPeriod],
-                                true
-                              )
-                            )}
-                          </div>
+                  {/* SECTION 2: LIVE TRAFFIC GPON PON PORTS */}
+                  {(graphsFilterType === 'ALL' || graphsFilterType === 'PON') && (
+                    <div className="space-y-2.5 pt-1">
+                      <div className="flex flex-wrap items-center justify-between gap-1.5">
+                        <h2 className="flex items-center gap-2 font-mono text-xs font-bold text-sky-400 sm:text-sm">
+                          <span className="h-2 w-2 shrink-0 rounded-full bg-sky-400" />
+                          <span>2. Live Traffic PON Port ({allPonPorts.length})</span>
+                        </h2>
+                        <span className="text-[10.5px] text-slate-400 sm:text-[11px]">
+                          Real-time traffic port GPON aktif
+                        </span>
+                      </div>
+                      {allPonPorts.length === 0 ? (
+                        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-center text-xs text-slate-400">
+                          Tidak ada PON Port sesuai filter saat ini.
+                        </div>
+                      ) : (
+                        <div className={graphsRowGridClass}>
+                          {allPonPorts.map((pItem) => renderLiveTrafficCard(pItem))}
                         </div>
                       )}
-                    </>
+                    </div>
                   )}
                 </div>
               );
@@ -13432,16 +13339,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
          =================================================================== */}
       {showEditBrandModal && !isViewerUser && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3 backdrop-blur-xs sm:p-4"
           onClick={() => setShowEditBrandModal(false)}
         >
           <div
-            className="animate-modal-in w-full max-w-lg overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 text-xs text-slate-100 shadow-2xl"
+            className="animate-modal-in flex max-h-[90dvh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 text-xs text-slate-100 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
-              <div className="flex items-center gap-2.5">
-                <div className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-lg bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
+            <div className="flex shrink-0 items-center justify-between border-b border-slate-800 px-4 py-3 sm:px-6 sm:py-4">
+              <div className="flex min-w-0 items-center gap-2.5">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30 sm:h-9 sm:w-9">
                   {brandLogoDraft ? (
                     <img
                       src={brandLogoDraft}
@@ -13452,25 +13359,25 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     <Wifi className="h-4 w-4" />
                   )}
                 </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">
-                    Branding, Logo &amp; Judul Tab Browser
+                <div className="min-w-0">
+                  <h3 className="truncate text-sm font-bold text-white">
+                    Branding, Logo &amp; Judul Tab
                   </h3>
-                  <p className="text-[11px] text-slate-400">
-                    Sesuaikan logo, nama brand di Header/Login, serta judul &amp; ikon tab browser
+                  <p className="truncate text-[11px] text-slate-400">
+                    Disimpan live di database untuk semua perangkat
                   </p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setShowEditBrandModal(false)}
-                className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+                className="shrink-0 rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveBrandName} className="space-y-4 p-6">
+            <form onSubmit={handleSaveBrandName} className="space-y-3.5 overflow-y-auto p-4 sm:space-y-4 sm:p-6">
               {/* Live Preview: Browser Tab + Header */}
               <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3 space-y-2.5">
                 <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
@@ -13589,7 +13496,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </p>
               </div>
 
-              <div className="flex items-center justify-between border-t border-slate-800 pt-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-3.5 sm:pt-4">
                 <button
                   type="button"
                   onClick={() => {
@@ -13605,15 +13512,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   <button
                     type="button"
                     onClick={() => setShowEditBrandModal(false)}
-                    className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 font-semibold text-slate-300 hover:bg-slate-700 cursor-pointer"
+                    className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 font-semibold text-slate-300 hover:bg-slate-700 cursor-pointer sm:px-3.5 sm:py-2"
                   >
                     Batal
                   </button>
                   <button
                     type="submit"
-                    className="rounded-lg bg-sky-600 px-4 py-2 font-bold text-white hover:bg-sky-500 cursor-pointer"
+                    disabled={isSavingBrand}
+                    className="rounded-lg bg-sky-600 px-3.5 py-1.5 font-bold text-white hover:bg-sky-500 disabled:opacity-60 cursor-pointer sm:px-4 sm:py-2"
                   >
-                    Simpan Perubahan
+                    {isSavingBrand ? 'Menyimpan...' : 'Simpan Perubahan'}
                   </button>
                 </div>
               </div>
