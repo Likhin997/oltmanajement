@@ -914,40 +914,54 @@ async function loadDatabaseState(): Promise<SmartOltDatabaseState> {
   }
 }
 
-if (sqliteState) {
-  sqliteState.users = bootstrapAndHashUsers(sqliteState.users);
-  if (
-    sqliteState.olts.length === 0 &&
-    sqliteState.onus.length === 0 &&
-    fs.existsSync(path.join(dataDir, 'local_preview_seed.json'))
-  ) {
+  const candidateSeedPaths = [
+    path.join(dataDir, 'local_preview_seed.json'),
+    path.resolve(process.cwd(), 'local_preview_seed.json'),
+  ];
+  const activeSeedPath = candidateSeedPaths.find((p) => fs.existsSync(p));
+
+  if (sqliteState) {
+    sqliteState.users = bootstrapAndHashUsers(sqliteState.users);
+    if (
+      sqliteState.olts.length === 0 &&
+      sqliteState.onus.length === 0 &&
+      activeSeedPath
+    ) {
+      try {
+        const rawSeed = JSON.parse(
+          fs.readFileSync(activeSeedPath, 'utf8')
+        ) as Partial<SmartOltDatabaseState>;
+        const seeded: SmartOltDatabaseState = {
+          ...INITIAL_DB_STATE,
+          ...rawSeed,
+          users: bootstrapAndHashUsers(rawSeed.users || sqliteState.users),
+        };
+        await saveDatabaseState(seeded);
+        return seeded;
+      } catch {
+        // ignore seed parse error
+      }
+    }
+    latestMemoryState = JSON.parse(JSON.stringify(sqliteState)) as SmartOltDatabaseState;
+    return sqliteState;
+  }
+
+  if (activeSeedPath) {
     try {
-      const seeded = JSON.parse(
-        fs.readFileSync(path.join(dataDir, 'local_preview_seed.json'), 'utf8')
-      ) as SmartOltDatabaseState;
-      seeded.users = bootstrapAndHashUsers(seeded.users);
+      const rawSeed = JSON.parse(
+        fs.readFileSync(activeSeedPath, 'utf8')
+      ) as Partial<SmartOltDatabaseState>;
+      const seeded: SmartOltDatabaseState = {
+        ...INITIAL_DB_STATE,
+        ...rawSeed,
+        users: bootstrapAndHashUsers(rawSeed.users || INITIAL_DB_STATE.users),
+      };
       await saveDatabaseState(seeded);
       return seeded;
     } catch {
       // ignore seed parse error
     }
   }
-  latestMemoryState = JSON.parse(JSON.stringify(sqliteState)) as SmartOltDatabaseState;
-  return sqliteState;
-}
-
-if (fs.existsSync(path.join(dataDir, 'local_preview_seed.json'))) {
-  try {
-    const seeded = JSON.parse(
-      fs.readFileSync(path.join(dataDir, 'local_preview_seed.json'), 'utf8')
-    ) as SmartOltDatabaseState;
-    seeded.users = bootstrapAndHashUsers(seeded.users);
-    await saveDatabaseState(seeded);
-    return seeded;
-  } catch {
-    // ignore seed parse error
-  }
-}
 
 const bootstrappedDefault: SmartOltDatabaseState = {
   ...INITIAL_DB_STATE,
@@ -3269,6 +3283,34 @@ app.post(
         nextState.users = existingUsers;
       }
 
+      // Always preserve the server's real-time OLT ONLINE/OFFLINE status across client state syncs
+      if (Array.isArray(nextState.olts) && Array.isArray(currentDbState.olts)) {
+        nextState.olts = nextState.olts.map((o) => {
+          const prevOlt = currentDbState.olts.find((eo) => eo.id === o.id);
+          if (!prevOlt) return o;
+          return {
+            ...o,
+            status: prevOlt.status || o.status,
+          };
+        });
+        const offlineIds = new Set(
+          nextState.olts.filter((o) => o.status === 'OFFLINE').map((o) => o.id)
+        );
+        if (offlineIds.size > 0 && Array.isArray(nextState.onus)) {
+          nextState.onus = nextState.onus.map((u) =>
+            u.is_authorized && offlineIds.has(u.olt_id)
+              ? {
+                  ...u,
+                  phase_state: 'OffLine' as const,
+                  onu_rx_dbm: null,
+                  olt_rx_dbm: null,
+                  last_offline_reason: 'OLT Offline',
+                }
+              : u
+          );
+        }
+      }
+
       // Protect OLTs, Zones, Sectors, ODPs, and ONUs from accidental overwrite by a stale frontend state
       const isExplicitUserMutation = Boolean(req.body.userMutation);
       if (!allowShrink && !isExplicitUserMutation) {
@@ -4399,6 +4441,16 @@ app.post(
       });
 
       if (!telnetRes.reachable || !telnetRes.output.trim()) {
+        if (!telnetRes.reachable) {
+          const cascaded = cascadeOfflineOltsToOnusAndPorts({
+            ...state,
+            olts: state.olts.map((o) =>
+              o.id === oltId ? { ...o, status: 'OFFLINE' as const } : o
+            ),
+          });
+          await saveDatabaseState(cascaded.state);
+          state = cascaded.state;
+        }
         res.json({
           ok: false,
           reachable: false,
@@ -4493,6 +4545,10 @@ app.post(
       sourceLabel: 'Live Telnet Auto-Sync',
     });
 
+    nextState.olts = nextState.olts.map((o) =>
+      o.id === effectiveOltId ? { ...o, status: 'ONLINE' as const } : o
+    );
+
     await saveDatabaseState(nextState);
     console.log(
       `[OLT Live Sync] Completed for ${targetHost}:${targetPort} -> ${summary.vlans} VLANs, ${summary.onus} Configured ONUs, ${summary.uncfgOnus} Unconfigured ONUs, ${summary.uplinks} Uplinks, ${summary.cards} Cards`
@@ -4507,6 +4563,155 @@ app.post(
         unconfiguredOnus: summary.uncfgOnus,
       },
       state: sanitizeStateForClient(nextState, authUser?.role),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// Fast TCP reachability probe for real-time OLT Online/Offline status check
+function probeOltTcpReachable(
+  host: string,
+  port: number,
+  timeoutMs = 2500
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const cleanHost = String(host || '').trim();
+    const cleanPort = Number(port) || 23;
+    if (
+      !cleanHost ||
+      isBlockedSsrfHost(cleanHost, { allowLoopback: false }) ||
+      !isValidTcpPort(cleanPort)
+    ) {
+      resolve(false);
+      return;
+    }
+    const socket = new net.Socket();
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
+      }
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+    try {
+      socket.connect(cleanPort, cleanHost);
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+// Helper: When an OLT is OFFLINE, ensure all its authorized ONUs are marked OffLine (not working/online) and PON port online counts are 0
+function cascadeOfflineOltsToOnusAndPorts(state: SmartOltDatabaseState): {
+  state: SmartOltDatabaseState;
+  mutated: boolean;
+} {
+  const offlineOltIds = new Set(
+    (state.olts || []).filter((o) => o.status === 'OFFLINE').map((o) => o.id)
+  );
+  if (offlineOltIds.size === 0) {
+    return { state, mutated: false };
+  }
+  let mutated = false;
+  const nextOnus = (state.onus || []).map((u) => {
+    if (!u.is_authorized || !offlineOltIds.has(u.olt_id)) return u;
+    if (
+      u.phase_state !== 'OffLine' ||
+      u.onu_rx_dbm !== null ||
+      u.olt_rx_dbm !== null
+    ) {
+      mutated = true;
+      return {
+        ...u,
+        phase_state: 'OffLine' as const,
+        onu_rx_dbm: null,
+        olt_rx_dbm: null,
+        last_offline_reason: 'OLT Offline',
+      };
+    }
+    return u;
+  });
+  const nextPonPorts = (state.pon_ports || []).map((p) => {
+    if (!offlineOltIds.has(p.olt_id)) return p;
+    if (p.online_onus !== 0) {
+      mutated = true;
+      return { ...p, online_onus: 0 };
+    }
+    return p;
+  });
+  if (!mutated) {
+    return { state, mutated: false };
+  }
+  return {
+    state: {
+      ...state,
+      onus: nextOnus,
+      pon_ports: nextPonPorts,
+    },
+    mutated: true,
+  };
+}
+
+// POST /api/olts/ping-status — Fast real-time TCP health probe for all OLTs
+app.post('/api/olts/ping-status', async (req, res) => {
+  try {
+    if (!checkApiRateLimit(req, 'olts-ping-status', 180, 60_000)) {
+      res.status(429).json({ ok: false, error: 'Rate limit ping OLT tercapai.' });
+      return;
+    }
+    const state = await loadDatabaseState();
+    if (!Array.isArray(state.olts) || state.olts.length === 0) {
+      res.json({ ok: true, statuses: {}, changed: false });
+      return;
+    }
+
+    const statuses: Record<number, 'ONLINE' | 'OFFLINE'> = {};
+    let changed = false;
+
+    const results = await Promise.all(
+      state.olts.map(async (o) => {
+        const reachable = await probeOltTcpReachable(
+          o.ip_address,
+          o.telnet_port,
+          2500
+        );
+        const nextStatus: 'ONLINE' | 'OFFLINE' = reachable ? 'ONLINE' : 'OFFLINE';
+        statuses[o.id] = nextStatus;
+        if (o.status !== nextStatus) {
+          changed = true;
+        }
+        return { id: o.id, status: nextStatus };
+      })
+    );
+
+    const latestState = await loadDatabaseState();
+    const statusMap = new Map(results.map((r) => [r.id, r.status]));
+    const stateWithOltStatus: SmartOltDatabaseState = {
+      ...latestState,
+      olts: latestState.olts.map((o) => {
+        const st = statusMap.get(o.id);
+        return st ? { ...o, status: st } : o;
+      }),
+    };
+    const cascaded = cascadeOfflineOltsToOnusAndPorts(stateWithOltStatus);
+
+    if (changed || cascaded.mutated) {
+      await saveDatabaseState(cascaded.state);
+    }
+
+    res.json({
+      ok: true,
+      statuses,
+      changed: changed || cascaded.mutated,
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
@@ -4612,6 +4817,32 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       }
     }
 
+    // Quick 2.5s TCP reachability check before running full 16s Telnet command batch
+    const tcpAlive = await probeOltTcpReachable(
+      olt.ip_address,
+      olt.telnet_port,
+      2500
+    );
+    if (!tcpAlive) {
+      const latestState = await loadDatabaseState();
+      const cascaded = cascadeOfflineOltsToOnusAndPorts({
+        ...latestState,
+        olts: latestState.olts.map((o) =>
+          o.id === olt.id ? { ...o, status: 'OFFLINE' as const } : o
+        ),
+      });
+      if (olt.status !== 'OFFLINE' || cascaded.mutated) {
+        await saveDatabaseState(cascaded.state);
+      }
+      res.json({
+        ok: false,
+        reachable: false,
+        oltStatus: 'OFFLINE',
+        state: sanitizeStateForClient(cascaded.state, authUser?.role),
+      });
+      return;
+    }
+
     const telnetRes = await executeTelnetSession({
       host: olt.ip_address,
       port: olt.telnet_port,
@@ -4623,7 +4854,25 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
     });
 
     if (!telnetRes.reachable || !telnetRes.output.trim()) {
-      res.json({ ok: false, reachable: false, state: sanitizeStateForClient(state, authUser?.role) });
+      const latestState = await loadDatabaseState();
+      const nextStatus: 'ONLINE' | 'OFFLINE' = telnetRes.reachable
+        ? 'ONLINE'
+        : 'OFFLINE';
+      const cascaded = cascadeOfflineOltsToOnusAndPorts({
+        ...latestState,
+        olts: latestState.olts.map((o) =>
+          o.id === olt.id ? { ...o, status: nextStatus } : o
+        ),
+      });
+      if (olt.status !== nextStatus || cascaded.mutated) {
+        await saveDatabaseState(cascaded.state);
+      }
+      res.json({
+        ok: false,
+        reachable: telnetRes.reachable,
+        oltStatus: nextStatus,
+        state: sanitizeStateForClient(cascaded.state, authUser?.role),
+      });
       return;
     }
 

@@ -903,7 +903,18 @@ ${oltVlans
                       <span className="rounded bg-[#0275d8] px-1.5 py-0.5 font-mono text-[11px] font-bold text-white">
                         {olt.vpn_subnet}
                       </span>{' '}
-                      · <span className="text-sky-400">VPN connected</span>
+                      ·{' '}
+                      {olt.status === 'ONLINE' ? (
+                        <span className="inline-flex items-center gap-1 font-semibold text-emerald-400">
+                          <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                          Online (TCP Reachable)
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 font-semibold text-rose-400">
+                          <span className="h-2 w-2 rounded-full bg-rose-500 animate-pulse" />
+                          Offline (Unreachable)
+                        </span>
+                      )}
                     </td>
                   </tr>
                   <tr>
@@ -1154,7 +1165,11 @@ ${oltVlans
                 <div className="w-56 rounded border-2 border-slate-400 bg-gradient-to-b from-slate-200 to-slate-300 p-2 text-slate-900 shadow-xl">
                   <div className="mb-1 flex items-center justify-between rounded bg-slate-800 px-2 py-0.5 text-[9px] font-bold text-amber-400">
                     <span>ZXA10 {olt.hardware_model}</span>
-                    <span className="text-emerald-400">● RUN</span>
+                    {olt.status === 'ONLINE' ? (
+                      <span className="text-emerald-400">● RUN</span>
+                    ) : (
+                      <span className="text-rose-400 animate-pulse">● OFFLINE</span>
+                    )}
                   </div>
                   <div className="grid grid-cols-10 gap-0.5 border border-slate-500 bg-slate-100 p-1">
                     {Array.from({ length: 10 }, (_, slotIdx) => (
@@ -1162,7 +1177,11 @@ ${oltVlans
                         key={slotIdx}
                         className="flex h-24 flex-col items-center justify-between border border-slate-400 bg-slate-200 py-1"
                       >
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${
+                            olt.status === 'ONLINE' ? 'bg-emerald-500' : 'bg-rose-500'
+                          }`}
+                        />
                         <div className="h-12 w-1 bg-slate-400" />
                         <span className="text-[7px] font-mono font-bold">
                           S{slotIdx + 1}

@@ -796,7 +796,12 @@ export default function App() {
   const [filterZone, setFilterZone] = useState<string>('ANY');
   const [filterSplitter, setFilterSplitter] = useState<string>('ANY');
   const [filterVlan, setFilterVlan] = useState<string>('ANY');
-  const [filterSignalLevel, setFilterSignalLevel] = useState<'ALL' | 'GOOD' | 'WARNING' | 'CRITICAL'>('ALL');
+  const [filterPhaseStatus, setFilterPhaseStatus] = useState<
+    'ALL' | 'ONLINE' | 'OFFLINE' | 'LOS' | 'PWRFAIL' | 'OFFLINE_NA'
+  >('ALL');
+  const [filterSignalLevel, setFilterSignalLevel] = useState<
+    'ALL' | 'LOW' | 'GOOD' | 'WARNING' | 'CRITICAL'
+  >('ALL');
   const [configuredOnusPerPage, setConfiguredOnusPerPage] = useState<50 | 100 | 1000>(() => {
     try {
       const saved = Number(
@@ -2507,6 +2512,18 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       }
     }
     return true;
+  }).map((u) => {
+    const parentOlt = db.olts.find((o) => o.id === u.olt_id);
+    if (u.is_authorized && parentOlt && parentOlt.status === 'OFFLINE') {
+      return {
+        ...u,
+        phase_state: 'OffLine' as const,
+        onu_rx_dbm: null,
+        olt_rx_dbm: null,
+        last_offline_reason: 'OLT Offline',
+      };
+    }
+    return u;
   });
 
   const scopedDb: SmartOltDatabaseState = {
@@ -2529,16 +2546,19 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       o.phase_state !== 'LOS' &&
       o.phase_state !== 'DyingGasp'
   );
-  const totalOfflineCount =
-    losOnus.length + pwrFailOnus.length + otherOfflineOnus.length;
+  // Total Offline = ONU yang offline (PwrFail / DyingGasp + Offline / N/A), sedangkan ONU Loss masuk ke kartu ONU Loss tersendiri
+  const totalOfflineCount = pwrFailOnus.length + otherOfflineOnus.length;
+  // Redaman > 27 dB (<= -27.0 dBm) masuk ke Low Signals (Warning: -27.0 s/d -29.99 dBm, Critical: <= -30.0 dBm)
   const warningSignalOnus = configuredOnus.filter(
     (o) => o.onu_rx_dbm !== null && o.onu_rx_dbm <= -27.0 && o.onu_rx_dbm > -30.0
   );
   const criticalSignalOnus = configuredOnus.filter(
     (o) => o.onu_rx_dbm !== null && o.onu_rx_dbm <= -30.0
   );
-  const totalLowSignalCount =
-    warningSignalOnus.length + criticalSignalOnus.length;
+  const lowSignalOnus = configuredOnus.filter(
+    (o) => o.onu_rx_dbm !== null && o.onu_rx_dbm <= -27.0
+  );
+  const totalLowSignalCount = lowSignalOnus.length;
 
   // Filtered Configured ONUs
   const filteredConfiguredOnus = configuredOnus.filter((o) => {
@@ -2549,12 +2569,31 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     if (filterSplitter !== 'ANY' && o.odb_id !== Number(filterSplitter)) return false;
     if (filterVlan !== 'ANY' && o.vlan_id !== Number(filterVlan)) return false;
 
+    if (filterPhaseStatus !== 'ALL') {
+      if (filterPhaseStatus === 'ONLINE' && o.phase_state !== 'working') return false;
+      if (
+        filterPhaseStatus === 'OFFLINE' &&
+        (o.phase_state === 'working' || o.phase_state === 'LOS')
+      )
+        return false;
+      if (filterPhaseStatus === 'LOS' && o.phase_state !== 'LOS') return false;
+      if (filterPhaseStatus === 'PWRFAIL' && o.phase_state !== 'DyingGasp') return false;
+      if (
+        filterPhaseStatus === 'OFFLINE_NA' &&
+        (o.phase_state === 'working' ||
+          o.phase_state === 'LOS' ||
+          o.phase_state === 'DyingGasp')
+      )
+        return false;
+    }
+
     if (filterSignalLevel !== 'ALL') {
       const rx = o.onu_rx_dbm;
-      if (filterSignalLevel === 'GOOD' && (rx === null || rx < -26.99)) return false;
-      if (filterSignalLevel === 'WARNING' && (rx === null || rx >= -26.99 || rx < -29.99))
+      if (filterSignalLevel === 'GOOD' && (rx === null || rx <= -27.0)) return false;
+      if (filterSignalLevel === 'LOW' && (rx === null || rx > -27.0)) return false;
+      if (filterSignalLevel === 'WARNING' && (rx === null || rx > -27.0 || rx <= -30.0))
         return false;
-      if (filterSignalLevel === 'CRITICAL' && rx !== null && rx >= -29.99 && o.phase_state !== 'LOS')
+      if (filterSignalLevel === 'CRITICAL' && (rx === null || rx > -30.0))
         return false;
     }
 
@@ -2849,6 +2888,73 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     }
   }, [dbLoaded, autoSyncedInitial, db.olts]);
 
+  // Fast Real-Time OLT TCP Reachability Ping Poller (Every 5s)
+  const pollOltRealtimeStatus = async () => {
+    try {
+      const resp = await fetch('/api/olts/ping-status', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Background-Poll': '1',
+        },
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data && data.ok && data.statuses) {
+        const statuses = data.statuses as Record<number, 'ONLINE' | 'OFFLINE'>;
+        const recoveredOltIds: number[] = [];
+        setDb((prev) => {
+          for (const o of prev.olts) {
+            if (o.status === 'OFFLINE' && statuses[o.id] === 'ONLINE') {
+              recoveredOltIds.push(o.id);
+            }
+          }
+          const offlineIds = new Set(
+            prev.olts
+              .filter((o) => (statuses[o.id] || o.status) === 'OFFLINE')
+              .map((o) => o.id)
+          );
+          const hasOltChange = prev.olts.some(
+            (o) => statuses[o.id] && o.status !== statuses[o.id]
+          );
+          const hasOnuStillOnlineOnOfflineOlt = prev.onus.some(
+            (u) =>
+              u.is_authorized &&
+              offlineIds.has(u.olt_id) &&
+              (u.phase_state !== 'OffLine' || u.onu_rx_dbm !== null)
+          );
+          if (!hasOltChange && !hasOnuStillOnlineOnOfflineOlt) return prev;
+          skipNextServerSyncRef.current = true;
+          return {
+            ...prev,
+            olts: prev.olts.map((o) =>
+              statuses[o.id] ? { ...o, status: statuses[o.id] } : o
+            ),
+            onus: prev.onus.map((u) =>
+              u.is_authorized && offlineIds.has(u.olt_id)
+                ? {
+                    ...u,
+                    phase_state: 'OffLine' as const,
+                    onu_rx_dbm: null,
+                    olt_rx_dbm: null,
+                    last_offline_reason: 'OLT Offline',
+                  }
+                : u
+            ),
+            pon_ports: prev.pon_ports.map((p) =>
+              offlineIds.has(p.olt_id) ? { ...p, online_onus: 0 } : p
+            ),
+          };
+        });
+        for (const recId of recoveredOltIds) {
+          void pollRealtimeOltTelemetry(recId);
+        }
+      }
+    } catch {
+      // ignore network error
+    }
+  };
+
   // Background Real-Time OLT Status, Optical Power & MikroTik WAN IP Poller (Every 10s)
   const pollRealtimeOltTelemetry = async (targetOltId?: number, targetOnuId?: number) => {
     const oltToPoll =
@@ -2872,9 +2978,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
         }),
       });
       const data = await resp.json();
-      if (data && data.ok && !data.skipped && data.state) {
-        // If user edited Zone, ODP, Sector, or ONU metadata while this Telnet poll was in flight,
-        // merge non-destructively so user edits are 100% preserved!
+      if (data && !data.skipped && data.state) {
+        // Update OLT ONLINE/OFFLINE status and telemetry even when reachable === false
         if (lastUserMutationAtRef.current < pollStartedAt) {
           skipNextServerSyncRef.current = true;
         }
@@ -2887,6 +2992,11 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
   useEffect(() => {
     if (!dbLoaded || db.olts.length === 0) return;
+    // Immediate real-time TCP reachability check for all OLTs
+    void pollOltRealtimeStatus();
+    const statusInterval = setInterval(() => {
+      void pollOltRealtimeStatus();
+    }, 5000);
     // Initial real-time status & WAN IP poll shortly after load
     const initialTimer = setTimeout(() => {
       void pollRealtimeOltTelemetry();
@@ -2896,6 +3006,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       void pollRealtimeOltTelemetry();
     }, 10000);
     return () => {
+      clearInterval(statusInterval);
       clearTimeout(initialTimer);
       clearInterval(intervalTimer);
     };
@@ -4828,8 +4939,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
              =================================================================== */}
           {activeView === 'DASHBOARD' && (
             <div className="space-y-5">
-              {/* Top 4 Clean Single-Elevation KPI Cards */}
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {/* Top 5 Clean Single-Elevation KPI Cards */}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
                 {/* Card 1: Waiting authorization */}
                 <div
                   onClick={() => setActiveView('UNCONFIGURED')}
@@ -4850,7 +4961,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 {/* Card 2: Online ONUs */}
                 <div
                   onClick={() => {
+                    setFilterPhaseStatus('ONLINE');
                     setFilterSignalLevel('ALL');
+                    setConfiguredOnusPage(1);
                     setActiveView('CONFIGURED');
                   }}
                   className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-emerald-500/40 hover:bg-slate-900"
@@ -4863,14 +4976,32 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     {onlineOnus.length}
                   </div>
                   <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
-                    Active · <span className="text-emerald-400">Authorized {configuredOnus.length}</span>
+                    Active ·{' '}
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFilterPhaseStatus('ALL');
+                        setFilterSignalLevel('ALL');
+                        setConfiguredOnusPage(1);
+                        setActiveView('CONFIGURED');
+                      }}
+                      className="text-emerald-400 hover:underline"
+                      title="Lihat semua Authorized ONU"
+                    >
+                      Authorized {configuredOnus.length}
+                    </span>
                   </div>
                 </div>
 
-                {/* Card 3: Total offline */}
+                {/* Card 3: Total Offline (Khusus ONU Offline: PwrFail & N/A) */}
                 <div
-                  onClick={() => setActiveView('CONFIGURED')}
-                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-slate-700 hover:bg-slate-900"
+                  onClick={() => {
+                    setFilterPhaseStatus('OFFLINE');
+                    setFilterSignalLevel('ALL');
+                    setConfiguredOnusPage(1);
+                    setActiveView('CONFIGURED');
+                  }}
+                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-slate-600 hover:bg-slate-900"
                 >
                   <div className="flex items-center justify-between text-xs font-medium text-slate-400">
                     <span>Total Offline</span>
@@ -4880,15 +5011,64 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     {totalOfflineCount}
                   </div>
                   <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
-                    <span className="text-amber-400">PwrFail {pwrFailOnus.length}</span> ·{' '}
-                    <span className="text-rose-400">LoS {losOnus.length}</span> · N/A {otherOfflineOnus.length}
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFilterPhaseStatus('PWRFAIL');
+                        setFilterSignalLevel('ALL');
+                        setConfiguredOnusPage(1);
+                        setActiveView('CONFIGURED');
+                      }}
+                      className="text-amber-400 hover:underline"
+                      title="Filter ONU Power Fail (DyingGasp)"
+                    >
+                      PwrFail {pwrFailOnus.length}
+                    </span>{' '}
+                    ·{' '}
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFilterPhaseStatus('OFFLINE_NA');
+                        setFilterSignalLevel('ALL');
+                        setConfiguredOnusPage(1);
+                        setActiveView('CONFIGURED');
+                      }}
+                      className="text-slate-300 hover:underline"
+                      title="Filter ONU Offline / N/A"
+                    >
+                      Offline/N/A {otherOfflineOnus.length}
+                    </span>
                   </div>
                 </div>
 
-                {/* Card 4: Low signals */}
+                {/* Card 4: ONU Loss (Khusus ONU dengan status LOS) */}
                 <div
                   onClick={() => {
-                    setFilterSignalLevel('CRITICAL');
+                    setFilterPhaseStatus('LOS');
+                    setFilterSignalLevel('ALL');
+                    setConfiguredOnusPage(1);
+                    setActiveView('CONFIGURED');
+                  }}
+                  className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-rose-500/40 hover:bg-slate-900"
+                >
+                  <div className="flex items-center justify-between text-xs font-medium text-slate-400">
+                    <span>ONU Loss</span>
+                    <AlertTriangle className="h-4 w-4 text-rose-400" />
+                  </div>
+                  <div className="mt-2 font-mono text-3xl font-bold tracking-tight text-white">
+                    {losOnus.length}
+                  </div>
+                  <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
+                    Optical LoS · <span className="text-rose-400">Loss {losOnus.length}</span>
+                  </div>
+                </div>
+
+                {/* Card 5: Low signals (Redaman > 27 dB / <= -27.0 dBm) */}
+                <div
+                  onClick={() => {
+                    setFilterPhaseStatus('ALL');
+                    setFilterSignalLevel('LOW');
+                    setConfiguredOnusPage(1);
                     setActiveView('CONFIGURED');
                   }}
                   className="group cursor-pointer rounded-xl border border-slate-800 bg-slate-900/70 p-4 transition hover:border-amber-500/40 hover:bg-slate-900"
@@ -4901,8 +5081,33 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     {totalLowSignalCount}
                   </div>
                   <div className="mt-3 border-t border-slate-800/80 pt-2.5 font-mono text-[11px] text-slate-400">
-                    <span className="text-amber-400">Warning {warningSignalOnus.length}</span> ·{' '}
-                    <span className="text-rose-400">Critical {criticalSignalOnus.length}</span>
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFilterPhaseStatus('ALL');
+                        setFilterSignalLevel('WARNING');
+                        setConfiguredOnusPage(1);
+                        setActiveView('CONFIGURED');
+                      }}
+                      className="text-amber-400 hover:underline"
+                      title="Filter Warning (-27 s/d -30 dBm)"
+                    >
+                      Warning {warningSignalOnus.length}
+                    </span>{' '}
+                    ·{' '}
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFilterPhaseStatus('ALL');
+                        setFilterSignalLevel('CRITICAL');
+                        setConfiguredOnusPage(1);
+                        setActiveView('CONFIGURED');
+                      }}
+                      className="text-rose-400 hover:underline"
+                      title="Filter Critical (<= -30 dBm)"
+                    >
+                      Critical {criticalSignalOnus.length}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -5001,53 +5206,77 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     </div>
                   ) : (
                     <div className="divide-y divide-slate-800/80 text-xs">
-                      {visibleOlts.map((o) => (
-                        <div
-                          key={o.id}
-                          className="flex flex-wrap items-center justify-between gap-2 py-2.5"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedOltId(o.id);
-                                setInitialOltTab('OLT_DETAILS');
-                                setActiveView('OLT_DETAIL');
-                              }}
-                              className="font-semibold text-sky-400 transition hover:text-sky-300 hover:underline"
-                            >
-                              {o.id} - {o.name}{' '}
-                              <span className="font-mono text-slate-400">({o.ip_address})</span>
-                            </button>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2.5 font-mono text-xs">
-                            {!isViewerUser && (
+                      {visibleOlts.map((o) => {
+                        const isOnline = o.status === 'ONLINE';
+                        return (
+                          <div
+                            key={o.id}
+                            className="flex flex-wrap items-center justify-between gap-2 py-2.5"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`h-2 w-2 rounded-full ${
+                                  isOnline
+                                    ? 'bg-emerald-400'
+                                    : 'bg-rose-500 animate-pulse'
+                                }`}
+                              />
                               <button
                                 type="button"
-                                onClick={() => void syncOltFromTelnetLive(o.id, o)}
-                                className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 font-sans text-[11px] font-medium text-slate-200 transition hover:border-emerald-500/40 hover:text-emerald-300"
+                                onClick={() => {
+                                  setSelectedOltId(o.id);
+                                  setInitialOltTab('OLT_DETAILS');
+                                  setActiveView('OLT_DETAIL');
+                                }}
+                                className="font-semibold text-sky-400 transition hover:text-sky-300 hover:underline"
                               >
-                                <RefreshCw className="h-3 w-3" />
-                                Sync OLT
+                                {o.id} - {o.name}{' '}
+                                <span className="font-mono text-slate-400">({o.ip_address})</span>
                               </button>
-                            )}
-                            <span className="text-slate-400">{o.uptime_str}</span>
-                            <span className="text-slate-600">·</span>
-                            <span
-                              className={
-                                o.temperature_c >= 50
-                                  ? 'text-rose-400'
-                                  : o.temperature_c >= 42
-                                    ? 'text-amber-400'
-                                    : 'text-emerald-400'
-                              }
-                            >
-                              {o.temperature_c}°C
-                            </span>
+                              <span
+                                className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                                  isOnline
+                                    ? 'bg-emerald-500/15 text-emerald-400'
+                                    : 'bg-rose-500/15 text-rose-400'
+                                }`}
+                              >
+                                {isOnline ? 'Online' : 'Offline'}
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2.5 font-mono text-xs">
+                              {!isViewerUser && (
+                                <button
+                                  type="button"
+                                  onClick={() => void syncOltFromTelnetLive(o.id, o)}
+                                  className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 font-sans text-[11px] font-medium text-slate-200 transition hover:border-emerald-500/40 hover:text-emerald-300"
+                                >
+                                  <RefreshCw className="h-3 w-3" />
+                                  Sync OLT
+                                </button>
+                              )}
+                              {isOnline ? (
+                                <>
+                                  <span className="text-slate-400">{o.uptime_str}</span>
+                                  <span className="text-slate-600">·</span>
+                                  <span
+                                    className={
+                                      o.temperature_c >= 50
+                                        ? 'text-rose-400'
+                                        : o.temperature_c >= 42
+                                          ? 'text-amber-400'
+                                          : 'text-emerald-400'
+                                    }
+                                  >
+                                    {o.temperature_c}°C
+                                  </span>
+                                </>
+                              ) : (
+                                <span className="text-rose-400">Unreachable (TCP {o.telnet_port})</span>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -5718,25 +5947,78 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 </div>
               </div>
 
-              {/* Row 2: Segmented Signal Filter + Reset */}
+              {/* Row 2: Segmented Status Filter + Signal Filter + Reset */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/80 pt-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[11px] font-medium text-slate-400">Signal:</span>
-                  <div className="inline-flex rounded-lg border border-slate-800 bg-slate-950 p-0.5">
-                    {(['ALL', 'GOOD', 'WARNING', 'CRITICAL'] as const).map((lvl) => (
-                      <button
-                        key={lvl}
-                        type="button"
-                        onClick={() => setFilterSignalLevel(lvl)}
-                        className={`rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
-                          filterSignalLevel === lvl
-                            ? 'bg-sky-600 text-white'
-                            : 'text-slate-400 hover:text-white'
-                        }`}
-                      >
-                        {lvl}
-                      </button>
-                    ))}
+                <div className="flex flex-wrap items-center gap-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-medium text-slate-400">Status:</span>
+                    <div className="inline-flex flex-wrap rounded-lg border border-slate-800 bg-slate-950 p-0.5">
+                      {(
+                        [
+                          { id: 'ALL', label: 'ALL' },
+                          { id: 'ONLINE', label: `ONLINE (${onlineOnus.length})` },
+                          { id: 'OFFLINE', label: `OFFLINE (${totalOfflineCount})` },
+                          { id: 'LOS', label: `ONU LOSS (${losOnus.length})` },
+                          { id: 'PWRFAIL', label: `PWRFAIL (${pwrFailOnus.length})` },
+                          { id: 'OFFLINE_NA', label: `N/A (${otherOfflineOnus.length})` },
+                        ] as const
+                      ).map((st) => (
+                        <button
+                          key={st.id}
+                          type="button"
+                          onClick={() => {
+                            setFilterPhaseStatus(st.id);
+                            setConfiguredOnusPage(1);
+                          }}
+                          className={`rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
+                            filterPhaseStatus === st.id
+                              ? st.id === 'LOS'
+                                ? 'bg-rose-600 text-white'
+                                : st.id === 'ONLINE'
+                                  ? 'bg-emerald-600 text-white'
+                                  : 'bg-sky-600 text-white'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {st.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-medium text-slate-400">Signal:</span>
+                    <div className="inline-flex flex-wrap rounded-lg border border-slate-800 bg-slate-950 p-0.5">
+                      {(
+                        [
+                          { id: 'ALL', label: 'ALL' },
+                          { id: 'LOW', label: `LOW >27dB (${totalLowSignalCount})` },
+                          { id: 'GOOD', label: 'GOOD' },
+                          { id: 'WARNING', label: `WARNING (${warningSignalOnus.length})` },
+                          { id: 'CRITICAL', label: `CRITICAL (${criticalSignalOnus.length})` },
+                        ] as const
+                      ).map((lvl) => (
+                        <button
+                          key={lvl.id}
+                          type="button"
+                          onClick={() => {
+                            setFilterSignalLevel(lvl.id);
+                            setConfiguredOnusPage(1);
+                          }}
+                          className={`rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
+                            filterSignalLevel === lvl.id
+                              ? lvl.id === 'LOW' || lvl.id === 'WARNING'
+                                ? 'bg-amber-600 text-white'
+                                : lvl.id === 'CRITICAL'
+                                  ? 'bg-rose-600 text-white'
+                                  : 'bg-sky-600 text-white'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {lvl.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
 
@@ -5750,7 +6032,9 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     setFilterZone('ANY');
                     setFilterSplitter('ANY');
                     setFilterVlan('ANY');
+                    setFilterPhaseStatus('ALL');
                     setFilterSignalLevel('ALL');
+                    setConfiguredOnusPage(1);
                   }}
                   className="text-xs font-medium text-slate-400 transition hover:text-white"
                 >
@@ -6167,8 +6451,23 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <div className="flex items-center gap-2 font-semibold text-white">
-                        <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                        <span
+                          className={`h-2 w-2 rounded-full ${
+                            o.status === 'ONLINE'
+                              ? 'bg-emerald-400'
+                              : 'bg-rose-500 animate-pulse'
+                          }`}
+                        />
                         <span>{o.id} - {o.name}</span>
+                        <span
+                          className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                            o.status === 'ONLINE'
+                              ? 'bg-emerald-500/15 text-emerald-400'
+                              : 'bg-rose-500/15 text-rose-400'
+                          }`}
+                        >
+                          {o.status === 'ONLINE' ? 'Online' : 'Offline'}
+                        </span>
                       </div>
                       <div className="mt-0.5 font-mono text-[11px] text-slate-400">
                         {o.ip_address} · TCP {o.telnet_port} · {o.hardware_model}
@@ -6240,10 +6539,17 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                       </td>
                       <td className="px-3 py-3 font-mono text-white">{o.id}</td>
                       <td className="px-3 py-3">
-                        <span className="inline-flex items-center gap-1.5 font-medium text-emerald-400">
-                          <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                          Online
-                        </span>
+                        {o.status === 'ONLINE' ? (
+                          <span className="inline-flex items-center gap-1.5 font-medium text-emerald-400">
+                            <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                            Online
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 font-medium text-rose-400">
+                            <span className="h-2 w-2 rounded-full bg-rose-500 animate-pulse" />
+                            Offline
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-3 font-mono text-[11px] text-sky-400">
                         {o.vpn_name}
