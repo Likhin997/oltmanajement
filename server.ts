@@ -2167,14 +2167,22 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
   ];
 
   // 5. Unconfigured ONUs from `show gpon onu uncfg`
+  const prevUncfgMap = new Map(
+    state.onus
+      .filter((u) => u.olt_id === oltId && !u.is_authorized)
+      .map((u) => [u.serial_number.toUpperCase(), u])
+  );
   const configuredSnSet = new Set(configuredOnus.map((o) => o.serial_number.toUpperCase()));
   const uncfgOnus: OnuRecord[] = [];
+  const discoveredNowIso = new Date().toISOString();
   for (let i = 0; i < parsedUncfg.length; i++) {
     const d = parsedUncfg[i];
-    if (configuredSnSet.has(d.serialNumber.toUpperCase())) continue;
-    configuredSnSet.add(d.serialNumber.toUpperCase());
+    const snUp = d.serialNumber.toUpperCase();
+    if (configuredSnSet.has(snUp)) continue;
+    configuredSnSet.add(snUp);
+    const prevUncfg = prevUncfgMap.get(snUp);
     uncfgOnus.push({
-      id: Date.now() + i + 5000,
+      id: prevUncfg?.id || Date.now() + i + 5000,
       olt_id: oltId,
       pon_port_id: oltId * 100 + d.port,
       board: d.slot,
@@ -2214,8 +2222,8 @@ function applyRunningConfigAndLiveTelemetryToState(params: {
       temperature_c: 40,
       ip_address: null,
       firmware_ver: d.firmwareVersion || 'V2.1.0',
-      detected_ago: 'Just now',
-      last_online_at: null,
+      detected_ago: prevUncfg?.detected_ago || discoveredNowIso,
+      last_online_at: prevUncfg?.last_online_at || discoveredNowIso,
       last_offline_reason: 'Waiting Authorization',
     });
   }
@@ -4610,7 +4618,7 @@ function probeOltTcpReachable(
   });
 }
 
-// Helper: When an OLT is OFFLINE, ensure all its authorized ONUs are marked OffLine (not working/online) and PON port online counts are 0
+// Helper: When an OLT is OFFLINE, ensure all its authorized ONUs are marked OffLine, its unconfigured ONUs are cleared, and PON port online counts are 0
 function cascadeOfflineOltsToOnusAndPorts(state: SmartOltDatabaseState): {
   state: SmartOltDatabaseState;
   mutated: boolean;
@@ -4622,7 +4630,14 @@ function cascadeOfflineOltsToOnusAndPorts(state: SmartOltDatabaseState): {
     return { state, mutated: false };
   }
   let mutated = false;
-  const nextOnus = (state.onus || []).map((u) => {
+  const filteredOnus = (state.onus || []).filter((u) => {
+    if (!u.is_authorized && offlineOltIds.has(u.olt_id)) {
+      mutated = true;
+      return false;
+    }
+    return true;
+  });
+  const nextOnus = filteredOnus.map((u) => {
     if (!u.is_authorized || !offlineOltIds.has(u.olt_id)) return u;
     if (
       u.phase_state !== 'OffLine' ||
@@ -5215,6 +5230,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       if (seenUncfgSns.has(snUpper)) continue;
       seenUncfgSns.add(snUpper);
       const prev = prevUncfgBySn.get(snUpper);
+      const discoveredIso = new Date().toISOString();
       nextUncfgOnus.push({
         id: prev?.id || Date.now() + i + 5000,
         olt_id: olt.id,
@@ -5256,8 +5272,8 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         temperature_c: 40,
         ip_address: null,
         firmware_ver: d.firmwareVersion || 'V2.1.0',
-        detected_ago: 'Just now',
-        last_online_at: null,
+        detected_ago: prev?.detected_ago || discoveredIso,
+        last_online_at: prev?.last_online_at || discoveredIso,
         last_offline_reason: 'Waiting Authorization',
       });
     }
@@ -7195,14 +7211,23 @@ app.post(
         telnetError = telnetRes.error;
 
         if (!telnetRes.reachable) {
+          const cascaded = cascadeOfflineOltsToOnusAndPorts({
+            ...state,
+            olts: state.olts.map((o) =>
+              o.id === olt.id ? { ...o, status: 'OFFLINE' as const } : o
+            ),
+          });
+          await saveDatabaseState(cascaded.state);
           res.json({
             ok: false,
             telnetReachable: false,
             discoveredCount: 0,
             discovered: [],
             rawOutput,
-            error: telnetError || `Gagal terhubung ke OLT ${olt.ip_address}:${olt.telnet_port} via Telnet`,
-            state: sanitizeStateForClient(state, authUser?.role),
+            error:
+              telnetError ||
+              `Gagal terhubung ke OLT ${olt.ip_address}:${olt.telnet_port} via Telnet (OLT Offline)`,
+            state: sanitizeStateForClient(cascaded.state, authUser?.role),
           });
           return;
         }
@@ -7223,6 +7248,7 @@ app.post(
 
     const seenUncfgSns = new Set<string>();
     const newUnconfiguredOnus: OnuRecord[] = [];
+    const discoveredIso = new Date().toISOString();
 
     for (let i = 0; i < discovered.length; i++) {
       const d = discovered[i];
@@ -7275,8 +7301,8 @@ app.post(
         temperature_c: 40,
         ip_address: null,
         firmware_ver: d.firmwareVersion || 'V2.1.0',
-        detected_ago: 'Just now',
-        last_online_at: null,
+        detected_ago: prev?.detected_ago || discoveredIso,
+        last_online_at: prev?.last_online_at || discoveredIso,
         last_offline_reason: 'Waiting Authorization',
       });
     }

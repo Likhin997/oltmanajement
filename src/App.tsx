@@ -787,6 +787,101 @@ export default function App() {
   const [uncfgOltFilter, setUncfgOltFilter] = useState<'ALL' | number>('ALL');
   const [isPollingUncfg, setIsPollingUncfg] = useState(false);
   const [lastUncfgCliOutput, setLastUncfgCliOutput] = useState<string | null>(null);
+  const [uncfgNowMs, setUncfgNowMs] = useState<number>(() => Date.now());
+  const uncfgFirstSeenRef = useRef<Record<string, number>>((() => {
+    try {
+      const raw = localStorage.getItem('smartolt_uncfg_first_seen_v1');
+      return raw ? (JSON.parse(raw) as Record<string, number>) : {};
+    } catch {
+      return {};
+    }
+  })());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setUncfgNowMs(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const getUnconfiguredWaitingInfo = (
+    u: OnuRecord,
+    nowMs: number
+  ): { durationText: string; sinceText: string; elapsedSec: number } => {
+    const key = `${u.olt_id}:${u.serial_number.toUpperCase()}`;
+    let startMs = 0;
+
+    if (u.last_online_at) {
+      const parsed = Date.parse(u.last_online_at);
+      if (!Number.isNaN(parsed) && parsed > 1700000000000) {
+        startMs = parsed;
+      }
+    }
+    if (!startMs && u.detected_ago && u.detected_ago !== 'Just now') {
+      const parsed = Date.parse(u.detected_ago);
+      if (!Number.isNaN(parsed) && parsed > 1700000000000) {
+        startMs = parsed;
+      }
+    }
+    if (!startMs && uncfgFirstSeenRef.current[key]) {
+      startMs = uncfgFirstSeenRef.current[key];
+    }
+    if (!startMs && u.id > 1700000000000 && u.id <= nowMs + 60000) {
+      startMs = u.id;
+    }
+    if (!startMs) {
+      startMs = nowMs;
+    }
+
+    if (
+      !uncfgFirstSeenRef.current[key] ||
+      startMs < uncfgFirstSeenRef.current[key]
+    ) {
+      uncfgFirstSeenRef.current[key] = startMs;
+      try {
+        localStorage.setItem(
+          'smartolt_uncfg_first_seen_v1',
+          JSON.stringify(uncfgFirstSeenRef.current)
+        );
+      } catch {
+        // ignore storage quota error
+      }
+    }
+
+    const elapsedSec = Math.max(0, Math.floor((nowMs - startMs) / 1000));
+    let durationText = '';
+    if (elapsedSec < 60) {
+      durationText = `${elapsedSec} detik`;
+    } else if (elapsedSec < 3600) {
+      const m = Math.floor(elapsedSec / 60);
+      const s = elapsedSec % 60;
+      durationText = `${m}m ${s}d`;
+    } else if (elapsedSec < 86400) {
+      const h = Math.floor(elapsedSec / 3600);
+      const m = Math.floor((elapsedSec % 3600) / 60);
+      const s = elapsedSec % 60;
+      durationText = `${h}j ${m}m ${s}d`;
+    } else {
+      const d = Math.floor(elapsedSec / 86400);
+      const h = Math.floor((elapsedSec % 86400) / 3600);
+      const m = Math.floor((elapsedSec % 3600) / 60);
+      durationText = `${d}h ${h}j ${m}m`;
+    }
+
+    const sinceDate = new Date(startMs);
+    const sinceText = sinceDate.toLocaleTimeString('id-ID', {
+      timeZone: 'Asia/Jakarta',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+
+    return {
+      durationText,
+      sinceText: `Sejak ${sinceText} WIB`,
+      elapsedSec,
+    };
+  };
 
   // Configured ONUs Filter State
   const [searchQuery, setSearchQuery] = useState('');
@@ -2535,7 +2630,13 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     onus: visibleOnus,
   };
 
-  const unconfiguredOnus = visibleOnus.filter((o) => !o.is_authorized);
+  // Jika OLT dalam keadaan OFFLINE (mati), ONU unconfigured pada OLT tersebut tidak ditampilkan
+  const unconfiguredOnus = visibleOnus.filter((o) => {
+    if (o.is_authorized) return false;
+    const parentOlt = db.olts.find((olt) => olt.id === o.olt_id);
+    if (parentOlt && parentOlt.status === 'OFFLINE') return false;
+    return true;
+  });
   const configuredOnus = visibleOnus.filter((o) => o.is_authorized);
   const onlineOnus = configuredOnus.filter((o) => o.phase_state === 'working');
   const losOnus = configuredOnus.filter((o) => o.phase_state === 'LOS');
@@ -2838,6 +2939,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             ],
           }));
         } else if (!data.ok) {
+          if (data.state) {
+            skipNextServerSyncRef.current = true;
+            setDb((prev) => mergeLiveOltStatePreservingUserMetadata(prev, data.state));
+          }
           showToast(
             `⚠ OLT ${o.name}: ${data.error || 'Gagal menjalankan show gpon onu uncfg via Telnet'}`
           );
@@ -2919,9 +3024,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           );
           const hasOnuStillOnlineOnOfflineOlt = prev.onus.some(
             (u) =>
-              u.is_authorized &&
               offlineIds.has(u.olt_id) &&
-              (u.phase_state !== 'OffLine' || u.onu_rx_dbm !== null)
+              (!u.is_authorized ||
+                u.phase_state !== 'OffLine' ||
+                u.onu_rx_dbm !== null)
           );
           if (!hasOltChange && !hasOnuStillOnlineOnOfflineOlt) return prev;
           skipNextServerSyncRef.current = true;
@@ -2930,17 +3036,19 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             olts: prev.olts.map((o) =>
               statuses[o.id] ? { ...o, status: statuses[o.id] } : o
             ),
-            onus: prev.onus.map((u) =>
-              u.is_authorized && offlineIds.has(u.olt_id)
-                ? {
-                    ...u,
-                    phase_state: 'OffLine' as const,
-                    onu_rx_dbm: null,
-                    olt_rx_dbm: null,
-                    last_offline_reason: 'OLT Offline',
-                  }
-                : u
-            ),
+            onus: prev.onus
+              .filter((u) => u.is_authorized || !offlineIds.has(u.olt_id))
+              .map((u) =>
+                u.is_authorized && offlineIds.has(u.olt_id)
+                  ? {
+                      ...u,
+                      phase_state: 'OffLine' as const,
+                      onu_rx_dbm: null,
+                      olt_rx_dbm: null,
+                      last_offline_reason: 'OLT Offline',
+                    }
+                  : u
+              ),
             pon_ports: prev.pon_ports.map((p) =>
               offlineIds.has(p.olt_id) ? { ...p, online_onus: 0 } : p
             ),
@@ -3356,7 +3464,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 is_authorized: false,
                 onu_index: null,
                 phase_state: 'Unconfigured',
-                detected_ago: 'Just now',
+                detected_ago: new Date().toISOString(),
+                last_online_at: new Date().toISOString(),
               }
             : item
         ),
@@ -5613,20 +5722,45 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     ? visibleOlts
                     : visibleOlts.filter((o) => o.id === uncfgOltFilter)
                   ).map((oltItem) => {
-                    const oltUncfg = unconfiguredOnus.filter(
-                      (u) => u.olt_id === oltItem.id
-                    );
+                    const isOltOnline = oltItem.status === 'ONLINE';
+                    const oltUncfg = isOltOnline
+                      ? unconfiguredOnus.filter((u) => u.olt_id === oltItem.id)
+                      : [];
                     return (
                       <div key={oltItem.id} className="space-y-2">
-                        <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white">
-                          <span>
-                            {oltItem.id} - {oltItem.name}
-                          </span>
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`h-2 w-2 rounded-full ${
+                                isOltOnline
+                                  ? 'bg-emerald-400'
+                                  : 'bg-rose-500 animate-pulse'
+                              }`}
+                            />
+                            <span>
+                              {oltItem.id} - {oltItem.name}
+                            </span>
+                            <span
+                              className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                                isOltOnline
+                                  ? 'bg-emerald-500/15 text-emerald-400'
+                                  : 'bg-rose-500/15 text-rose-400'
+                              }`}
+                            >
+                              {isOltOnline ? 'Online' : 'Offline'}
+                            </span>
+                          </div>
                           <span className="font-mono text-[11px] text-slate-400">
-                            {oltUncfg.length} discovered
+                            {isOltOnline
+                              ? `${oltUncfg.length} discovered`
+                              : '0 discovered (OLT Offline)'}
                           </span>
                         </div>
-                        {oltUncfg.length === 0 ? (
+                        {!isOltOnline ? (
+                          <div className="rounded-lg border border-rose-500/20 bg-rose-950/20 px-3.5 py-2.5 text-xs text-rose-300">
+                            OLT <span className="font-semibold">{oltItem.name}</span> ({oltItem.ip_address}:{oltItem.telnet_port}) sedang dalam keadaan <span className="font-semibold text-rose-400">Offline / Mati</span>. Tidak ada ONU unconfigured yang aktif.
+                          </div>
+                        ) : oltUncfg.length === 0 ? (
                           <div className="px-2 py-2 text-xs text-slate-400">
                             No unconfigured ONUs found on this OLT.
                           </div>
@@ -5638,6 +5772,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                 const taskMatch = matchAutoProvisioningTaskForOnu(
                                   u,
                                   db.auto_provisioning_tasks || []
+                                );
+                                const waitInfo = getUnconfiguredWaitingInfo(
+                                  u,
+                                  uncfgNowMs
                                 );
                                 return (
                                   <div
@@ -5652,6 +5790,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                         <div className="font-mono text-[11px] text-slate-400">
                                           GPON · Board {u.board} · Port {u.port} ·{' '}
                                           {u.onu_type}
+                                        </div>
+                                        <div className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-[11px] text-amber-300">
+                                          <Clock className="h-3 w-3 text-amber-400" />
+                                          <span className="font-semibold">
+                                            {waitInfo.durationText}
+                                          </span>
+                                          <span className="text-slate-400">·</span>
+                                          <span className="text-[10px] text-slate-300">
+                                            {waitInfo.sinceText}
+                                          </span>
                                         </div>
                                       </div>
                                       {!isViewerUser ? (
@@ -5709,6 +5857,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                     <th className="px-4 py-2.5">Port</th>
                                     <th className="px-4 py-2.5">Model</th>
                                     <th className="px-4 py-2.5">SN</th>
+                                    <th className="px-4 py-2.5">Lama Terdeteksi (Waiting)</th>
                                     <th className="px-4 py-2.5">Matched Auto Task</th>
                                     <th className="px-4 py-2.5 text-right">Action</th>
                                   </tr>
@@ -5720,6 +5869,10 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                         u,
                                         db.auto_provisioning_tasks || []
                                       );
+                                    const waitInfo = getUnconfiguredWaitingInfo(
+                                      u,
+                                      uncfgNowMs
+                                    );
                                     return (
                                       <tr
                                         key={u.id}
@@ -5739,6 +5892,18 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                                         </td>
                                         <td className="px-4 py-2.5 font-mono font-semibold text-white">
                                           {u.serial_number}
+                                        </td>
+                                        <td className="px-4 py-2.5">
+                                          <div className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 font-mono text-[11px] text-amber-300">
+                                            <Clock className="h-3 w-3 text-amber-400" />
+                                            <span className="font-semibold text-amber-200">
+                                              {waitInfo.durationText}
+                                            </span>
+                                            <span className="text-slate-500">·</span>
+                                            <span className="text-[10px] text-slate-400">
+                                              {waitInfo.sinceText}
+                                            </span>
+                                          </div>
                                         </td>
                                         <td className="px-4 py-2.5">
                                           {taskMatch.conflictReason ? (
@@ -12293,8 +12458,8 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                     temperature_c: 40,
                     ip_address: null,
                     firmware_ver: 'V2.1.0',
-                    detected_ago: 'Just now',
-                    last_online_at: null,
+                    detected_ago: new Date().toISOString(),
+                    last_online_at: new Date().toISOString(),
                     last_offline_reason: 'Waiting Authorization',
                   };
                   setDb((prev) => ({
