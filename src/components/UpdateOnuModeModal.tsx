@@ -107,7 +107,7 @@ export const UpdateOnuModeModal: React.FC<UpdateOnuModeModalProps> = ({
   const voipSipEnabled = onu.voip_enabled ?? defaultTrProfile?.voip_enabled ?? true;
   const wifiSsid = onu.wifi_ssid || '';
   const wifiPassword = onu.wifi_password || '';
-  const [showCliPreview, setShowCliPreview] = useState<boolean>(true);
+  const [showCliPreview, setShowCliPreview] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
 
   const selectedVlan =

@@ -136,6 +136,21 @@ export interface SpeedProfileRecord {
   tcont_profile_id: number;
 }
 
+export interface OnuTypeRecord {
+  id: number;
+  type_name: string;
+  pon_type: 'gpon' | 'xgpon';
+  description: string;
+  eth_ports: number;
+  pots_ports: number;
+  wifi_ports: number;
+  max_tcont: number;
+  max_gemport: number;
+  max_switch_perslot: number;
+  max_flow_perswitch: number;
+  max_iphost: number;
+}
+
 export interface Tr069ProfileRecord {
   id: number;
   profile_name: string;
@@ -460,6 +475,7 @@ export interface SmartOltDatabaseState {
   vlans: VlanRecord[];
   tcont_profiles: TcontProfileRecord[];
   speed_profiles: SpeedProfileRecord[];
+  onu_types?: OnuTypeRecord[];
   tr069_profiles: Tr069ProfileRecord[];
   zones: ZoneRecord[];
   sectors?: SectorRecord[];
@@ -543,6 +559,78 @@ export const INITIAL_DB_STATE: SmartOltDatabaseState = {
       cbs_bytes: 1023,
       pbs_bytes: 1023,
       tcont_profile_id: 1,
+    },
+  ],
+  onu_types: [
+    {
+      id: 1,
+      type_name: 'ALL',
+      pon_type: 'gpon',
+      description: 'Universal Generic GPON ONU (8GE+4POTS+2WIFI)',
+      eth_ports: 8,
+      pots_ports: 4,
+      wifi_ports: 2,
+      max_tcont: 8,
+      max_gemport: 32,
+      max_switch_perslot: 8,
+      max_flow_perswitch: 32,
+      max_iphost: 5,
+    },
+    {
+      id: 2,
+      type_name: 'F670LV9.0',
+      pon_type: 'gpon',
+      description: 'ZTE ZXHN F670L V9.0 Dual-Band AC (4GE+1POTS+2WIFI)',
+      eth_ports: 4,
+      pots_ports: 1,
+      wifi_ports: 2,
+      max_tcont: 8,
+      max_gemport: 32,
+      max_switch_perslot: 8,
+      max_flow_perswitch: 8,
+      max_iphost: 5,
+    },
+    {
+      id: 3,
+      type_name: 'F609V3.0',
+      pon_type: 'gpon',
+      description: 'ZTE ZXHN F609 V3.0 (4FE/GE+2POTS+1WIFI)',
+      eth_ports: 4,
+      pots_ports: 2,
+      wifi_ports: 1,
+      max_tcont: 8,
+      max_gemport: 32,
+      max_switch_perslot: 8,
+      max_flow_perswitch: 8,
+      max_iphost: 5,
+    },
+    {
+      id: 4,
+      type_name: 'SIGMA_F663NV3A',
+      pon_type: 'gpon',
+      description: 'ZTE ZXHN F663NV3a (1GE+3FE+1POTS+1WIFI)',
+      eth_ports: 4,
+      pots_ports: 1,
+      wifi_ports: 1,
+      max_tcont: 8,
+      max_gemport: 32,
+      max_switch_perslot: 8,
+      max_flow_perswitch: 8,
+      max_iphost: 5,
+    },
+    {
+      id: 5,
+      type_name: 'ZTE-F670L',
+      pon_type: 'gpon',
+      description: 'ZTE F670L Custom Profile (4GE+1POTS+2WIFI)',
+      eth_ports: 4,
+      pots_ports: 1,
+      wifi_ports: 2,
+      max_tcont: 8,
+      max_gemport: 32,
+      max_switch_perslot: 8,
+      max_flow_perswitch: 8,
+      max_iphost: 5,
     },
   ],
   tr069_profiles: [
@@ -629,11 +717,11 @@ export function buildLiveZteRunningConfig(
   for (const tp of db.tcont_profiles) {
     lines.push(`  ${tp.description}`);
   }
-  lines.push(
-    `  profile traffic SMARTOLT-IPTV-50M-DOWN sir 51200 pir 51200 cbs 1023 pbs 1023`,
-    `  profile traffic SMARTOLT-1G-DOWN sir 1048064 pir 1048064 cbs 1023 pbs 1023`,
-    `  profile traffic SMARTOLT-VOIPMNG-10M sir 10240 pir 11264 cbs 256 pbs 256`
-  );
+  for (const sp of db.speed_profiles) {
+    lines.push(
+      `  profile traffic ${sp.profile_name} sir ${sp.cir_kbps} pir ${sp.download_kbps} cbs ${sp.cbs_bytes} pbs ${sp.pbs_bytes}`
+    );
+  }
 
   for (const v of oltVlans) {
     lines.push(

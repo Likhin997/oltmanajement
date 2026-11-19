@@ -310,7 +310,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
   const [pppoeUsername, setPppoeUsername] = useState<string>('');
   const [pppoeUserEdited, setPppoeUserEdited] = useState<boolean>(false);
   const [pppoePassword, setPppoePassword] = useState<string>('jetcyber');
-  const [showCliPreview, setShowCliPreview] = useState<boolean>(true);
+  const [showCliPreview, setShowCliPreview] = useState<boolean>(false);
   const [copiedCli, setCopiedCli] = useState<boolean>(false);
 
   const selectedVlan =
@@ -514,7 +514,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
         <button
           type="button"
           onClick={() => setShowCliPreview(!showCliPreview)}
-          className="flex items-center gap-1.5 rounded bg-[#183456] px-3 py-1.5 text-xs font-semibold text-sky-300 hover:bg-[#1f426d]"
+          className="hidden items-center gap-1.5 rounded bg-[#183456] px-3 py-1.5 text-xs font-semibold text-sky-300 hover:bg-[#1f426d]"
         >
           <Terminal className="h-3.5 w-3.5" />
           {showCliPreview ? 'Hide Generated ZTE CLI Script' : 'Preview Generated ZTE CLI Script'}
@@ -522,7 +522,7 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
       </div>
 
       {showCliPreview && (
-        <div className="mb-6 rounded-lg border border-slate-700 bg-slate-950 p-4">
+        <div className="mb-6 hidden rounded-lg border border-slate-700 bg-slate-950 p-4">
           <div className="flex items-center justify-between pb-2">
             <span className="font-mono text-xs font-semibold text-emerald-400">
               ZTE C320/C300 Auto-Provisioning CLI Script (`gpon-onu_1/{boardNum}/{portNum}:{allocatedOnuIndex}`)
@@ -749,10 +749,14 @@ export const AuthorizeOnuModal: React.FC<AuthorizeOnuModalProps> = ({
               onChange={(e) => setOnuType(e.target.value)}
               className="w-full rounded border border-[#284870] bg-[#10233a] px-3 py-2 text-xs text-white"
             >
-              <option value="ALL">ALL</option>
-              <option value="F609V3.0">F609V3.0</option>
-              <option value="SIGMA_F663NV3A">SIGMA_F663NV3A</option>
-              <option value="ZTE-F670L">ZTE-F670L</option>
+              {(db.onu_types && db.onu_types.length > 0
+                ? db.onu_types.map((t) => t.type_name)
+                : ['ALL', 'F670LV9.0', 'F609V3.0', 'SIGMA_F663NV3A', 'ZTE-F670L']
+              ).map((typeName) => (
+                <option key={typeName} value={typeName}>
+                  {typeName}
+                </option>
+              ))}
             </select>
             <label className="flex items-center gap-2 text-xs text-slate-200">
               <input

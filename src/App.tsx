@@ -16,6 +16,9 @@ import {
   SectorRecord,
   OdbRecord,
   Tr069ProfileRecord,
+  SpeedProfileRecord,
+  TcontProfileRecord,
+  OnuTypeRecord,
   AppUserRecord,
   AutoProvisioningTaskRecord,
   AutoProvisioningHistoryRecord,
@@ -1578,6 +1581,365 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
   }
 
   const [showBackupModal, setShowBackupModal] = useState<boolean>(false);
+
+  // Dynamic Brand / Company Name State (persisted in localStorage)
+  const [appBrandName, setAppBrandName] = useState<string>(() => {
+    try {
+      const saved = window.localStorage.getItem('smartolt_brand_name_v1');
+      return saved && saved.trim() ? saved.trim() : 'JETCYBERNET';
+    } catch {
+      return 'JETCYBERNET';
+    }
+  });
+  const [showEditBrandModal, setShowEditBrandModal] = useState<boolean>(false);
+  const [brandNameDraft, setBrandNameDraft] = useState<string>(appBrandName);
+
+  const openEditBrandModal = (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (isViewerUser) return;
+    setBrandNameDraft(appBrandName);
+    setShowEditBrandModal(true);
+  };
+
+  const handleSaveBrandName = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = brandNameDraft.trim() || 'JETCYBERNET';
+    setAppBrandName(cleaned);
+    try {
+      window.localStorage.setItem('smartolt_brand_name_v1', cleaned);
+    } catch {
+      // Ignore storage error
+    }
+    setShowEditBrandModal(false);
+    showToast(`✓ Nama brand aplikasi berhasil diubah menjadi "${cleaned}".`);
+  };
+
+  // ==========================================================================
+  // SPEED PROFILES & ONU TYPES STATE & OLT LIVE PUSH HANDLERS
+  // ==========================================================================
+  const [speedPushTargetOltId, setSpeedPushTargetOltId] = useState<string>('ALL');
+  const [speedPushBusy, setSpeedPushBusy] = useState<boolean>(false);
+
+  // Add Speed Profile Modal State
+  const [showAddSpeedModal, setShowAddSpeedModal] = useState<boolean>(false);
+  const [newSpeedName, setNewSpeedName] = useState<string>('SMARTOLT-100M-DOWN');
+  const [newSpeedDownloadKbps, setNewSpeedDownloadKbps] = useState<number>(102400);
+  const [newSpeedUploadKbps, setNewSpeedUploadKbps] = useState<number>(102400);
+  const [newSpeedCirKbps, setNewSpeedCirKbps] = useState<number>(102400);
+  const [newSpeedCbsBytes, setNewSpeedCbsBytes] = useState<number>(1023);
+  const [newSpeedPbsBytes, setNewSpeedPbsBytes] = useState<number>(1023);
+  const [newSpeedTcontMode, setNewSpeedTcontMode] = useState<'AUTO_CREATE' | 'EXISTING'>('AUTO_CREATE');
+  const [newSpeedTcontId, setNewSpeedTcontId] = useState<number>(1);
+  const [newTcontName, setNewTcontName] = useState<string>('SMARTOLT-100M-UP');
+  const [newTcontDbaType, setNewTcontDbaType] = useState<1 | 2 | 3 | 4 | 5>(4);
+  const [newTcontFixedKbps, setNewTcontFixedKbps] = useState<number>(0);
+  const [newTcontAssuredKbps, setNewTcontAssuredKbps] = useState<number>(10240);
+  const [newTcontMaxKbps, setNewTcontMaxKbps] = useState<number>(102400);
+
+  // Add ONU Type Modal State
+  const [showAddOnuTypeModal, setShowAddOnuTypeModal] = useState<boolean>(false);
+  const [newOnuTypeName, setNewOnuTypeName] = useState<string>('ZTE-F670LV9');
+  const [newOnuTypePon, setNewOnuTypePon] = useState<'gpon' | 'xgpon'>('gpon');
+  const [newOnuTypeDesc, setNewOnuTypeDesc] = useState<string>('4GE+1POTS+2WIFI');
+  const [newOnuTypeEth, setNewOnuTypeEth] = useState<number>(4);
+  const [newOnuTypePots, setNewOnuTypePots] = useState<number>(1);
+  const [newOnuTypeWifi, setNewOnuTypeWifi] = useState<number>(2);
+  const [newOnuTypeMaxTcont, setNewOnuTypeMaxTcont] = useState<number>(8);
+  const [newOnuTypeMaxGemport, setNewOnuTypeMaxGemport] = useState<number>(32);
+  const [newOnuTypeMaxSwitch, setNewOnuTypeMaxSwitch] = useState<number>(8);
+  const [newOnuTypeMaxFlow, setNewOnuTypeMaxFlow] = useState<number>(8);
+  const [newOnuTypeMaxIphost, setNewOnuTypeMaxIphost] = useState<number>(5);
+
+  const buildTcontCliLine = (tcont: {
+    profile_name: string;
+    dba_type: 1 | 2 | 3 | 4 | 5;
+    fixed_kbps: number;
+    assured_kbps: number;
+    maximum_kbps: number;
+  }): string => {
+    const cleanName = tcont.profile_name.trim().replace(/\s+/g, '-');
+    if (tcont.dba_type === 1) {
+      return `profile tcont ${cleanName} type 1 fixed ${tcont.fixed_kbps}`;
+    }
+    if (tcont.dba_type === 2 || tcont.dba_type === 3) {
+      return `profile tcont ${cleanName} type ${tcont.dba_type} assured ${tcont.assured_kbps} maximum ${tcont.maximum_kbps}`;
+    }
+    if (tcont.dba_type === 4) {
+      return `profile tcont ${cleanName} type 4 maximum ${tcont.maximum_kbps}`;
+    }
+    return `profile tcont ${cleanName} type 5 fixed ${tcont.fixed_kbps} assured ${tcont.assured_kbps} maximum ${tcont.maximum_kbps}`;
+  };
+
+  const buildSpeedProfileCliScript = (
+    speed: {
+      profile_name: string;
+      cir_kbps: number;
+      download_kbps: number;
+      cbs_bytes: number;
+      pbs_bytes: number;
+    },
+    tcont?: {
+      profile_name: string;
+      dba_type: 1 | 2 | 3 | 4 | 5;
+      fixed_kbps: number;
+      assured_kbps: number;
+      maximum_kbps: number;
+    } | null
+  ): string => {
+    const cleanSpeedName = speed.profile_name.trim().replace(/\s+/g, '-');
+    const lines: string[] = ['configure terminal', 'gpon'];
+    if (tcont) {
+      lines.push(`  ${buildTcontCliLine(tcont)}`);
+    }
+    lines.push(
+      `  profile traffic ${cleanSpeedName} sir ${speed.cir_kbps} pir ${speed.download_kbps} cbs ${speed.cbs_bytes} pbs ${speed.pbs_bytes}`,
+      'exit',
+      'exit',
+      'write'
+    );
+    return lines.join('\n');
+  };
+
+  const buildOnuTypeCliScript = (onuType: {
+    type_name: string;
+    pon_type: 'gpon' | 'xgpon';
+    description: string;
+    eth_ports: number;
+    pots_ports: number;
+    wifi_ports: number;
+    max_tcont: number;
+    max_gemport: number;
+    max_switch_perslot: number;
+    max_flow_perswitch: number;
+    max_iphost: number;
+  }): string => {
+    const name = onuType.type_name.trim().replace(/\s+/g, '_');
+    const pon = onuType.pon_type || 'gpon';
+    const desc = (onuType.description || `${onuType.eth_ports}GE+${onuType.pots_ports}POTS+${onuType.wifi_ports}WIFI`)
+      .trim()
+      .replace(/\s+/g, '_');
+    const lines: string[] = [
+      'configure terminal',
+      'pon',
+      `  onu-type ${name} ${pon} description ${desc}`,
+      `  onu-type ${name} ${pon} max-tcont ${onuType.max_tcont}`,
+      `  onu-type ${name} ${pon} max-gemport ${onuType.max_gemport}`,
+      `  onu-type ${name} ${pon} max-switch-perslot ${onuType.max_switch_perslot}`,
+      `  onu-type ${name} ${pon} max-flow-perswitch ${onuType.max_flow_perswitch}`,
+      `  onu-type ${name} ${pon} max-iphost ${onuType.max_iphost}`,
+    ];
+    for (let i = 1; i <= Math.max(0, onuType.eth_ports); i++) {
+      lines.push(`  onu-type-if ${name} eth_0/${i}`);
+    }
+    for (let i = 1; i <= Math.max(0, onuType.pots_ports); i++) {
+      lines.push(`  onu-type-if ${name} pots_0/${i}`);
+    }
+    for (let i = 1; i <= Math.max(0, onuType.wifi_ports); i++) {
+      lines.push(`  onu-type-if ${name} wifi_0/${i}`);
+    }
+    lines.push('exit', 'exit', 'write');
+    return lines.join('\n');
+  };
+
+  const pushProfileCliToTargetOlts = async (
+    cliScript: string,
+    summaryLabel: string
+  ) => {
+    const targetOlts =
+      speedPushTargetOltId === 'ALL'
+        ? visibleOlts
+        : visibleOlts.filter((o) => o.id === Number(speedPushTargetOltId));
+
+    if (targetOlts.length === 0) {
+      showToast(
+        `✓ ${summaryLabel} disimpan ke Database (Tambahkan OLT terlebih dahulu untuk push via Telnet/SSH).`
+      );
+      return;
+    }
+
+    setSpeedPushBusy(true);
+    try {
+      for (const olt of targetOlts) {
+        const logId = Date.now() + olt.id;
+        const newLog: ProvisioningLogRecord = {
+          id: logId,
+          olt_id: olt.id,
+          onu_id: null,
+          serial_number: 'OLT-PROFILE',
+          action_type: 'RESYNC_CONFIG',
+          interface_target: `${olt.name} (${olt.ip_address})`,
+          summary_text: `${summaryLabel} -> ${olt.name}`,
+          cli_script: cliScript,
+          olt_response: '[Pushing CLI to OLT via Telnet/SSH...]',
+          execution_status: 'SIMULATED',
+          executed_by: currentUser?.email || 'admin@jetcybernet.id',
+          duration_ms: 0,
+          created_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
+        };
+        setDb((prev) => ({
+          ...prev,
+          provisioning_logs: [newLog, ...prev.provisioning_logs],
+        }));
+        await executeOltCliLive(
+          olt.id,
+          cliScript,
+          logId,
+          `${summaryLabel} (${olt.name})`
+        );
+      }
+    } finally {
+      setSpeedPushBusy(false);
+    }
+  };
+
+  const handleCreateAndPushSpeedProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = newSpeedName.trim().replace(/\s+/g, '-');
+    if (!cleanName) return;
+
+    let resolvedTcontId = newSpeedTcontId;
+    let tcontForCli: TcontProfileRecord | null = null;
+
+    if (newSpeedTcontMode === 'AUTO_CREATE') {
+      const cleanTcontName =
+        newTcontName.trim().replace(/\s+/g, '-') || `${cleanName}-UP`;
+      const existingTcont = db.tcont_profiles.find(
+        (t) => t.profile_name.toLowerCase() === cleanTcontName.toLowerCase()
+      );
+      const tcontDesc = buildTcontCliLine({
+        profile_name: cleanTcontName,
+        dba_type: newTcontDbaType,
+        fixed_kbps: newTcontFixedKbps,
+        assured_kbps: newTcontAssuredKbps,
+        maximum_kbps: newTcontMaxKbps,
+      });
+
+      if (existingTcont) {
+        resolvedTcontId = existingTcont.id;
+        tcontForCli = {
+          ...existingTcont,
+          dba_type: newTcontDbaType,
+          fixed_kbps: newTcontFixedKbps,
+          assured_kbps: newTcontAssuredKbps,
+          maximum_kbps: newTcontMaxKbps,
+          description: tcontDesc,
+        };
+      } else {
+        resolvedTcontId = Date.now() - 1;
+        tcontForCli = {
+          id: resolvedTcontId,
+          profile_name: cleanTcontName,
+          dba_type: newTcontDbaType,
+          fixed_kbps: newTcontFixedKbps,
+          assured_kbps: newTcontAssuredKbps,
+          maximum_kbps: newTcontMaxKbps,
+          description: tcontDesc,
+        };
+      }
+    } else {
+      tcontForCli =
+        db.tcont_profiles.find((t) => t.id === Number(newSpeedTcontId)) ||
+        db.tcont_profiles[0] ||
+        null;
+      if (tcontForCli) {
+        resolvedTcontId = tcontForCli.id;
+      }
+    }
+
+    const newSpeedRecord: SpeedProfileRecord = {
+      id: Date.now(),
+      profile_name: cleanName,
+      download_kbps: Math.max(64, Number(newSpeedDownloadKbps) || 102400),
+      upload_kbps: Math.max(64, Number(newSpeedUploadKbps) || 102400),
+      cir_kbps: Math.max(64, Number(newSpeedCirKbps) || Number(newSpeedDownloadKbps) || 102400),
+      cbs_bytes: Math.max(64, Number(newSpeedCbsBytes) || 1023),
+      pbs_bytes: Math.max(64, Number(newSpeedPbsBytes) || 1023),
+      tcont_profile_id: resolvedTcontId,
+    };
+
+    setDb((prev) => {
+      const nextTconts =
+        tcontForCli && newSpeedTcontMode === 'AUTO_CREATE'
+          ? prev.tcont_profiles.some((t) => t.id === tcontForCli!.id)
+            ? prev.tcont_profiles.map((t) =>
+                t.id === tcontForCli!.id ? tcontForCli! : t
+              )
+            : [...prev.tcont_profiles, tcontForCli]
+          : prev.tcont_profiles;
+
+      const existsSpeed = prev.speed_profiles.some(
+        (s) => s.profile_name.toLowerCase() === cleanName.toLowerCase()
+      );
+      const nextSpeeds = existsSpeed
+        ? prev.speed_profiles.map((s) =>
+            s.profile_name.toLowerCase() === cleanName.toLowerCase()
+              ? { ...newSpeedRecord, id: s.id }
+              : s
+          )
+        : [...prev.speed_profiles, newSpeedRecord];
+
+      return {
+        ...prev,
+        tcont_profiles: nextTconts,
+        speed_profiles: nextSpeeds,
+      };
+    });
+
+    setShowAddSpeedModal(false);
+    const cliScript = buildSpeedProfileCliScript(newSpeedRecord, tcontForCli);
+    await pushProfileCliToTargetOlts(
+      cliScript,
+      `Speed Profile "${cleanName}"`
+    );
+  };
+
+  const handleCreateAndPushOnuType = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanTypeName = newOnuTypeName.trim().replace(/\s+/g, '_');
+    if (!cleanTypeName) return;
+
+    const newRecord: OnuTypeRecord = {
+      id: Date.now(),
+      type_name: cleanTypeName,
+      pon_type: newOnuTypePon,
+      description:
+        newOnuTypeDesc.trim() ||
+        `${newOnuTypeEth}GE+${newOnuTypePots}POTS+${newOnuTypeWifi}WIFI`,
+      eth_ports: Math.max(0, Number(newOnuTypeEth) || 4),
+      pots_ports: Math.max(0, Number(newOnuTypePots) || 0),
+      wifi_ports: Math.max(0, Number(newOnuTypeWifi) || 0),
+      max_tcont: Math.max(1, Number(newOnuTypeMaxTcont) || 8),
+      max_gemport: Math.max(1, Number(newOnuTypeMaxGemport) || 32),
+      max_switch_perslot: Math.max(1, Number(newOnuTypeMaxSwitch) || 8),
+      max_flow_perswitch: Math.max(1, Number(newOnuTypeMaxFlow) || 8),
+      max_iphost: Math.max(1, Number(newOnuTypeMaxIphost) || 5),
+    };
+
+    setDb((prev) => {
+      const currentList =
+        prev.onu_types && prev.onu_types.length > 0
+          ? prev.onu_types
+          : INITIAL_DB_STATE.onu_types || [];
+      const exists = currentList.some(
+        (t) => t.type_name.toLowerCase() === cleanTypeName.toLowerCase()
+      );
+      const nextList = exists
+        ? currentList.map((t) =>
+            t.type_name.toLowerCase() === cleanTypeName.toLowerCase()
+              ? { ...newRecord, id: t.id }
+              : t
+          )
+        : [...currentList, newRecord];
+      return {
+        ...prev,
+        onu_types: nextList,
+      };
+    });
+
+    setShowAddOnuTypeModal(false);
+    const cliScript = buildOnuTypeCliScript(newRecord);
+    await pushProfileCliToTargetOlts(cliScript, `ONU Type "${cleanTypeName}"`);
+  };
   const [backupSnapshots, setBackupSnapshots] = useState<BackupSnapshotMeta[]>([]);
   const [backupSnapshotLabel, setBackupSnapshotLabel] = useState<string>('');
   const [backupBusy, setBackupBusy] = useState<boolean>(false);
@@ -3546,7 +3908,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 <Wifi className="h-5 w-5" />
               </div>
               <h1 className="text-xl font-bold tracking-tight text-white">
-                JETCYBERNET
+                {appBrandName}
               </h1>
               <p className="mt-1 text-xs text-slate-400">
                 GPON / XGPON OLT &amp; ONU Management Console
@@ -3795,6 +4157,19 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           badgeColor: '',
           onClick: () => setActiveView('SOURCE_CODE'),
         },
+        ...(!isViewerUser
+          ? [
+              {
+                id: 'BRAND_SETTINGS',
+                label: 'Ubah Nama Brand / ISP',
+                icon: Wifi,
+                active: showEditBrandModal,
+                badge: null,
+                badgeColor: '',
+                onClick: () => openEditBrandModal(),
+              },
+            ]
+          : []),
       ],
     },
   ];
@@ -3904,7 +4279,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 <Wifi className="h-4 w-4" />
               </div>
               <span className="text-sm font-bold tracking-tight text-white whitespace-nowrap">
-                JETCYBERNET
+                {appBrandName}
               </span>
             </button>
           </div>
@@ -4046,6 +4421,17 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         type="button"
                         onClick={() => {
                           setOpenDropdown(null);
+                          openEditBrandModal();
+                        }}
+                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-semibold text-sky-400 transition hover:bg-slate-800"
+                      >
+                        <Wifi className="h-3.5 w-3.5" />
+                        Ubah Nama Brand / ISP
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOpenDropdown(null);
                           openBackupRestoreModal();
                         }}
                         className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-semibold text-emerald-400 transition hover:bg-slate-800"
@@ -4174,7 +4560,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-500 text-white">
                   <Wifi className="h-4 w-4" />
                 </div>
-                <span className="font-bold tracking-tight text-white">JETCYBERNET</span>
+                <span className="font-bold tracking-tight text-white">{appBrandName}</span>
               </div>
               <button
                 type="button"
@@ -4347,7 +4733,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-4">
             <div>
               <div className="flex items-center gap-2 text-[11px] font-medium text-slate-400">
-                <span className="text-sky-400">JETCYBERNET</span>
+                <span className="text-sky-400">{appBrandName}</span>
                 <span>·</span>
                 <span className="font-mono uppercase">{activeView.replace('_', ' ')}</span>
               </div>
@@ -9701,38 +10087,861 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               </div>
             )}
 
-            {activeView === 'SPEED_PROFILES' && (
-              <div className="overflow-x-auto rounded border border-[#1e3a5f] bg-[#0c1c30]/90">
-                <table className="w-full text-left text-xs">
-                  <thead className="border-b border-[#1e3a5f] bg-[#162942] text-slate-300">
-                    <tr>
-                      <th className="px-4 py-3">Profile Name</th>
-                      <th className="px-4 py-3">Download</th>
-                      <th className="px-4 py-3">Upload</th>
-                      <th className="px-4 py-3">Burst CBS/PBS</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#1e3a5f]/70">
-                    {db.speed_profiles.map((s) => (
-                      <tr key={s.id}>
-                        <td className="px-4 py-3 font-bold text-white">
-                          {s.profile_name}
-                        </td>
-                        <td className="px-4 py-3 font-mono text-emerald-400">
-                          {s.download_kbps.toLocaleString()} kbps
-                        </td>
-                        <td className="px-4 py-3 font-mono text-sky-400">
-                          {s.upload_kbps.toLocaleString()} kbps
-                        </td>
-                        <td className="px-4 py-3 font-mono">
-                          {s.cbs_bytes} / {s.pbs_bytes} bytes
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            {activeView === 'SPEED_PROFILES' && (() => {
+              const catalogOnuTypes: OnuTypeRecord[] =
+                db.onu_types && db.onu_types.length > 0
+                  ? db.onu_types
+                  : INITIAL_DB_STATE.onu_types || [];
+
+              return (
+                <div className="space-y-6">
+                  {/* SECTION 1: SPEED PROFILES & T-CONT DBA PROFILES */}
+                  <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-slate-900 px-4 py-3">
+                      <div>
+                        <h3 className="text-sm font-bold text-white">
+                          1. GPON Speed Profiles (`profile traffic` &amp; `profile tcont`)
+                        </h3>
+                        <p className="text-[11px] text-slate-400">
+                          Profil limitasi bandwidth downstream/upstream (SIR/PIR) dan T-CONT DBA — otomatis ter-push ke OLT saat ditambahkan.
+                        </p>
+                      </div>
+                      {!isViewerUser && (
+                        <button
+                          type="button"
+                          disabled={speedPushBusy}
+                          onClick={() => setShowAddSpeedModal(true)}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>Add Speed Profile</span>
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="border-b border-slate-800 bg-slate-950/60 text-slate-400">
+                          <tr>
+                            <th className="px-4 py-3">Profile Name</th>
+                            <th className="px-4 py-3">Download (PIR)</th>
+                            <th className="px-4 py-3">Upload</th>
+                            <th className="px-4 py-3">CIR (SIR)</th>
+                            <th className="px-4 py-3">Burst CBS / PBS</th>
+                            <th className="px-4 py-3">T-CONT DBA Profile</th>
+                            <th className="px-4 py-3 text-right">Aksi</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/70">
+                          {db.speed_profiles.map((s) => {
+                            const linkedTcont = db.tcont_profiles.find(
+                              (t) => t.id === s.tcont_profile_id
+                            );
+                            return (
+                              <tr key={s.id} className="hover:bg-slate-800/40">
+                                <td className="px-4 py-3 font-mono font-bold text-white">
+                                  {s.profile_name}
+                                </td>
+                                <td className="px-4 py-3 font-mono text-emerald-400">
+                                  {s.download_kbps.toLocaleString()} kbps
+                                </td>
+                                <td className="px-4 py-3 font-mono text-sky-400">
+                                  {s.upload_kbps.toLocaleString()} kbps
+                                </td>
+                                <td className="px-4 py-3 font-mono text-slate-300">
+                                  {s.cir_kbps.toLocaleString()} kbps
+                                </td>
+                                <td className="px-4 py-3 font-mono text-slate-400">
+                                  {s.cbs_bytes} / {s.pbs_bytes} B
+                                </td>
+                                <td className="px-4 py-3 font-mono text-amber-300">
+                                  {linkedTcont
+                                    ? `${linkedTcont.profile_name} (Type ${linkedTcont.dba_type})`
+                                    : '-'}
+                                </td>
+                                <td className="px-4 py-3 text-right">
+                                  {!isViewerUser && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setDb((prev) => ({
+                                          ...prev,
+                                          speed_profiles:
+                                            prev.speed_profiles.filter(
+                                              (item) => item.id !== s.id
+                                            ),
+                                        }));
+                                        const delCli = [
+                                          'configure terminal',
+                                          'gpon',
+                                          `  no profile traffic ${s.profile_name}`,
+                                          'exit',
+                                          'exit',
+                                          'write',
+                                        ].join('\n');
+                                        void pushProfileCliToTargetOlts(
+                                          delCli,
+                                          `Hapus Speed Profile "${s.profile_name}"`
+                                        );
+                                      }}
+                                      className="rounded-lg border border-rose-500/40 bg-rose-950/40 p-1.5 text-rose-300 transition hover:bg-rose-900/60 hover:text-white"
+                                      title="Hapus Speed Profile"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* SECTION 2: ONU TYPES CATALOG (`onu-type` & `onu-type-if`) */}
+                  <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-slate-900 px-4 py-3">
+                      <div>
+                        <h3 className="text-sm font-bold text-white">
+                          2. ONU Types Template (`pon` → `onu-type` &amp; `onu-type-if`)
+                        </h3>
+                        <p className="text-[11px] text-slate-400">
+                          Definisi tipe hardware ONU (jumlah port Ethernet, POTS, WiFi, Max T-CONT &amp; GEMPort) — otomatis ter-push ke OLT saat ditambahkan.
+                        </p>
+                      </div>
+                      {!isViewerUser && (
+                        <button
+                          type="button"
+                          disabled={speedPushBusy}
+                          onClick={() => setShowAddOnuTypeModal(true)}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-sky-500 disabled:opacity-50"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>Add ONU Type</span>
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="border-b border-slate-800 bg-slate-950/60 text-slate-400">
+                          <tr>
+                            <th className="px-4 py-3">ONU Type Name</th>
+                            <th className="px-4 py-3">PON</th>
+                            <th className="px-4 py-3">Deskripsi</th>
+                            <th className="px-4 py-3">Interfaces (ETH / POTS / WiFi)</th>
+                            <th className="px-4 py-3">Max T-CONT / GEM / Flow</th>
+                            <th className="px-4 py-3 text-right">Aksi</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/70">
+                          {catalogOnuTypes.map((t) => (
+                            <tr key={t.id} className="hover:bg-slate-800/40">
+                              <td className="px-4 py-3 font-mono font-bold text-white">
+                                {t.type_name}
+                              </td>
+                              <td className="px-4 py-3 font-mono uppercase text-sky-400">
+                                {t.pon_type}
+                              </td>
+                              <td className="px-4 py-3 text-slate-300">
+                                {t.description}
+                              </td>
+                              <td className="px-4 py-3 font-mono text-emerald-400">
+                                {t.eth_ports} ETH · {t.pots_ports} POTS · {t.wifi_ports} WiFi
+                              </td>
+                              <td className="px-4 py-3 font-mono text-slate-400">
+                                TCONT:{t.max_tcont} · GEM:{t.max_gemport} · Flow:{t.max_flow_perswitch}
+                              </td>
+                              <td className="px-4 py-3 text-right">
+                                {!isViewerUser && t.type_name !== 'ALL' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setDb((prev) => ({
+                                        ...prev,
+                                        onu_types: (
+                                          prev.onu_types &&
+                                          prev.onu_types.length > 0
+                                            ? prev.onu_types
+                                            : INITIAL_DB_STATE.onu_types || []
+                                        ).filter((item) => item.id !== t.id),
+                                      }));
+                                      const delCli = [
+                                        'configure terminal',
+                                        'pon',
+                                        `  no onu-type ${t.type_name} ${t.pon_type}`,
+                                        'exit',
+                                        'exit',
+                                        'write',
+                                      ].join('\n');
+                                      void pushProfileCliToTargetOlts(
+                                        delCli,
+                                        `Hapus ONU Type "${t.type_name}"`
+                                      );
+                                    }}
+                                    className="rounded-lg border border-rose-500/40 bg-rose-950/40 p-1.5 text-rose-300 transition hover:bg-rose-900/60 hover:text-white"
+                                    title="Hapus ONU Type"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* MODAL 1: ADD SPEED PROFILE & PUSH DIRECTLY TO OLT */}
+                  {showAddSpeedModal && !isViewerUser && (
+                    <div
+                      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
+                      onClick={() => setShowAddSpeedModal(false)}
+                    >
+                      <div
+                        className="animate-modal-in max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900 text-xs text-slate-100 shadow-2xl"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
+                          <div>
+                            <h3 className="text-sm font-bold text-white">
+                              Add Speed Profile &amp; Push Langsung ke OLT
+                            </h3>
+                            <p className="text-[11px] text-slate-400">
+                              Membuat `profile traffic` &amp; `profile tcont` pada mode `gpon` OLT ZTE C300/C320.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowAddSpeedModal(false)}
+                            className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+
+                        <form
+                          onSubmit={(e) => void handleCreateAndPushSpeedProfile(e)}
+                          className="space-y-4 p-6"
+                        >
+                          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                Nama Speed Profile (`profile traffic`)
+                              </label>
+                              <input
+                                type="text"
+                                required
+                                value={newSpeedName}
+                                onChange={(e) =>
+                                  setNewSpeedName(
+                                    e.target.value.toUpperCase().replace(/\s+/g, '-')
+                                  )
+                                }
+                                placeholder="SMARTOLT-100M-DOWN"
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-white focus:border-sky-500 focus:outline-none"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                Target Push OLT
+                              </label>
+                              <select
+                                value={speedPushTargetOltId}
+                                onChange={(e) =>
+                                  setSpeedPushTargetOltId(e.target.value)
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-semibold text-white focus:border-sky-500 focus:outline-none"
+                              >
+                                <option value="ALL">
+                                  Semua OLT ({visibleOlts.length} OLT)
+                                </option>
+                                {visibleOlts.map((o) => (
+                                  <option key={o.id} value={String(o.id)}>
+                                    {o.name} ({o.ip_address})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+
+                          {/* Quick Bandwidth Presets */}
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-[11px] text-slate-400">
+                              Preset Cepat:
+                            </span>
+                            {[
+                              { label: '20 Mbps', kbps: 20480 },
+                              { label: '50 Mbps', kbps: 51200 },
+                              { label: '100 Mbps', kbps: 102400 },
+                              { label: '200 Mbps', kbps: 204800 },
+                              { label: '500 Mbps', kbps: 512000 },
+                              { label: '1 Gbps', kbps: 1048064 },
+                            ].map((p) => (
+                              <button
+                                key={p.label}
+                                type="button"
+                                onClick={() => {
+                                  const tag = p.label
+                                    .toUpperCase()
+                                    .replace(/\s+/g, '');
+                                  setNewSpeedName(`SMARTOLT-${tag}-DOWN`);
+                                  setNewTcontName(`SMARTOLT-${tag}-UP`);
+                                  setNewSpeedDownloadKbps(p.kbps);
+                                  setNewSpeedUploadKbps(p.kbps);
+                                  setNewSpeedCirKbps(p.kbps);
+                                  setNewTcontMaxKbps(p.kbps);
+                                }}
+                                className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 font-mono text-[11px] text-sky-300 hover:border-sky-500/50 hover:text-white"
+                              >
+                                {p.label}
+                              </button>
+                            ))}
+                          </div>
+
+                          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                Download / PIR (kbps)
+                              </label>
+                              <input
+                                type="number"
+                                required
+                                min={64}
+                                value={newSpeedDownloadKbps}
+                                onChange={(e) => {
+                                  const val = Number(e.target.value);
+                                  setNewSpeedDownloadKbps(val);
+                                  setNewSpeedCirKbps(val);
+                                }}
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-emerald-400 focus:border-sky-500 focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                Upload (kbps)
+                              </label>
+                              <input
+                                type="number"
+                                required
+                                min={64}
+                                value={newSpeedUploadKbps}
+                                onChange={(e) => {
+                                  const val = Number(e.target.value);
+                                  setNewSpeedUploadKbps(val);
+                                  setNewTcontMaxKbps(val);
+                                }}
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sky-400 focus:border-sky-500 focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                CIR / SIR (kbps)
+                              </label>
+                              <input
+                                type="number"
+                                required
+                                min={64}
+                                value={newSpeedCirKbps}
+                                onChange={(e) =>
+                                  setNewSpeedCirKbps(Number(e.target.value))
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-white focus:border-sky-500 focus:outline-none"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                Burst CBS (bytes)
+                              </label>
+                              <input
+                                type="number"
+                                required
+                                min={64}
+                                max={65535}
+                                value={newSpeedCbsBytes}
+                                onChange={(e) =>
+                                  setNewSpeedCbsBytes(Number(e.target.value))
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                Burst PBS (bytes)
+                              </label>
+                              <input
+                                type="number"
+                                required
+                                min={64}
+                                max={65535}
+                                value={newSpeedPbsBytes}
+                                onChange={(e) =>
+                                  setNewSpeedPbsBytes(Number(e.target.value))
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-white"
+                              />
+                            </div>
+                          </div>
+
+                          {/* T-CONT DBA Profile Section */}
+                          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3.5 space-y-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-bold text-amber-300">
+                                Konfigurasi T-CONT Upstream (`profile tcont`)
+                              </span>
+                              <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-900 p-1">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setNewSpeedTcontMode('AUTO_CREATE')
+                                  }
+                                  className={`rounded px-2.5 py-1 text-[11px] font-semibold ${
+                                    newSpeedTcontMode === 'AUTO_CREATE'
+                                      ? 'bg-sky-600 text-white'
+                                      : 'text-slate-400 hover:text-white'
+                                  }`}
+                                >
+                                  Buat T-CONT Baru
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setNewSpeedTcontMode('EXISTING')
+                                  }
+                                  className={`rounded px-2.5 py-1 text-[11px] font-semibold ${
+                                    newSpeedTcontMode === 'EXISTING'
+                                      ? 'bg-sky-600 text-white'
+                                      : 'text-slate-400 hover:text-white'
+                                  }`}
+                                >
+                                  Pakai T-CONT yang Ada
+                                </button>
+                              </div>
+                            </div>
+
+                            {newSpeedTcontMode === 'EXISTING' ? (
+                              <div>
+                                <select
+                                  value={newSpeedTcontId}
+                                  onChange={(e) =>
+                                    setNewSpeedTcontId(Number(e.target.value))
+                                  }
+                                  className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 font-mono text-white"
+                                >
+                                  {db.tcont_profiles.map((tp) => (
+                                    <option key={tp.id} value={tp.id}>
+                                      {tp.profile_name} — {tp.description}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            ) : (
+                              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                                <div>
+                                  <label className="mb-1 block text-[11px] text-slate-400">
+                                    Nama T-CONT Profile
+                                  </label>
+                                  <input
+                                    type="text"
+                                    required
+                                    value={newTcontName}
+                                    onChange={(e) =>
+                                      setNewTcontName(
+                                        e.target.value
+                                          .toUpperCase()
+                                          .replace(/\s+/g, '-')
+                                      )
+                                    }
+                                    className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-white"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="mb-1 block text-[11px] text-slate-400">
+                                    DBA Type (1..5)
+                                  </label>
+                                  <select
+                                    value={newTcontDbaType}
+                                    onChange={(e) =>
+                                      setNewTcontDbaType(
+                                        Number(e.target.value) as 1 | 2 | 3 | 4 | 5
+                                      )
+                                    }
+                                    className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-white"
+                                  >
+                                    <option value={4}>Type 4 (Max / Best-Effort)</option>
+                                    <option value={5}>Type 5 (Fixed + Assured + Max)</option>
+                                    <option value={3}>Type 3 (Assured + Max)</option>
+                                    <option value={2}>Type 2 (Assured)</option>
+                                    <option value={1}>Type 1 (Fixed)</option>
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="mb-1 block text-[11px] text-slate-400">
+                                    Max Upstream (kbps)
+                                  </label>
+                                  <input
+                                    type="number"
+                                    required
+                                    min={64}
+                                    value={newTcontMaxKbps}
+                                    onChange={(e) =>
+                                      setNewTcontMaxKbps(Number(e.target.value))
+                                    }
+                                    className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono text-amber-300"
+                                  />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Live ZTE CLI Script Preview (Hidden) */}
+                          <div className="hidden rounded-xl border border-slate-800 bg-slate-950 p-3">
+                            <div className="mb-1.5 flex items-center justify-between text-[11px] text-slate-400">
+                              <span className="font-semibold text-sky-400">
+                                Preview Perintah CLI ZTE yang Akan Di-Push ke OLT:
+                              </span>
+                              <span className="font-mono text-[10px]">ZXAN(config-gpon)#</span>
+                            </div>
+                            <pre className="overflow-x-auto font-mono text-[11px] leading-relaxed text-emerald-300">
+                              {buildSpeedProfileCliScript(
+                                {
+                                  profile_name: newSpeedName || 'SMARTOLT-100M-DOWN',
+                                  cir_kbps: newSpeedCirKbps,
+                                  download_kbps: newSpeedDownloadKbps,
+                                  cbs_bytes: newSpeedCbsBytes,
+                                  pbs_bytes: newSpeedPbsBytes,
+                                },
+                                newSpeedTcontMode === 'AUTO_CREATE'
+                                  ? {
+                                      profile_name:
+                                        newTcontName || 'SMARTOLT-100M-UP',
+                                      dba_type: newTcontDbaType,
+                                      fixed_kbps: newTcontFixedKbps,
+                                      assured_kbps: newTcontAssuredKbps,
+                                      maximum_kbps: newTcontMaxKbps,
+                                    }
+                                  : db.tcont_profiles.find(
+                                      (t) => t.id === Number(newSpeedTcontId)
+                                    ) || null
+                              )}
+                            </pre>
+                          </div>
+
+                          <div className="flex items-center justify-end gap-2 border-t border-slate-800 pt-4">
+                            <button
+                              type="button"
+                              onClick={() => setShowAddSpeedModal(false)}
+                              className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 font-semibold text-slate-300 hover:bg-slate-700"
+                            >
+                              Batal
+                            </button>
+                            <button
+                              type="submit"
+                              disabled={speedPushBusy}
+                              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 font-bold text-white shadow hover:bg-emerald-500 disabled:opacity-50"
+                            >
+                              <Play className="h-3.5 w-3.5" />
+                              <span>
+                                {speedPushBusy
+                                  ? 'Mengeksekusi ke OLT...'
+                                  : 'Simpan & Push ke OLT Sekarang'}
+                              </span>
+                            </button>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* MODAL 2: ADD ONU TYPE & PUSH DIRECTLY TO OLT */}
+                  {showAddOnuTypeModal && !isViewerUser && (
+                    <div
+                      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
+                      onClick={() => setShowAddOnuTypeModal(false)}
+                    >
+                      <div
+                        className="animate-modal-in max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900 text-xs text-slate-100 shadow-2xl"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
+                          <div>
+                            <h3 className="text-sm font-bold text-white">
+                              Add ONU Type &amp; Push Langsung ke OLT
+                            </h3>
+                            <p className="text-[11px] text-slate-400">
+                              Mendaftarkan `onu-type` &amp; `onu-type-if` pada mode `pon` OLT ZTE C300/C320.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowAddOnuTypeModal(false)}
+                            className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+
+                        <form
+                          onSubmit={(e) => void handleCreateAndPushOnuType(e)}
+                          className="space-y-4 p-6"
+                        >
+                          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                ONU Type Name
+                              </label>
+                              <input
+                                type="text"
+                                required
+                                value={newOnuTypeName}
+                                onChange={(e) =>
+                                  setNewOnuTypeName(
+                                    e.target.value.replace(/\s+/g, '_')
+                                  )
+                                }
+                                placeholder="ZTE-F670LV9"
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-white focus:border-sky-500 focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                PON Mode
+                              </label>
+                              <select
+                                value={newOnuTypePon}
+                                onChange={(e) =>
+                                  setNewOnuTypePon(
+                                    e.target.value as 'gpon' | 'xgpon'
+                                  )
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-white"
+                              >
+                                <option value="gpon">GPON</option>
+                                <option value="xgpon">XGPON</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                Target Push OLT
+                              </label>
+                              <select
+                                value={speedPushTargetOltId}
+                                onChange={(e) =>
+                                  setSpeedPushTargetOltId(e.target.value)
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-semibold text-white"
+                              >
+                                <option value="ALL">
+                                  Semua OLT ({visibleOlts.length} OLT)
+                                </option>
+                                {visibleOlts.map((o) => (
+                                  <option key={o.id} value={String(o.id)}>
+                                    {o.name} ({o.ip_address})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="mb-1 block font-semibold text-slate-300">
+                              Deskripsi Hardware
+                            </label>
+                            <input
+                              type="text"
+                              required
+                              value={newOnuTypeDesc}
+                              onChange={(e) => setNewOnuTypeDesc(e.target.value)}
+                              placeholder="4GE+1POTS+2WIFI"
+                              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-white"
+                            />
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-3">
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                Jumlah Port ETH (`eth_0/1..N`)
+                              </label>
+                              <input
+                                type="number"
+                                min={0}
+                                max={24}
+                                value={newOnuTypeEth}
+                                onChange={(e) =>
+                                  setNewOnuTypeEth(Number(e.target.value))
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-emerald-400"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                Jumlah POTS (`pots_0/1..N`)
+                              </label>
+                              <input
+                                type="number"
+                                min={0}
+                                max={8}
+                                value={newOnuTypePots}
+                                onChange={(e) =>
+                                  setNewOnuTypePots(Number(e.target.value))
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sky-400"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block font-semibold text-slate-300">
+                                Jumlah WiFi (`wifi_0/1..N`)
+                              </label>
+                              <input
+                                type="number"
+                                min={0}
+                                max={8}
+                                value={newOnuTypeWifi}
+                                onChange={(e) =>
+                                  setNewOnuTypeWifi(Number(e.target.value))
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-amber-300"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+                            <div>
+                              <label className="mb-1 block text-[11px] text-slate-400">
+                                Max T-CONT
+                              </label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={32}
+                                value={newOnuTypeMaxTcont}
+                                onChange={(e) =>
+                                  setNewOnuTypeMaxTcont(Number(e.target.value))
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 font-mono text-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-[11px] text-slate-400">
+                                Max GEMPort
+                              </label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={128}
+                                value={newOnuTypeMaxGemport}
+                                onChange={(e) =>
+                                  setNewOnuTypeMaxGemport(Number(e.target.value))
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 font-mono text-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-[11px] text-slate-400">
+                                Max Switch
+                              </label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={16}
+                                value={newOnuTypeMaxSwitch}
+                                onChange={(e) =>
+                                  setNewOnuTypeMaxSwitch(Number(e.target.value))
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 font-mono text-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-[11px] text-slate-400">
+                                Max Flow
+                              </label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={64}
+                                value={newOnuTypeMaxFlow}
+                                onChange={(e) =>
+                                  setNewOnuTypeMaxFlow(Number(e.target.value))
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 font-mono text-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-[11px] text-slate-400">
+                                Max IPHost
+                              </label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={16}
+                                value={newOnuTypeMaxIphost}
+                                onChange={(e) =>
+                                  setNewOnuTypeMaxIphost(Number(e.target.value))
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 font-mono text-white"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Live ZTE CLI Preview (Hidden) */}
+                          <div className="hidden rounded-xl border border-slate-800 bg-slate-950 p-3">
+                            <div className="mb-1.5 flex items-center justify-between text-[11px] text-slate-400">
+                              <span className="font-semibold text-sky-400">
+                                Preview Perintah CLI ZTE yang Akan Di-Push ke OLT:
+                              </span>
+                              <span className="font-mono text-[10px]">ZXAN(config-pon)#</span>
+                            </div>
+                            <pre className="max-h-48 overflow-y-auto font-mono text-[11px] leading-relaxed text-emerald-300">
+                              {buildOnuTypeCliScript({
+                                type_name: newOnuTypeName || 'ZTE-F670LV9',
+                                pon_type: newOnuTypePon,
+                                description: newOnuTypeDesc || '4GE+1POTS+2WIFI',
+                                eth_ports: newOnuTypeEth,
+                                pots_ports: newOnuTypePots,
+                                wifi_ports: newOnuTypeWifi,
+                                max_tcont: newOnuTypeMaxTcont,
+                                max_gemport: newOnuTypeMaxGemport,
+                                max_switch_perslot: newOnuTypeMaxSwitch,
+                                max_flow_perswitch: newOnuTypeMaxFlow,
+                                max_iphost: newOnuTypeMaxIphost,
+                              })}
+                            </pre>
+                          </div>
+
+                          <div className="flex items-center justify-end gap-2 border-t border-slate-800 pt-4">
+                            <button
+                              type="button"
+                              onClick={() => setShowAddOnuTypeModal(false)}
+                              className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 font-semibold text-slate-300 hover:bg-slate-700"
+                            >
+                              Batal
+                            </button>
+                            <button
+                              type="submit"
+                              disabled={speedPushBusy}
+                              className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-4 py-2 font-bold text-white shadow hover:bg-sky-500 disabled:opacity-50"
+                            >
+                              <Play className="h-3.5 w-3.5" />
+                              <span>
+                                {speedPushBusy
+                                  ? 'Mengeksekusi ke OLT...'
+                                  : 'Simpan & Push ONU Type ke OLT'}
+                              </span>
+                            </button>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {activeView === 'GRAPHS' && (() => {
               const allUplinks = oltGraphsData?.uplinks || [];
@@ -11523,6 +12732,90 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                 Tutup
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================
+          MODAL UBAH NAMA BRAND / ISP (DYNAMIC BRANDING)
+         =================================================================== */}
+      {showEditBrandModal && !isViewerUser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
+          onClick={() => setShowEditBrandModal(false)}
+        >
+          <div
+            className="animate-modal-in w-full max-w-md overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 text-xs text-slate-100 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
+                  <Wifi className="h-4 w-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Ubah Nama Brand / ISP
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Sesuaikan nama aplikasi pada Header, Breadcrumb &amp; Halaman Login
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowEditBrandModal(false)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveBrandName} className="space-y-4 p-6">
+              <div>
+                <label className="mb-1.5 block font-semibold text-slate-300">
+                  Nama Brand / Perusahaan ISP
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  maxLength={40}
+                  value={brandNameDraft}
+                  onChange={(e) => setBrandNameDraft(e.target.value)}
+                  placeholder="Contoh: JETCYBERNET / NUSANTARA FIBER"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-sm font-bold text-white placeholder-slate-500 focus:border-sky-400 focus:outline-none"
+                />
+                <p className="mt-1.5 text-[11px] text-slate-400">
+                  Nama ini akan langsung tampil di navigasi atas, sub-header halaman, menu mobile, dan halaman login.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between border-t border-slate-800 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setBrandNameDraft('JETCYBERNET')}
+                  className="text-[11px] font-medium text-slate-400 hover:text-sky-300"
+                >
+                  Reset ke Default
+                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowEditBrandModal(false)}
+                    className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 font-semibold text-slate-300 hover:bg-slate-700"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    className="rounded-lg bg-sky-600 px-4 py-2 font-bold text-white hover:bg-sky-500"
+                  >
+                    Simpan Nama
+                  </button>
+                </div>
+              </div>
+            </form>
           </div>
         </div>
       )}
