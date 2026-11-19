@@ -87,6 +87,8 @@ import {
   LogOut,
   Clock,
   Database,
+  Upload,
+  Globe,
 } from 'lucide-react';
 
 import {
@@ -1682,7 +1684,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
   const [showBackupModal, setShowBackupModal] = useState<boolean>(false);
 
-  // Dynamic Brand / Company Name State (persisted in localStorage)
+  // Dynamic Brand Name, Custom Logo & Browser Tab Title State (persisted in localStorage)
   const [appBrandName, setAppBrandName] = useState<string>(() => {
     try {
       const saved = window.localStorage.getItem('smartolt_brand_name_v1');
@@ -1691,27 +1693,135 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       return 'JETCYBERNET';
     }
   });
+  const [appBrandLogo, setAppBrandLogo] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem('smartolt_brand_logo_v1') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [appPageTitle, setAppPageTitle] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem('smartolt_page_title_v1') || '';
+    } catch {
+      return '';
+    }
+  });
   const [showEditBrandModal, setShowEditBrandModal] = useState<boolean>(false);
   const [brandNameDraft, setBrandNameDraft] = useState<string>(appBrandName);
+  const [brandLogoDraft, setBrandLogoDraft] = useState<string>(appBrandLogo);
+  const [pageTitleDraft, setPageTitleDraft] = useState<string>(appPageTitle);
+  const brandLogoInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Sync Browser Tab Title (document.title) & Favicon dynamically
+  useEffect(() => {
+    const effectiveTitle =
+      appPageTitle.trim() || `${appBrandName} — GPON OLT Manager`;
+    document.title = effectiveTitle;
+  }, [appBrandName, appPageTitle]);
+
+  useEffect(() => {
+    try {
+      let iconLink = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+      if (!iconLink) {
+        iconLink = document.createElement('link');
+        iconLink.rel = 'icon';
+        document.head.appendChild(iconLink);
+      }
+      if (appBrandLogo.trim()) {
+        iconLink.href = appBrandLogo.trim();
+      } else {
+        // Default sky-blue Wifi SVG favicon
+        iconLink.href =
+          'data:image/svg+xml,' +
+          encodeURIComponent(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#0c4a6e"/><path d="M6 13.5a15 15 0 0 1 20 0M9.5 17.5a10 10 0 0 1 13 0M13 21.5a5 5 0 0 1 6 0" stroke="#38bdf8" stroke-width="2.4" stroke-linecap="round" fill="none"/><circle cx="16" cy="25" r="1.6" fill="#38bdf8"/></svg>'
+          );
+      }
+    } catch {
+      // Ignore favicon errors
+    }
+  }, [appBrandLogo]);
 
   const openEditBrandModal = (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     if (isViewerUser) return;
     setBrandNameDraft(appBrandName);
+    setBrandLogoDraft(appBrandLogo);
+    setPageTitleDraft(appPageTitle);
     setShowEditBrandModal(true);
+  };
+
+  const handleBrandLogoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      showToast('⚠ File logo harus berupa gambar (PNG, JPG, WebP, SVG, atau ICO).');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      if (!result) return;
+      // Keep SVG/ICO or compact files directly; downscale large raster images to 256x256 PNG
+      if (
+        file.type === 'image/svg+xml' ||
+        file.type === 'image/x-icon' ||
+        file.size <= 300 * 1024
+      ) {
+        setBrandLogoDraft(result);
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 256;
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, w, h);
+          setBrandLogoDraft(canvas.toDataURL('image/png'));
+        } else {
+          setBrandLogoDraft(result);
+        }
+      };
+      img.onerror = () => setBrandLogoDraft(result);
+      img.src = result;
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
   };
 
   const handleSaveBrandName = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleaned = brandNameDraft.trim() || 'JETCYBERNET';
-    setAppBrandName(cleaned);
+    const cleanedName = brandNameDraft.trim() || 'JETCYBERNET';
+    const cleanedLogo = brandLogoDraft.trim();
+    const cleanedTitle = pageTitleDraft.trim();
+    setAppBrandName(cleanedName);
+    setAppBrandLogo(cleanedLogo);
+    setAppPageTitle(cleanedTitle);
     try {
-      window.localStorage.setItem('smartolt_brand_name_v1', cleaned);
+      window.localStorage.setItem('smartolt_brand_name_v1', cleanedName);
+      if (cleanedLogo) {
+        window.localStorage.setItem('smartolt_brand_logo_v1', cleanedLogo);
+      } else {
+        window.localStorage.removeItem('smartolt_brand_logo_v1');
+      }
+      if (cleanedTitle) {
+        window.localStorage.setItem('smartolt_page_title_v1', cleanedTitle);
+      } else {
+        window.localStorage.removeItem('smartolt_page_title_v1');
+      }
     } catch {
-      // Ignore storage error
+      showToast('⚠ Gambar logo terlalu besar untuk localStorage. Gunakan file gambar yang lebih kecil.');
+      return;
     }
     setShowEditBrandModal(false);
-    showToast(`✓ Nama brand aplikasi berhasil diubah menjadi "${cleaned}".`);
+    showToast(`✓ Branding, logo, dan judul tab "${cleanedTitle || `${cleanedName} — GPON OLT Manager`}" berhasil disimpan.`);
   };
 
   // ==========================================================================
@@ -4134,8 +4244,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/90 shadow-2xl">
             {/* Clean Brand Header */}
             <div className="border-b border-slate-800/80 px-6 pt-7 pb-5 text-center sm:px-8">
-              <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
-                <Wifi className="h-5 w-5" />
+              <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center overflow-hidden rounded-xl bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
+                {appBrandLogo ? (
+                  <img
+                    src={appBrandLogo}
+                    alt={appBrandName}
+                    className="h-full w-full object-contain p-1"
+                  />
+                ) : (
+                  <Wifi className="h-5 w-5" />
+                )}
               </div>
               <h1 className="text-xl font-bold tracking-tight text-white">
                 {appBrandName}
@@ -4391,7 +4509,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           ? [
               {
                 id: 'BRAND_SETTINGS',
-                label: 'Ubah Nama Brand / ISP',
+                label: 'Branding, Logo & Judul Tab',
                 icon: Wifi,
                 active: showEditBrandModal,
                 badge: null,
@@ -4505,8 +4623,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
               onClick={() => setActiveView('DASHBOARD')}
               className="flex items-center gap-2.5 text-left"
             >
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
-                <Wifi className="h-4 w-4" />
+              <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-lg bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
+                {appBrandLogo ? (
+                  <img
+                    src={appBrandLogo}
+                    alt={appBrandName}
+                    className="h-full w-full object-contain p-0.5"
+                  />
+                ) : (
+                  <Wifi className="h-4 w-4" />
+                )}
               </div>
               <span className="text-sm font-bold tracking-tight text-white whitespace-nowrap">
                 {appBrandName}
@@ -4656,7 +4782,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                         className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left font-semibold text-sky-400 transition hover:bg-slate-800"
                       >
                         <Wifi className="h-3.5 w-3.5" />
-                        Ubah Nama Brand / ISP
+                        Branding, Logo &amp; Judul Tab
                       </button>
                       <button
                         type="button"
@@ -4787,8 +4913,16 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           >
             <div className="flex h-14 items-center justify-between border-b border-slate-800 px-4">
               <div className="flex items-center gap-2">
-                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-500 text-white">
-                  <Wifi className="h-4 w-4" />
+                <div className="flex h-7 w-7 items-center justify-center overflow-hidden rounded-lg bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
+                  {appBrandLogo ? (
+                    <img
+                      src={appBrandLogo}
+                      alt={appBrandName}
+                      className="h-full w-full object-contain p-0.5"
+                    />
+                  ) : (
+                    <Wifi className="h-4 w-4" />
+                  )}
                 </div>
                 <span className="font-bold tracking-tight text-white">{appBrandName}</span>
               </div>
@@ -13294,7 +13428,7 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
       )}
 
       {/* ===================================================================
-          MODAL UBAH NAMA BRAND / ISP (DYNAMIC BRANDING)
+          MODAL BRANDING: UBAH LOGO, NAMA BRAND / ISP & JUDUL TAB BROWSER
          =================================================================== */}
       {showEditBrandModal && !isViewerUser && (
         <div
@@ -13302,20 +13436,28 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           onClick={() => setShowEditBrandModal(false)}
         >
           <div
-            className="animate-modal-in w-full max-w-md overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 text-xs text-slate-100 shadow-2xl"
+            className="animate-modal-in w-full max-w-lg overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 text-xs text-slate-100 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
               <div className="flex items-center gap-2.5">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
-                  <Wifi className="h-4 w-4" />
+                <div className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-lg bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
+                  {brandLogoDraft ? (
+                    <img
+                      src={brandLogoDraft}
+                      alt="Logo Preview"
+                      className="h-full w-full object-contain p-0.5"
+                    />
+                  ) : (
+                    <Wifi className="h-4 w-4" />
+                  )}
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-white">
-                    Ubah Nama Brand / ISP
+                    Branding, Logo &amp; Judul Tab Browser
                   </h3>
                   <p className="text-[11px] text-slate-400">
-                    Sesuaikan nama aplikasi pada Header, Breadcrumb &amp; Halaman Login
+                    Sesuaikan logo, nama brand di Header/Login, serta judul &amp; ikon tab browser
                   </p>
                 </div>
               </div>
@@ -13329,6 +13471,90 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
             </div>
 
             <form onSubmit={handleSaveBrandName} className="space-y-4 p-6">
+              {/* Live Preview: Browser Tab + Header */}
+              <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-3 space-y-2.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                  Live Preview (Tab Browser &amp; Header)
+                </div>
+                <div className="flex items-center gap-2 rounded-t-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-[11px] text-slate-200">
+                  {brandLogoDraft ? (
+                    <img
+                      src={brandLogoDraft}
+                      alt="Favicon"
+                      className="h-3.5 w-3.5 rounded-xs object-contain"
+                    />
+                  ) : (
+                    <Globe className="h-3.5 w-3.5 text-sky-400" />
+                  )}
+                  <span className="truncate font-medium">
+                    {pageTitleDraft.trim() ||
+                      `${brandNameDraft.trim() || 'JETCYBERNET'} — GPON OLT Manager`}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2.5 rounded-lg border border-slate-800/80 bg-[#090d16] px-3 py-2">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
+                    {brandLogoDraft ? (
+                      <img
+                        src={brandLogoDraft}
+                        alt="Header Logo"
+                        className="h-full w-full object-contain p-0.5"
+                      />
+                    ) : (
+                      <Wifi className="h-4 w-4" />
+                    )}
+                  </div>
+                  <span className="text-sm font-bold tracking-tight text-white">
+                    {brandNameDraft.trim() || 'JETCYBERNET'}
+                  </span>
+                </div>
+              </div>
+
+              {/* 1. Update Logo Brand */}
+              <div>
+                <label className="mb-1.5 block font-semibold text-slate-300">
+                  Logo Brand &amp; Favicon Tab
+                </label>
+                <input
+                  ref={brandLogoInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/svg+xml,image/x-icon"
+                  onChange={handleBrandLogoFileUpload}
+                  className="hidden"
+                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => brandLogoInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/15 px-3 py-2 text-xs font-semibold text-sky-300 transition hover:bg-sky-500/25 hover:text-white cursor-pointer"
+                  >
+                    <Upload className="h-3.5 w-3.5" />
+                    Upload Logo (PNG/JPG/SVG)
+                  </button>
+                  {brandLogoDraft && (
+                    <button
+                      type="button"
+                      onClick={() => setBrandLogoDraft('')}
+                      className="inline-flex items-center gap-1 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-2 text-xs font-medium text-rose-300 transition hover:bg-rose-500/20 cursor-pointer"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Hapus Logo
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  value={brandLogoDraft.startsWith('data:') ? '' : brandLogoDraft}
+                  onChange={(e) => setBrandLogoDraft(e.target.value)}
+                  placeholder={
+                    brandLogoDraft.startsWith('data:')
+                      ? 'Logo file lokal sudah dipilih (atau tempel URL gambar di sini)'
+                      : 'Atau masukkan URL gambar logo (https://...)'
+                  }
+                  className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:border-sky-400 focus:outline-none"
+                />
+              </div>
+
+              {/* 2. Nama Brand / ISP */}
               <div>
                 <label className="mb-1.5 block font-semibold text-slate-300">
                   Nama Brand / Perusahaan ISP
@@ -13340,19 +13566,38 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   maxLength={40}
                   value={brandNameDraft}
                   onChange={(e) => setBrandNameDraft(e.target.value)}
-                  placeholder="Contoh: JETCYBERNET / NUSANTARA FIBER"
-                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-sm font-bold text-white placeholder-slate-500 focus:border-sky-400 focus:outline-none"
+                  placeholder="Contoh: UHUY-NET / JETCYBERNET"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm font-bold text-white placeholder-slate-500 focus:border-sky-400 focus:outline-none"
                 />
-                <p className="mt-1.5 text-[11px] text-slate-400">
-                  Nama ini akan langsung tampil di navigasi atas, sub-header halaman, menu mobile, dan halaman login.
+              </div>
+
+              {/* 3. Judul Tab Browser (document.title) */}
+              <div>
+                <label className="mb-1.5 block font-semibold text-slate-300">
+                  Judul Tab Browser (Page Title)
+                </label>
+                <input
+                  type="text"
+                  maxLength={80}
+                  value={pageTitleDraft}
+                  onChange={(e) => setPageTitleDraft(e.target.value)}
+                  placeholder={`Default: ${brandNameDraft.trim() || 'JETCYBERNET'} — GPON OLT Manager`}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3.5 py-2 text-xs font-medium text-white placeholder-slate-500 focus:border-sky-400 focus:outline-none"
+                />
+                <p className="mt-1 text-[11px] text-slate-400">
+                  Mengubah teks judul dan ikon pada tab browser (menggantikan &quot;SmartOLT GPON Manager&quot;).
                 </p>
               </div>
 
               <div className="flex items-center justify-between border-t border-slate-800 pt-4">
                 <button
                   type="button"
-                  onClick={() => setBrandNameDraft('JETCYBERNET')}
-                  className="text-[11px] font-medium text-slate-400 hover:text-sky-300"
+                  onClick={() => {
+                    setBrandNameDraft('JETCYBERNET');
+                    setBrandLogoDraft('');
+                    setPageTitleDraft('');
+                  }}
+                  className="text-[11px] font-medium text-slate-400 hover:text-sky-300 cursor-pointer"
                 >
                   Reset ke Default
                 </button>
@@ -13360,15 +13605,15 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
                   <button
                     type="button"
                     onClick={() => setShowEditBrandModal(false)}
-                    className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 font-semibold text-slate-300 hover:bg-slate-700"
+                    className="rounded-lg border border-slate-700 bg-slate-800 px-3.5 py-2 font-semibold text-slate-300 hover:bg-slate-700 cursor-pointer"
                   >
                     Batal
                   </button>
                   <button
                     type="submit"
-                    className="rounded-lg bg-sky-600 px-4 py-2 font-bold text-white hover:bg-sky-500"
+                    className="rounded-lg bg-sky-600 px-4 py-2 font-bold text-white hover:bg-sky-500 cursor-pointer"
                   >
-                    Simpan Nama
+                    Simpan Perubahan
                   </button>
                 </div>
               </div>
