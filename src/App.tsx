@@ -280,6 +280,25 @@ export default function App() {
           prevOnu.mgmt_keep_service_port ?? incOnu.mgmt_keep_service_port,
         mgmt_allow_remote_access:
           prevOnu.mgmt_allow_remote_access ?? incOnu.mgmt_allow_remote_access,
+        // Preserve valid optical attenuation when ONU is working and incoming poll had null
+        onu_rx_dbm:
+          incOnu.onu_rx_dbm !== null
+            ? incOnu.onu_rx_dbm
+            : incOnu.phase_state === 'working'
+              ? prevOnu.onu_rx_dbm
+              : null,
+        olt_rx_dbm:
+          incOnu.olt_rx_dbm !== null
+            ? incOnu.olt_rx_dbm
+            : incOnu.phase_state === 'working'
+              ? prevOnu.olt_rx_dbm
+              : null,
+        onu_tx_dbm:
+          incOnu.onu_tx_dbm !== null
+            ? incOnu.onu_tx_dbm
+            : incOnu.phase_state === 'working'
+              ? prevOnu.onu_tx_dbm
+              : null,
       };
     });
 
@@ -3157,7 +3176,68 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     }
   }, [dbLoaded, autoSyncedInitial, db.olts]);
 
-  // Fast Real-Time OLT TCP Reachability Ping Poller (Every 5s)
+  // Refs so background pollers never tear down / restart / flicker when switching views or viewing ONU Config
+  const activeViewRef = useRef(activeView);
+  const selectedOltIdRef = useRef(selectedOltId);
+  const selectedOnuIdRef = useRef(selectedOnuId);
+  const dbOltsRef = useRef(db.olts);
+  useEffect(() => {
+    activeViewRef.current = activeView;
+  }, [activeView]);
+  useEffect(() => {
+    selectedOltIdRef.current = selectedOltId;
+  }, [selectedOltId]);
+  useEffect(() => {
+    selectedOnuIdRef.current = selectedOnuId;
+  }, [selectedOnuId]);
+  useEffect(() => {
+    dbOltsRef.current = db.olts;
+  }, [db.olts]);
+
+  // Lightweight comparison to avoid unnecessary React re-renders (eliminates page blink on background refresh)
+  const hasVisibleLiveTelemetryChanged = (
+    prev: SmartOltDatabaseState,
+    next: SmartOltDatabaseState
+  ): boolean => {
+    if (prev.olts.length !== next.olts.length) return true;
+    for (let i = 0; i < prev.olts.length; i++) {
+      if (
+        prev.olts[i].id !== next.olts[i].id ||
+        prev.olts[i].status !== next.olts[i].status
+      ) {
+        return true;
+      }
+    }
+    if (prev.onus.length !== next.onus.length) return true;
+    const prevOnuMap = new Map(prev.onus.map((u) => [u.id, u]));
+    for (const nu of next.onus) {
+      const pu = prevOnuMap.get(nu.id);
+      if (
+        !pu ||
+        pu.is_authorized !== nu.is_authorized ||
+        pu.phase_state !== nu.phase_state ||
+        pu.onu_rx_dbm !== nu.onu_rx_dbm ||
+        pu.olt_rx_dbm !== nu.olt_rx_dbm ||
+        pu.onu_tx_dbm !== nu.onu_tx_dbm ||
+        pu.ip_address !== nu.ip_address ||
+        pu.last_offline_reason !== nu.last_offline_reason ||
+        pu.customer_name !== nu.customer_name
+      ) {
+        return true;
+      }
+    }
+    if (prev.pon_ports.length !== next.pon_ports.length) return true;
+    const prevPortMap = new Map(prev.pon_ports.map((p) => [p.id, p]));
+    for (const np of next.pon_ports) {
+      const pp = prevPortMap.get(np.id);
+      if (!pp || pp.online_onus !== np.online_onus || pp.total_onus !== np.total_onus) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Stabilized Silent Background OLT TCP Reachability Poller (Every 15s, with server-side 3-strike hysteresis)
   const pollOltRealtimeStatus = async () => {
     try {
       const resp = await fetch('/api/olts/ping-status', {
@@ -3237,10 +3317,11 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
     }
   };
 
-  // Background Real-Time OLT Status, Optical Power & MikroTik WAN IP Poller (Every 10s)
+  // Silent Background Real-Time OLT Status, Optical Power & MikroTik WAN IP Poller (No page flicker!)
   const pollRealtimeOltTelemetry = async (targetOltId?: number, targetOnuId?: number) => {
+    const oltsNow = dbOltsRef.current;
     const oltToPoll =
-      db.olts.find((o) => o.id === (targetOltId || selectedOltId)) || db.olts[0];
+      oltsNow.find((o) => o.id === (targetOltId || selectedOltIdRef.current)) || oltsNow[0];
     if (!oltToPoll) return;
     const pollStartedAt = Date.now();
     try {
@@ -3254,18 +3335,23 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
           onuId:
             targetOnuId !== undefined
               ? targetOnuId
-              : activeView === 'ONU_DETAIL'
-                ? selectedOnuId
+              : activeViewRef.current === 'ONU_DETAIL'
+                ? selectedOnuIdRef.current
                 : undefined,
         }),
       });
       const data = await resp.json();
       if (data && !data.skipped && data.state) {
-        // Update OLT ONLINE/OFFLINE status and telemetry even when reachable === false
-        if (lastUserMutationAtRef.current < pollStartedAt) {
-          skipNextServerSyncRef.current = true;
-        }
-        setDb((prev) => mergeLiveOltStatePreservingUserMetadata(prev, data.state));
+        setDb((prev) => {
+          const merged = mergeLiveOltStatePreservingUserMetadata(prev, data.state);
+          if (!hasVisibleLiveTelemetryChanged(prev, merged)) {
+            return prev;
+          }
+          if (lastUserMutationAtRef.current < pollStartedAt) {
+            skipNextServerSyncRef.current = true;
+          }
+          return merged;
+        });
       }
     } catch {
       // ignore transient network errors during background poll
@@ -3274,25 +3360,36 @@ down    Tx :11.026(dbm)       Rx :-23.190(dbm)      34.216(db)`
 
   useEffect(() => {
     if (!dbLoaded || db.olts.length === 0) return;
-    // Immediate real-time TCP reachability check for all OLTs
-    void pollOltRealtimeStatus();
+    // Calm, non-flickering background refresh (15s interval, paused when tab hidden, never resets on tab navigation)
+    const initialPingTimer = setTimeout(() => {
+      if (document.visibilityState === 'visible') {
+        void pollOltRealtimeStatus();
+      }
+    }, 3000);
     const statusInterval = setInterval(() => {
-      void pollOltRealtimeStatus();
-    }, 5000);
-    // Initial real-time status & WAN IP poll shortly after load
-    const initialTimer = setTimeout(() => {
-      void pollRealtimeOltTelemetry();
-    }, 1500);
-    // Continuous real-time poll every 10 seconds
+      if (document.visibilityState === 'visible') {
+        void pollOltRealtimeStatus();
+      }
+    }, 15000);
+
+    const initialTeleTimer = setTimeout(() => {
+      if (document.visibilityState === 'visible') {
+        void pollRealtimeOltTelemetry();
+      }
+    }, 2000);
     const intervalTimer = setInterval(() => {
-      void pollRealtimeOltTelemetry();
-    }, 10000);
+      if (document.visibilityState === 'visible') {
+        void pollRealtimeOltTelemetry();
+      }
+    }, 15000);
+
     return () => {
+      clearTimeout(initialPingTimer);
       clearInterval(statusInterval);
-      clearTimeout(initialTimer);
+      clearTimeout(initialTeleTimer);
       clearInterval(intervalTimer);
     };
-  }, [dbLoaded, db.olts.length, selectedOltId, activeView, selectedOnuId]);
+  }, [dbLoaded, db.olts.length]);
 
   // Central Live OLT CLI Executor — sends commands via Telnet/SSH to the target OLT
   // and updates provisioning_logs + toast with the real OLT execution response.

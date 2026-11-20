@@ -32,6 +32,7 @@ import {
   parseZteMultiWanIpOutput,
   parseZtePonPowerRxTable,
   parseZteOpticalAttenuation,
+  parseZteMultiOpticalAttenuation,
   parseZteInterfaceTraffic,
   parseZteMultiInterfaceTraffic,
   findNextAvailableOnuIndex,
@@ -4639,14 +4640,21 @@ app.post(
 
       if (!telnetRes.reachable || !telnetRes.output.trim()) {
         if (!telnetRes.reachable) {
-          const cascaded = cascadeOfflineOltsToOnusAndPorts({
-            ...state,
-            olts: state.olts.map((o) =>
-              o.id === oltId ? { ...o, status: 'OFFLINE' as const } : o
-            ),
-          });
-          await saveDatabaseState(cascaded.state);
-          state = cascaded.state;
+          const evalStatus = evaluateOltReachabilityStatus(
+            oltId,
+            olt?.status === 'OFFLINE' ? 'OFFLINE' : 'ONLINE',
+            false
+          );
+          if (evalStatus === 'OFFLINE') {
+            const cascaded = cascadeOfflineOltsToOnusAndPorts({
+              ...state,
+              olts: state.olts.map((o) =>
+                o.id === oltId ? { ...o, status: 'OFFLINE' as const } : o
+              ),
+            });
+            await saveDatabaseState(cascaded.state);
+            state = cascaded.state;
+          }
         }
         res.json({
           ok: false,
@@ -4660,6 +4668,7 @@ app.post(
       }
 
     const effectiveOltId = olt ? olt.id : oltId;
+    markOltReachable(effectiveOltId);
 
     // Automatically enrich any PON ports / ONUs whose details were not in initial `show running-config`
     const enrichedMissingOutput = await fetchMissingOnuConfigsFromOlt({
@@ -4766,11 +4775,74 @@ app.post(
   }
 });
 
+// OLT Reachability Hysteresis Tracker — prevents overly sensitive false-positive red OLT disconnect alerts
+// caused by momentary VPN jitter or ZTE VTY busyness while Telnet commands are executing.
+const OLT_PROBE_TIMEOUT_MS = 4500;
+const OLT_OFFLINE_FAIL_THRESHOLD = 3;
+const OLT_RECENT_REACHABLE_GRACE_MS = 30_000;
+const oltHealthTracker = new Map<
+  number,
+  { consecutiveFails: number; lastReachableAtMs: number }
+>();
+
+function markOltReachable(oltId: number) {
+  oltHealthTracker.set(oltId, {
+    consecutiveFails: 0,
+    lastReachableAtMs: Date.now(),
+  });
+}
+
+function evaluateOltReachabilityStatus(
+  oltId: number,
+  currentStatus: 'ONLINE' | 'OFFLINE',
+  reachableNow: boolean
+): 'ONLINE' | 'OFFLINE' {
+  const now = Date.now();
+  const prev = oltHealthTracker.get(oltId) || {
+    consecutiveFails: 0,
+    lastReachableAtMs: currentStatus === 'ONLINE' ? now : 0,
+  };
+
+  if (reachableNow) {
+    oltHealthTracker.set(oltId, {
+      consecutiveFails: 0,
+      lastReachableAtMs: now,
+    });
+    return 'ONLINE';
+  }
+
+  // Already confirmed OFFLINE — stay OFFLINE until reachable again
+  if (currentStatus === 'OFFLINE') {
+    oltHealthTracker.set(oltId, {
+      consecutiveFails: Math.max(prev.consecutiveFails + 1, OLT_OFFLINE_FAIL_THRESHOLD),
+      lastReachableAtMs: prev.lastReachableAtMs,
+    });
+    return 'OFFLINE';
+  }
+
+  const nextFails = prev.consecutiveFails + 1;
+  oltHealthTracker.set(oltId, {
+    consecutiveFails: nextFails,
+    lastReachableAtMs: prev.lastReachableAtMs,
+  });
+
+  // Only transition ONLINE -> OFFLINE after sustained consecutive failures AND grace window elapsed
+  const elapsedSinceOk = now - prev.lastReachableAtMs;
+  if (
+    nextFails >= OLT_OFFLINE_FAIL_THRESHOLD &&
+    elapsedSinceOk >= OLT_RECENT_REACHABLE_GRACE_MS
+  ) {
+    return 'OFFLINE';
+  }
+
+  return 'ONLINE';
+}
+
 // Fast TCP reachability probe for real-time OLT Online/Offline status check
 function probeOltTcpReachable(
   host: string,
   port: number,
-  timeoutMs = 2500
+  timeoutMs = OLT_PROBE_TIMEOUT_MS
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const cleanHost = String(host || '').trim();
@@ -4865,7 +4937,7 @@ function cascadeOfflineOltsToOnusAndPorts(state: SmartOltDatabaseState): {
   };
 }
 
-// POST /api/olts/ping-status — Fast real-time TCP health probe for all OLTs
+// POST /api/olts/ping-status — Stabilized TCP health probe with hysteresis (no false-positive red alerts)
 app.post('/api/olts/ping-status', async (req, res) => {
   try {
     if (!checkApiRateLimit(req, 'olts-ping-status', 180, 60_000)) {
@@ -4883,12 +4955,23 @@ app.post('/api/olts/ping-status', async (req, res) => {
 
     const results = await Promise.all(
       state.olts.map(async (o) => {
+        const currentStatus: 'ONLINE' | 'OFFLINE' =
+          o.status === 'OFFLINE' ? 'OFFLINE' : 'ONLINE';
+        // Never open a competing TCP probe while a Telnet session is actively polling this OLT
+        if (oltPollInFlight.has(o.id)) {
+          statuses[o.id] = currentStatus;
+          return { id: o.id, status: currentStatus };
+        }
         const reachable = await probeOltTcpReachable(
           o.ip_address,
           o.telnet_port,
-          2500
+          OLT_PROBE_TIMEOUT_MS
         );
-        const nextStatus: 'ONLINE' | 'OFFLINE' = reachable ? 'ONLINE' : 'OFFLINE';
+        const nextStatus = evaluateOltReachabilityStatus(
+          o.id,
+          currentStatus,
+          reachable
+        );
         statuses[o.id] = nextStatus;
         if (o.status !== nextStatus) {
           changed = true;
@@ -4974,7 +5057,29 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         `show gpon remote-onu wan-ip ${onuIf}`
       );
     } else {
-      // Always poll real OLT Uplink & active PON port traffic during real-time telemetry cycles (no VLAN interfaces)
+      const oltOnus = state.onus.filter(
+        (u) => u.olt_id === olt.id && u.is_authorized && u.onu_index !== null
+      );
+      const activePorts = Array.from(
+        new Set(oltOnus.map((u) => `1/${u.board}/${u.port}`))
+      );
+
+      // PRIORITY 1: Always fetch optical attenuation (`show pon power onu-rx`) for ALL active PON ports first
+      // so EVERY online ONU has its real redaman (dBm) displayed without missing ports!
+      for (const pCoord of activePorts) {
+        cmds.push(`show pon power onu-rx gpon-olt_${pCoord}`);
+      }
+
+      // PRIORITY 2: Backfill any working ONUs that still lack `onu_rx_dbm` via per-ONU `show pon power attenuation`
+      const missingSignalOnus = oltOnus
+        .filter((u) => u.phase_state === 'working' && u.onu_rx_dbm === null)
+        .slice(0, 8);
+      for (const target of missingSignalOnus) {
+        const onuIf = `gpon-onu_1/${target.board}/${target.port}:${target.onu_index}`;
+        cmds.push(`show pon power attenuation ${onuIf}`);
+      }
+
+      // PRIORITY 3: Physical Uplink & active PON port traffic counters (no VLAN interfaces)
       const oltUplinkIfs = (state.uplink_ports || [])
         .filter(
           (u) =>
@@ -4993,21 +5098,11 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       for (const upIf of effectiveUplinks) {
         cmds.push(`show interface ${upIf}`);
       }
-
-      const oltOnus = state.onus.filter(
-        (u) => u.olt_id === olt.id && u.is_authorized && u.onu_index !== null
-      );
-      const activePorts = Array.from(
-        new Set(oltOnus.map((u) => `1/${u.board}/${u.port}`))
-      );
       for (const pCoord of activePorts) {
         cmds.push(`show interface gpon-olt_${pCoord}`);
       }
-      if (activePorts.length > 0) {
-        const portCoord =
-          activePorts[roundRobinTelemetryCursor % activePorts.length];
-        cmds.push(`show pon power onu-rx gpon-olt_${portCoord}`);
-      }
+
+      // PRIORITY 4: Round-robin per-ONU WAN IP / PPPoE / detail-info batch
       if (oltOnus.length > 0) {
         const batchSize = Math.min(3, oltOnus.length);
         for (let i = 0; i < batchSize; i++) {
@@ -5029,29 +5124,46 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       }
     }
 
-    // Quick 2.5s TCP reachability check before running full 16s Telnet command batch
+    // Stabilized TCP reachability check with hysteresis (avoids false-positive offline cascades)
     const tcpAlive = await probeOltTcpReachable(
       olt.ip_address,
       olt.telnet_port,
-      2500
+      OLT_PROBE_TIMEOUT_MS
     );
     if (!tcpAlive) {
       const latestState = await loadDatabaseState();
-      const cascaded = cascadeOfflineOltsToOnusAndPorts({
-        ...latestState,
-        olts: latestState.olts.map((o) =>
-          o.id === olt.id ? { ...o, status: 'OFFLINE' as const } : o
-        ),
-      });
-      if (olt.status !== 'OFFLINE' || cascaded.mutated) {
-        await saveDatabaseState(cascaded.state);
+      const currentOltStatus: 'ONLINE' | 'OFFLINE' =
+        olt.status === 'OFFLINE' ? 'OFFLINE' : 'ONLINE';
+      const nextStatus = evaluateOltReachabilityStatus(
+        olt.id,
+        currentOltStatus,
+        false
+      );
+      if (nextStatus === 'OFFLINE') {
+        const cascaded = cascadeOfflineOltsToOnusAndPorts({
+          ...latestState,
+          olts: latestState.olts.map((o) =>
+            o.id === olt.id ? { ...o, status: 'OFFLINE' as const } : o
+          ),
+        });
+        if (olt.status !== 'OFFLINE' || cascaded.mutated) {
+          await saveDatabaseState(cascaded.state);
+        }
+        res.json({
+          ok: false,
+          reachable: false,
+          oltStatus: 'OFFLINE',
+          state: sanitizeStateForClient(cascaded.state, authUser?.role),
+        });
+      } else {
+        // Transient single glitch — keep current state untouched without triggering offline flash!
+        res.json({
+          ok: true,
+          skipped: true,
+          reachable: false,
+          oltStatus: currentOltStatus,
+        });
       }
-      res.json({
-        ok: false,
-        reachable: false,
-        oltStatus: 'OFFLINE',
-        state: sanitizeStateForClient(cascaded.state, authUser?.role),
-      });
       return;
     }
 
@@ -5062,32 +5174,46 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
       password: olt.olt_password,
       enablePassword: olt.enable_password,
       commands: cmds,
-      timeoutMs: 16000,
+      timeoutMs: 24000,
     });
 
     if (!telnetRes.reachable || !telnetRes.output.trim()) {
       const latestState = await loadDatabaseState();
-      const nextStatus: 'ONLINE' | 'OFFLINE' = telnetRes.reachable
-        ? 'ONLINE'
-        : 'OFFLINE';
-      const cascaded = cascadeOfflineOltsToOnusAndPorts({
-        ...latestState,
-        olts: latestState.olts.map((o) =>
-          o.id === olt.id ? { ...o, status: nextStatus } : o
-        ),
-      });
-      if (olt.status !== nextStatus || cascaded.mutated) {
-        await saveDatabaseState(cascaded.state);
+      const currentOltStatus: 'ONLINE' | 'OFFLINE' =
+        olt.status === 'OFFLINE' ? 'OFFLINE' : 'ONLINE';
+      const nextStatus = evaluateOltReachabilityStatus(
+        olt.id,
+        currentOltStatus,
+        telnetRes.reachable
+      );
+      if (nextStatus === 'OFFLINE') {
+        const cascaded = cascadeOfflineOltsToOnusAndPorts({
+          ...latestState,
+          olts: latestState.olts.map((o) =>
+            o.id === olt.id ? { ...o, status: 'OFFLINE' as const } : o
+          ),
+        });
+        if (olt.status !== 'OFFLINE' || cascaded.mutated) {
+          await saveDatabaseState(cascaded.state);
+        }
+        res.json({
+          ok: false,
+          reachable: false,
+          oltStatus: 'OFFLINE',
+          state: sanitizeStateForClient(cascaded.state, authUser?.role),
+        });
+      } else {
+        res.json({
+          ok: true,
+          skipped: true,
+          reachable: telnetRes.reachable,
+          oltStatus: currentOltStatus,
+        });
       }
-      res.json({
-        ok: false,
-        reachable: telnetRes.reachable,
-        oltStatus: nextStatus,
-        state: sanitizeStateForClient(cascaded.state, authUser?.role),
-      });
       return;
     }
 
+    markOltReachable(olt.id);
     let rawOut = telnetRes.output;
     let parsedStates = parseZteOnuStateOutput(rawOut);
 
@@ -5136,6 +5262,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
     const multiDetailsMap = parseZteMultiOnuDetailInfo(rawOut);
     const parsedUncfg = parseZteUncfgOutput(rawOut);
     const powerRxMap = parseZtePonPowerRxTable(rawOut);
+    const multiAttenMap = parseZteMultiOpticalAttenuation(rawOut);
     const wanIpMap = parseZteMultiWanIpOutput(rawOut);
     const nowStr = formatJakartaDateTimeFull(Date.now());
 
@@ -5170,6 +5297,7 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
         const cfgOnu = cfgByCoord.get(coordKey);
         const biOnu = baseinfoMap.get(coordKey);
         const multiDet = multiDetailsMap.get(key);
+        const multiAtten = multiAttenMap.get(key);
         const wanInfo = wanIpMap.get(key);
         const isFocused = focusedOnu && u.id === focusedOnu.id;
 
@@ -5208,7 +5336,18 @@ app.post('/api/olts/:id/poll-realtime', async (req, res) => {
           }
         }
         if (powerRxMap.has(key)) {
-          nextOnuRx = powerRxMap.get(key) ?? null;
+          const parsedRx = powerRxMap.get(key);
+          // Only overwrite with a real numeric reading when working; never wipe valid working signal on transient N/A
+          if (parsedRx !== null && parsedRx !== undefined) {
+            nextOnuRx = parsedRx;
+          } else if (nextPhase !== 'working') {
+            nextOnuRx = null;
+          }
+        }
+        if (multiAtten) {
+          if (multiAtten.onuRxDbm !== null) nextOnuRx = multiAtten.onuRxDbm;
+          if (multiAtten.oltRxDbm !== null) nextOltRx = multiAtten.oltRxDbm;
+          if (multiAtten.onuTxDbm !== null) nextOnuTx = multiAtten.onuTxDbm;
         }
         if (isFocused && focusedAtten) {
           if (focusedAtten.onuRxDbm !== null) nextOnuRx = focusedAtten.onuRxDbm;
@@ -7438,13 +7577,22 @@ app.post(
         telnetError = telnetRes.error;
 
         if (!telnetRes.reachable) {
-          const cascaded = cascadeOfflineOltsToOnusAndPorts({
-            ...state,
-            olts: state.olts.map((o) =>
-              o.id === olt.id ? { ...o, status: 'OFFLINE' as const } : o
-            ),
-          });
-          await saveDatabaseState(cascaded.state);
+          const evalStatus = evaluateOltReachabilityStatus(
+            olt.id,
+            olt.status === 'OFFLINE' ? 'OFFLINE' : 'ONLINE',
+            false
+          );
+          let nextState = state;
+          if (evalStatus === 'OFFLINE') {
+            const cascaded = cascadeOfflineOltsToOnusAndPorts({
+              ...state,
+              olts: state.olts.map((o) =>
+                o.id === olt.id ? { ...o, status: 'OFFLINE' as const } : o
+              ),
+            });
+            await saveDatabaseState(cascaded.state);
+            nextState = cascaded.state;
+          }
           res.json({
             ok: false,
             telnetReachable: false,
@@ -7453,11 +7601,12 @@ app.post(
             rawOutput,
             error:
               telnetError ||
-              `Gagal terhubung ke OLT ${olt.ip_address}:${olt.telnet_port} via Telnet (OLT Offline)`,
-            state: sanitizeStateForClient(cascaded.state, authUser?.role),
+              `Gagal terhubung ke OLT ${olt.ip_address}:${olt.telnet_port} via Telnet`,
+            state: sanitizeStateForClient(nextState, authUser?.role),
           });
           return;
         }
+        markOltReachable(olt.id);
       }
 
     const discovered = parseZteUncfgOutput(rawOutput);

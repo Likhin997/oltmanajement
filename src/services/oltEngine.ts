@@ -633,26 +633,41 @@ export function parseZteMultiWanIpOutput(
 /**
  * 2e. Parser Tabel Redaman Optik per Port PON:
  * `show pon power onu-rx gpon-olt_1/3/2` atau `show pon power olt-rx gpon-olt_1/3/2`
+ * Mendukung berbagai format firmware ZTE C300/C320/C600:
+ *   - `gpon-onu_1/3/1:1   -19.456(dbm)`
+ *   - `gpon-onu_1/3/1:1   -19.456 dBm`
+ *   - `gpon-onu_1/3/1:1   -19.456`
+ *   - `1/3/1:1            -19.456(dbm)`
  */
 export function parseZtePonPowerRxTable(
   rawOutput: string
 ): Map<string, number | null> {
   const map = new Map<string, number | null>();
-  const cleaned = rawOutput.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const cleaned = cleanZteCliText(rawOutput);
   const lines = cleaned.split(/[\r\n]+/);
+  // Match either `gpon-onu_1/3/1:1` or bare `1/3/1:1` followed by dBm value or N/A / no signal
   const rowRegex =
-    /^\s*(gpon-onu_\d+\/\d+\/\d+:\d+)\s+([+-]?\d+(?:\.\d+)?(?=\s*\(dbm\))|N\/A|no\s+signal)/i;
+    /(?:^|\s)((?:gpon-onu_)?\d+\/\d+\/\d+:\d+)\s+([+-]?\d+(?:\.\d+)?(?:\s*\(?\s*dbm\s*\)?)?|N\/A|no\s+signal|--)/i;
 
   for (const line of lines) {
     const m = line.match(rowRegex);
     if (!m) continue;
-    const key = m[1].trim().toLowerCase();
+    const rawIf = m[1].trim().toLowerCase();
+    const key = rawIf.startsWith('gpon-onu_') ? rawIf : `gpon-onu_${rawIf}`;
     const valStr = m[2].trim().toLowerCase();
-    if (valStr === 'n/a' || valStr.includes('no signal')) {
-      map.set(key, null);
+    if (valStr === 'n/a' || valStr === '--' || valStr.includes('no signal')) {
+      // Do not overwrite a valid numeric reading already parsed for this ONU
+      if (!map.has(key)) {
+        map.set(key, null);
+      }
     } else {
-      const num = parseFloat(valStr);
-      map.set(key, isNaN(num) ? null : num);
+      const numMatch = valStr.match(/[+-]?\d+(?:\.\d+)?/);
+      if (!numMatch) continue;
+      const num = parseFloat(numMatch[0]);
+      // Sanity check optical power range (-50 dBm to +15 dBm) so unrelated numeric columns are ignored
+      if (!isNaN(num) && num >= -50 && num <= 15) {
+        map.set(key, num);
+      }
     }
   }
   return map;
@@ -671,31 +686,58 @@ export function parseZteOpticalAttenuation(rawOutput: string): OpticalPowerParse
     downAttenuationDb: null,
   };
 
+  const cleaned = cleanZteCliText(rawOutput);
+
   const upRegex =
-    /up\s+Rx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A|no\s+signal)\s*(?:\(dbm\))?\s+Tx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*(?:\(dbm\))?\s+([+-]?\d+(?:\.\d+)?|N\/A)/i;
+    /up\s+Rx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A|no\s+signal)\s*(?:\(?\s*dbm\s*\)?)?\s+Tx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*(?:\(?\s*dbm\s*\)?)?\s+([+-]?\d+(?:\.\d+)?|N\/A)/i;
 
   const downRegex =
-    /down\s+Tx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*(?:\(dbm\))?\s+Rx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A|no\s+signal)\s*(?:\(dbm\))?\s+([+-]?\d+(?:\.\d+)?|N\/A)/i;
+    /down\s+Tx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A)\s*(?:\(?\s*dbm\s*\)?)?\s+Rx\s*:\s*([+-]?\d+(?:\.\d+)?|N\/A|no\s+signal)\s*(?:\(?\s*dbm\s*\)?)?\s+([+-]?\d+(?:\.\d+)?|N\/A)/i;
 
-  const upMatch = rawOutput.match(upRegex);
+  const upMatch = cleaned.match(upRegex);
   if (upMatch) {
     const val = upMatch[1].trim().toLowerCase();
     result.oltRxDbm =
       val !== 'n/a' && !val.includes('no signal') ? parseFloat(upMatch[1]) : null;
-    result.onuTxDbm = upMatch[2] !== 'N/A' ? parseFloat(upMatch[2]) : null;
-    result.upAttenuationDb = upMatch[3] !== 'N/A' ? parseFloat(upMatch[3]) : null;
+    result.onuTxDbm = upMatch[2].toUpperCase() !== 'N/A' ? parseFloat(upMatch[2]) : null;
+    result.upAttenuationDb = upMatch[3].toUpperCase() !== 'N/A' ? parseFloat(upMatch[3]) : null;
   }
 
-  const downMatch = rawOutput.match(downRegex);
+  const downMatch = cleaned.match(downRegex);
   if (downMatch) {
-    result.oltTxDbm = downMatch[1] !== 'N/A' ? parseFloat(downMatch[1]) : null;
+    result.oltTxDbm = downMatch[1].toUpperCase() !== 'N/A' ? parseFloat(downMatch[1]) : null;
     const val = downMatch[2].trim().toLowerCase();
     result.onuRxDbm =
       val !== 'n/a' && !val.includes('no signal') ? parseFloat(downMatch[2]) : null;
-    result.downAttenuationDb = downMatch[3] !== 'N/A' ? parseFloat(downMatch[3]) : null;
+    result.downAttenuationDb = downMatch[3].toUpperCase() !== 'N/A' ? parseFloat(downMatch[3]) : null;
   }
 
   return result;
+}
+
+/**
+ * 3a. Batch Parser untuk banyak perintah `show pon power attenuation gpon-onu_1/x/y:z` sekaligus
+ */
+export function parseZteMultiOpticalAttenuation(
+  rawOutput: string
+): Map<string, OpticalPowerParsed> {
+  const map = new Map<string, OpticalPowerParsed>();
+  const cleaned = cleanZteCliText(rawOutput);
+  const blockRegex =
+    /show\s+pon\s+power\s+attenuation\s+(gpon-onu_\d+\/\d+\/\d+:\d+)([\s\S]*?)(?=show\s+pon\s+power\s+|show\s+gpon\s+|show\s+interface\s+|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = blockRegex.exec(cleaned)) !== null) {
+    const key = m[1].trim().toLowerCase();
+    const parsed = parseZteOpticalAttenuation(m[2]);
+    if (
+      parsed.onuRxDbm !== null ||
+      parsed.oltRxDbm !== null ||
+      parsed.onuTxDbm !== null
+    ) {
+      map.set(key, parsed);
+    }
+  }
+  return map;
 }
 
 export interface InterfaceTrafficParsed {
